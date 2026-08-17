@@ -11,6 +11,7 @@
     "description": "Send email from bb threads via AgentMail; replies are routed back to the thread that sent them.",
     "branding": { "icon": "Mail" },
     "server": "./server.js",
+    "app": "./app.tsx",
     "skills": ["skills"]
   }
 }

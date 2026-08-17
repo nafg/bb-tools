@@ -14,6 +14,7 @@ trait BbApi extends js.Object:
   val background: BbBackgroundArea  = js.native
   val cli: BbCliArea                = js.native
   val status: BbStatusArea          = js.native
+  val ui: BbUiArea                  = js.native
   val sdk: BbSdk                    = js.native
 
 @js.native
@@ -57,6 +58,12 @@ trait BbCliArea extends js.Object:
 @js.native
 trait BbStatusArea extends js.Object:
   def needsConfiguration(message: String): Unit = js.native
+
+@js.native
+trait BbUiArea extends js.Object:
+  /** Blocks until the app submits or cancels the plugin-owned composer form. */
+  def requestInput(request: js.Any): js.Promise[js.Dynamic]                  = js.native
+  def requestInput(request: js.Any, options: js.Any): js.Promise[js.Dynamic] = js.native
 
 @js.native
 trait BbSdk extends js.Object:

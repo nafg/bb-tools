@@ -52,6 +52,11 @@ def plugin(bb: BbApi): js.Promise[Unit] =
         "label"   -> "Inbox address (e.g. you@agentmail.to)",
         "default" -> ""
       ),
+      "reviewBeforeSend" -> js.Dynamic.literal(
+        "type"    -> "boolean",
+        "label"   -> "Review outgoing email in the thread before it is sent",
+        "default" -> true
+      ),
       "pollMinutes" -> js.Dynamic.literal(
         "type"    -> "select",
         "label"   -> "Poll interval in minutes (reload plugin after changing)",
@@ -99,6 +104,49 @@ private object Mapping:
           |DO UPDATE SET last_message_id = excluded.last_message_id""".stripMargin
       )
       .run(agentmailThreadId, bbThreadId, lastMessageId, subject, counterparty)
+
+private object Review:
+  enum Outcome:
+    case Skipped
+    case Approved(value: js.Dynamic)
+    case Cancelled(reason: String)
+
+  /** Replaces the thread's composer with the plugin's review form and waits for
+    * the user; Skipped when review is disabled or there is no invoking thread.
+    */
+  def request(
+      bb: BbApi,
+      settings: BbSettingsHandle,
+      ctx: js.Dynamic,
+      title: String,
+      payload: js.Dynamic
+  )(using ExecutionContext): Future[Outcome] =
+    settings.get().toFuture.flatMap { s =>
+      val enabled  = s.reviewBeforeSend.asInstanceOf[js.UndefOr[Boolean]].getOrElse(true)
+      val bbThread = ctx.threadId.asInstanceOf[js.UndefOr[String]]
+      bbThread.toOption.filter(_ => enabled) match
+        case None => Future.successful(Outcome.Skipped)
+        case Some(tid) =>
+          val request = js.Dynamic.literal(
+            "threadId"   -> tid,
+            "rendererId" -> "email-review",
+            "title"      -> title,
+            "payload"    -> payload
+          )
+          val options = js.Dynamic.literal()
+          ctx.signal.asInstanceOf[js.UndefOr[js.Any]].foreach(sig => options.updateDynamic("signal")(sig))
+          bb.ui.requestInput(request, options).toFuture.map { result =>
+            str(result.outcome) match
+              case "submitted" => Outcome.Approved(result.value.asInstanceOf[js.Dynamic])
+              case _           => Outcome.Cancelled(str(result.reason))
+          }
+    }
+
+  def cancelledMessage(reason: String): String =
+    reason match
+      case "user"    => "the user dismissed the review form without sending"
+      case "timeout" => "the review form timed out before the user acted"
+      case other     => s"the review was cancelled ($other)"
 
 object Cli:
   private def ok(stdout: String): js.Dynamic =
@@ -168,11 +216,14 @@ object Cli:
       }
     }
 
-  private def outboundPayload(flags: Map[String, List[String]], attachments: js.Array[js.Any]): js.Dynamic =
-    val payload = js.Dynamic.literal("text" -> flags.getOrElse("body", Nil).mkString("\n"))
-    flags.get("html").foreach(h => payload.updateDynamic("html")(h.mkString("\n")))
+  private def outboundPayload(body: String, html: Option[String], attachments: js.Array[js.Any]): js.Dynamic =
+    val payload = js.Dynamic.literal("text" -> body)
+    html.foreach(h => payload.updateDynamic("html")(h))
     if attachments.nonEmpty then payload.updateDynamic("attachments")(attachments)
     payload
+
+  private def strings(value: js.Dynamic, fallback: List[String]): List[String] =
+    value.asInstanceOf[js.UndefOr[js.Array[String]]].fold(fallback)(_.toList)
 
   def register(bb: BbApi, settings: BbSettingsHandle, db: SqliteDb): Unit =
     bb.cli.register(
@@ -247,26 +298,59 @@ object Cli:
     if to.isEmpty then Future.successful(err("--to is required"))
     else if !flags.contains("body") then Future.successful(err("--body is required"))
     else
-      for
-        client      <- clientFromSettings(settings)
-        hostId      <- invokingHostId(bb, ctx)
-        attachments <- readAttachments(bb, hostId, flags.getOrElse("attach", Nil))
-        payload = outboundPayload(flags, attachments)
-        _       = payload.updateDynamic("to")(to.toJSArray)
-        _       = flags.get("cc").foreach(cc => payload.updateDynamic("cc")(cc.toJSArray))
-        _       = flags.get("subject").foreach(s => payload.updateDynamic("subject")(s.mkString(" ")))
-        sent <- client.sendMessage(payload)
-      yield
-        val threadId  = sent.thread_id.asInstanceOf[String]
-        val messageId = sent.message_id.asInstanceOf[String]
-        val bbThread  = ctx.threadId.asInstanceOf[js.UndefOr[String]]
-        bbThread.foreach { tid =>
-          Mapping.record(db, threadId, tid, messageId, flags.getOrElse("subject", Nil).mkString(" "), to.head)
-        }
-        val note =
-          if bbThread.isDefined then "Replies will be delivered back to this thread."
-          else "Not invoked from a bb thread: replies will spawn a new thread."
-        ok(s"Sent. AgentMail thread: $threadId, message: $messageId. $note")
+      val cc      = flags.getOrElse("cc", Nil)
+      val subject = flags.getOrElse("subject", Nil).mkString(" ")
+      val body    = flags.getOrElse("body", Nil).mkString("\n")
+      val html    = flags.get("html").map(_.mkString("\n"))
+      val attach  = flags.getOrElse("attach", Nil)
+      val reviewPayload = js.Dynamic.literal(
+        "kind"        -> "send",
+        "to"          -> to.toJSArray,
+        "cc"          -> cc.toJSArray,
+        "subject"     -> subject,
+        "body"        -> body,
+        "hasHtml"     -> html.isDefined,
+        "attachments" -> attach.toJSArray
+      )
+      Review.request(bb, settings, ctx, "Review outgoing email", reviewPayload).flatMap {
+        case Review.Outcome.Cancelled(reason) =>
+          Future.successful(err(s"Email not sent: ${Review.cancelledMessage(reason)}."))
+        case outcome =>
+          val (finalTo, finalCc, finalSubject, finalBody) = outcome match
+            case Review.Outcome.Approved(value) =>
+              (strings(value.to, to), strings(value.cc, cc), str(value.subject), str(value.body))
+            case _ => (to, cc, subject, body)
+          val edited = (finalTo, finalCc, finalSubject, finalBody) != (to, cc, subject, body)
+          if finalTo.isEmpty then Future.successful(err("Email not sent: the reviewed draft has no recipients"))
+          else
+            // The HTML variant is not editable in the review form, so an
+            // edited plain-text body invalidates it.
+            val finalHtml = if finalBody == body then html else None
+            for
+              client      <- clientFromSettings(settings)
+              hostId      <- invokingHostId(bb, ctx)
+              attachments <- readAttachments(bb, hostId, attach)
+              payload = outboundPayload(finalBody, finalHtml, attachments)
+              _       = payload.updateDynamic("to")(finalTo.toJSArray)
+              _       = if finalCc.nonEmpty then payload.updateDynamic("cc")(finalCc.toJSArray)
+              _       = if finalSubject.nonEmpty then payload.updateDynamic("subject")(finalSubject)
+              sent <- client.sendMessage(payload)
+            yield
+              val threadId  = sent.thread_id.asInstanceOf[String]
+              val messageId = sent.message_id.asInstanceOf[String]
+              val bbThread  = ctx.threadId.asInstanceOf[js.UndefOr[String]]
+              bbThread.foreach { tid =>
+                Mapping.record(db, threadId, tid, messageId, finalSubject, finalTo.head)
+              }
+              val note =
+                if bbThread.isDefined then "Replies will be delivered back to this thread."
+                else "Not invoked from a bb thread: replies will spawn a new thread."
+              val editNote =
+                if edited then
+                  s"\nThe user edited the draft before sending; final version:\nTo: ${finalTo.mkString(", ")}\nSubject: $finalSubject\n\n$finalBody"
+                else ""
+              ok(s"Sent. AgentMail thread: $threadId, message: $messageId. $note$editNote")
+      }
 
   private def reply(
       bb: BbApi,
@@ -286,13 +370,38 @@ object Cli:
             val lastMessageId = str(mapping.last_message_id)
             if lastMessageId.isEmpty then Future.successful(err(s"no message to reply to in thread $threadId"))
             else
-              for
-                client      <- clientFromSettings(settings)
-                hostId      <- invokingHostId(bb, ctx)
-                attachments <- readAttachments(bb, hostId, flags.getOrElse("attach", Nil))
-                payload = outboundPayload(flags, attachments)
-                sent <- client.replyToMessage(lastMessageId, payload)
-              yield ok(s"Replied. message: ${sent.message_id.asInstanceOf[String]}")
+              val body   = flags.getOrElse("body", Nil).mkString("\n")
+              val html   = flags.get("html").map(_.mkString("\n"))
+              val attach = flags.getOrElse("attach", Nil)
+              val reviewPayload = js.Dynamic.literal(
+                "kind"        -> "reply",
+                "to"          -> js.Array(str(mapping.counterparty)),
+                "subject"     -> str(mapping.subject),
+                "body"        -> body,
+                "hasHtml"     -> html.isDefined,
+                "attachments" -> attach.toJSArray
+              )
+              Review.request(bb, settings, ctx, "Review outgoing email reply", reviewPayload).flatMap {
+                case Review.Outcome.Cancelled(reason) =>
+                  Future.successful(err(s"Reply not sent: ${Review.cancelledMessage(reason)}."))
+                case outcome =>
+                  val finalBody = outcome match
+                    case Review.Outcome.Approved(value) => str(value.body)
+                    case _                              => body
+                  val finalHtml = if finalBody == body then html else None
+                  for
+                    client      <- clientFromSettings(settings)
+                    hostId      <- invokingHostId(bb, ctx)
+                    attachments <- readAttachments(bb, hostId, attach)
+                    payload = outboundPayload(finalBody, finalHtml, attachments)
+                    sent <- client.replyToMessage(lastMessageId, payload)
+                  yield
+                    val editNote =
+                      if finalBody != body then
+                        s"\nThe user edited the draft before sending; final version:\n$finalBody"
+                      else ""
+                    ok(s"Replied. message: ${sent.message_id.asInstanceOf[String]}$editNote")
+              }
 
   private def threads(db: SqliteDb, argv: List[String], ctx: js.Dynamic): js.Dynamic =
     val (flags, _) = parseArgs(argv)
