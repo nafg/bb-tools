@@ -11,6 +11,10 @@ when a reply arrives (polled every few minutes) it is delivered back into that
 bb thread as a new message. You do not need to poll for replies — they show up
 on their own.
 
+The inbox is the AI assistant's address, not the user's. Write as the user's
+assistant: never sign with the user's name, never imply the user personally
+wrote the email, and identify yourself as their assistant when signing off.
+
 ## Sending
 
 ```
