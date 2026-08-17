@@ -3,14 +3,6 @@ $version: 1.0.0-M10
 jvm:
   name: graalvm-community:25.0.1
 projects:
-  bb-window-ui:
-    extends: template-common
-    folder: ./linux-window/bb-window-ui
-    platform:
-      name: native
-      mainClass: bbwindow.Main
-      nativeGc: immix
-      nativeVersion: 0.5.12
   bb-plugin-facades:
     extends:
     - template-common
