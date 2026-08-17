@@ -1,0 +1,16 @@
+{
+  "name": "bb-plugin-agentmail",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "bbPluginSdk": "^0.4.1" },
+  "scripts": {
+    "build": "bleep --directory .. link agentmail && cp ../.bleep/builds/normal/.bloop/agentmail/link-output/debug/js/main.js server.js"
+  },
+  "bb": {
+    "name": "AgentMail",
+    "description": "Send email from bb threads via AgentMail; replies are routed back to the thread that sent them.",
+    "branding": { "icon": "Mail" },
+    "server": "./server.js",
+    "skills": ["skills"]
+  }
+}

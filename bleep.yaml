@@ -1,0 +1,38 @@
+$schema: https://raw.githubusercontent.com/oyvindberg/bleep/master/schema.json
+$version: 1.0.0-M10
+jvm:
+  name: graalvm-community:25.0.1
+projects:
+  bb-window-ui:
+    extends: template-common
+    folder: ./linux-window/bb-window-ui
+    platform:
+      name: native
+      mainClass: bbwindow.Main
+      nativeGc: immix
+      nativeVersion: 0.5.12
+  bb-plugin-facades:
+    extends:
+    - template-common
+    - template-js
+  agentmail:
+    dependsOn: bb-plugin-facades
+    extends:
+    - template-common
+    - template-js
+    folder: ./bb-plugin-agentmail/agentmail
+templates:
+  template-common:
+    scala:
+      options: -encoding utf8 -feature -unchecked
+      strict: true
+      version: 3.8.3
+    source-layout: cross-pure
+  template-js:
+    platform:
+      name: js
+      jsVersion: 1.22.0
+      jsKind: esmodule
+      jsEmitSourceMaps: false
+      jsJsdom: false
+      jsNodeVersion: 24.4.1
