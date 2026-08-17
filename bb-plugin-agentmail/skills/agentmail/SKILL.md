@@ -19,36 +19,31 @@ their assistant and let them adjust it in review.
 
 ## Sending
 
-```
-bb agentmail send --to alice@example.com --subject "Project proposal" --body "Hi Alice, ..." \
-  [--to bob@example.com] [--cc carol@example.com] [--html "<p>...</p>"] [--attach /abs/path/file.pdf]...
-```
+Use the `agentmail_send` tool: `to` (required list of addresses) and `body`
+(required plain text), plus optional `cc`, `subject`, `html` (an HTML
+alternative body), and `attachments` (absolute paths on the machine this
+thread's environment runs on).
 
-- `--body` is the plain-text body (required). `--html` optionally adds an HTML body.
-- `--attach` may be repeated; paths are read from the machine this thread's
-  environment runs on and must be absolute.
-- **The command blocks while the user reviews the draft** in a form that
+- The tool call waits while the user reviews the draft in a form that
   replaces the thread's composer (unless review is disabled in the plugin
-  settings). Run it with a generous tool timeout — 10 minutes — so the user
-  has time to act. If it reports the review was cancelled or timed out,
-  nothing was sent; tell the user and do not resend unless they ask.
-- When the user edited the draft before approving, the output includes the
+  settings). It is a native tool call, not a shell command — there is no
+  timeout to configure; it simply waits, up to bb's one-hour cap on the
+  review form.
+- The email is NOT sent until the tool result says so. Never tell the user an
+  email was sent before then. If the result says the review was cancelled or
+  timed out, nothing was sent; tell the user and do not retry unless they ask.
+- When the user edited the draft before approving, the result includes the
   final version that was actually sent — treat that, not your draft, as what
   the recipient received.
-- The output includes the AgentMail thread id — mention it when telling the user
-  the email was sent, so follow-ups are easy to correlate.
+- The result includes the AgentMail thread id — mention it when telling the
+  user the email was sent, so follow-ups are easy to correlate.
 
 ## Replying within an existing email thread
 
-When an email reply is delivered to this thread it names its AgentMail thread id.
-To respond by email:
-
-```
-bb agentmail reply --thread <AGENTMAIL_THREAD_ID> --body "..." [--attach /abs/path]...
-```
-
-Replies pause for user review the same way `send` does — use the same generous
-tool timeout.
+When an email reply is delivered to this thread it names its AgentMail thread
+id. To respond by email, use the `agentmail_reply` tool: `thread` (the
+AgentMail thread id) and `body`, plus optional `html` and `attachments`.
+Replies wait for user review exactly the way `agentmail_send` does.
 
 ## Inspecting
 
@@ -60,3 +55,17 @@ bb agentmail attachment --message MESSAGE_ID --attachment ATTACHMENT_ID --out /a
 
 Delivered reply messages list their attachments with the exact `attachment`
 command to download each one.
+
+## If the tools are missing
+
+The `agentmail_send` / `agentmail_reply` tools appear in sessions started
+after the plugin was installed. If this session predates that, the CLI
+equivalents behave identically but run under your shell tool:
+
+```
+bb agentmail send --to a@b.com [--to ...] [--cc ...] --subject S --body TEXT [--html HTML] [--attach /abs/path]...
+bb agentmail reply --thread AGENTMAIL_THREAD_ID --body TEXT [--html HTML] [--attach /abs/path]...
+```
+
+Run them with a generous tool timeout (10 minutes) since they block on the
+user's review; if the command times out, nothing was sent.

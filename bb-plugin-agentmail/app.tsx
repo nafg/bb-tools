@@ -1,7 +1,8 @@
-// Frontend entry: the outgoing-email review form. While `bb agentmail send`
-// or `reply` waits in bb.ui.requestInput, this form replaces the thread's
-// composer; submitting returns the (possibly edited) draft to the waiting CLI
-// handler, which performs the actual send.
+// Frontend entry: the outgoing-email review form. While the agentmail_send /
+// agentmail_reply tool (or the `bb agentmail send`/`reply` CLI) waits in
+// bb.ui.requestInput, this form replaces the thread's composer; submitting
+// returns the (possibly edited) draft to the waiting handler, which performs
+// the actual send.
 import { useState } from "react";
 import { definePluginApp } from "@get-bb/plugin-sdk/app";
 

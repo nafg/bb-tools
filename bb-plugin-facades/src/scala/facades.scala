@@ -13,6 +13,7 @@ trait BbApi extends js.Object:
   val storage: BbStorageArea        = js.native
   val background: BbBackgroundArea  = js.native
   val cli: BbCliArea                = js.native
+  val agents: BbAgentsArea          = js.native
   val status: BbStatusArea          = js.native
   val ui: BbUiArea                  = js.native
   val sdk: BbSdk                    = js.native
@@ -54,6 +55,10 @@ trait BbBackgroundArea extends js.Object:
 @js.native
 trait BbCliArea extends js.Object:
   def register(registration: js.Any): Unit = js.native
+
+@js.native
+trait BbAgentsArea extends js.Object:
+  def registerTool(registration: js.Any): Unit = js.native
 
 @js.native
 trait BbStatusArea extends js.Object:

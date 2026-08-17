@@ -1,10 +1,11 @@
 # bb-plugin-agentmail
 
 A [bb](https://github.com/get-bb/bb) plugin that gives agent threads email via
-[AgentMail](https://agentmail.to): any thread can send email with
-`bb agentmail send`, the plugin records which bb thread owns which email
-thread, and when a reply arrives it is delivered back into that thread. Inbound
-email with no known thread spawns a new thread in the personal project.
+[AgentMail](https://agentmail.to): any thread can send email with the
+`agentmail_send` native tool (or `bb agentmail send`), the plugin records
+which bb thread owns which email thread, and when a reply arrives it is
+delivered back into that thread. Inbound email with no known thread spawns a
+new thread in the personal project.
 
 Written in Scala.js: bb loads the linked ES module (`server.js`) directly as
 the plugin backend — no TypeScript shim. `facades.scala` declares the small
@@ -26,6 +27,15 @@ Plugins → AgentMail and reload the plugin. Mail arriving from configuration
 time onward is processed; older mail is ignored.
 
 After changing Scala sources: `npm run build && bb plugin reload agentmail`.
+
+## Sending and review
+
+Outgoing email pauses for the user to review, edit, and approve in a form that
+replaces the thread's composer (configurable in settings). Agents send with the
+native `agentmail_send` / `agentmail_reply` tools: a native tool call has no
+shell timeout, so it simply waits while the user reviews — up to bb's one-hour
+cap on plugin interactions — and reports the outcome (including the final
+edited text) inline in the agent's turn.
 
 ## Commands
 

@@ -18,6 +18,54 @@ private def toBase64(content: String, encoding: String): String =
 
 private def basename(path: String): String = path.split('/').last
 
+private def clientFromSettings(settings: BbSettingsHandle)(using ExecutionContext): Future[AgentMailClient] =
+  settings.get().toFuture.flatMap { s =>
+    val apiKey = str(s.apiKey)
+    val inbox  = str(s.inbox)
+    if apiKey.isEmpty || inbox.isEmpty then
+      Future.failed(AgentMailException("plugin not configured: set apiKey and inbox in the AgentMail plugin settings"))
+    else Future.successful(AgentMailClient(apiKey, inbox))
+  }
+
+/** The host the invoking thread's environment lives on; undefined = the server's own host. */
+private def invokingHostId(bb: BbApi, ctx: js.Dynamic)(using ExecutionContext): Future[js.UndefOr[String]] =
+  ctx.threadId.asInstanceOf[js.UndefOr[String]].fold(Future.successful(js.undefined: js.UndefOr[String])) { tid =>
+    bb.sdk.threads.get(js.Dynamic.literal("threadId" -> tid)).toFuture.flatMap { thread =>
+      val envId = thread.environmentId.asInstanceOf[String | Null]
+      if envId == null then Future.successful(js.undefined)
+      else
+        bb.sdk.environments
+          .get(js.Dynamic.literal("environmentId" -> envId))
+          .toFuture
+          .map(env => env.hostId.asInstanceOf[String]: js.UndefOr[String])
+    }
+  }
+
+private def readAttachments(bb: BbApi, hostId: js.UndefOr[String], paths: List[String])(using
+    ExecutionContext
+): Future[js.Array[js.Any]] =
+  paths.foldLeft(Future.successful(js.Array[js.Any]())) { (acc, path) =>
+    acc.flatMap { collected =>
+      val args = js.Dynamic.literal("path" -> path)
+      hostId.foreach(h => args.updateDynamic("hostId")(h))
+      bb.sdk.files.read(args).toFuture.map { file =>
+        val attachment = js.Dynamic.literal(
+          "filename" -> basename(path),
+          "content"  -> toBase64(file.content.asInstanceOf[String], str(file.contentEncoding))
+        )
+        file.mimeType.asInstanceOf[js.UndefOr[String]].foreach(m => attachment.updateDynamic("content_type")(m))
+        val _ = collected.push(attachment)
+        collected
+      }
+    }
+  }
+
+private def outboundPayload(body: String, html: Option[String], attachments: js.Array[js.Any]): js.Dynamic =
+  val payload = js.Dynamic.literal("text" -> body)
+  html.foreach(h => payload.updateDynamic("html")(h))
+  if attachments.nonEmpty then payload.updateDynamic("attachments")(attachments)
+  payload
+
 @JSExportTopLevel("default")
 def plugin(bb: BbApi): js.Promise[Unit] =
   val db = bb.storage.database()
@@ -67,6 +115,7 @@ def plugin(bb: BbApi): js.Promise[Unit] =
   )
 
   Cli.register(bb, settings, db)
+  Tools.register(bb, settings, db)
 
   settings.get().toFuture.map { s =>
     if str(s.apiKey).isEmpty || str(s.inbox).isEmpty then
@@ -106,13 +155,17 @@ private object Mapping:
       .run(agentmailThreadId, bbThreadId, lastMessageId, subject, counterparty)
 
 private object Review:
+  /** bb.ui.requestInput's hard maximum; a review left unattended this long is cancelled. */
+  private val TimeoutMs = 60 * 60 * 1000
+
   enum Outcome:
     case Skipped
     case Approved(value: js.Dynamic)
     case Cancelled(reason: String)
 
-  /** Replaces the thread's composer with the plugin's review form and waits for
-    * the user; Skipped when review is disabled or there is no invoking thread.
+  /** Replaces the thread's composer with the plugin's review form and waits
+    * for the user (up to [[TimeoutMs]]); Skipped when review is disabled or
+    * there is no invoking thread.
     */
   def request(
       bb: BbApi,
@@ -131,7 +184,8 @@ private object Review:
             "threadId"   -> tid,
             "rendererId" -> "email-review",
             "title"      -> title,
-            "payload"    -> payload
+            "payload"    -> payload,
+            "timeoutMs"  -> TimeoutMs
           )
           val options = js.Dynamic.literal()
           ctx.signal.asInstanceOf[js.UndefOr[js.Any]].foreach(sig => options.updateDynamic("signal")(sig))
@@ -145,8 +199,124 @@ private object Review:
   def cancelledMessage(reason: String): String =
     reason match
       case "user"    => "the user dismissed the review form without sending"
-      case "timeout" => "the review form timed out before the user acted"
+      case "timeout" => "the review form timed out after an hour without user action"
       case other     => s"the review was cancelled ($other)"
+
+/** The review-then-send flow shared by the native tools and the CLI. Left is
+  * a not-sent explanation; Right is a success report that includes the final
+  * text whenever the user edited the draft.
+  */
+private object Outbound:
+  private def strings(value: js.Dynamic, fallback: List[String]): List[String] =
+    value.asInstanceOf[js.UndefOr[js.Array[String]]].fold(fallback)(_.toList)
+
+  def send(
+      bb: BbApi,
+      settings: BbSettingsHandle,
+      db: SqliteDb,
+      to: List[String],
+      cc: List[String],
+      subject: String,
+      body: String,
+      html: Option[String],
+      attach: List[String],
+      ctx: js.Dynamic
+  )(using ExecutionContext): Future[Either[String, String]] =
+    val reviewPayload = js.Dynamic.literal(
+      "kind"        -> "send",
+      "to"          -> to.toJSArray,
+      "cc"          -> cc.toJSArray,
+      "subject"     -> subject,
+      "body"        -> body,
+      "hasHtml"     -> html.isDefined,
+      "attachments" -> attach.toJSArray
+    )
+    Review.request(bb, settings, ctx, "Review outgoing email", reviewPayload).flatMap {
+      case Review.Outcome.Cancelled(reason) =>
+        Future.successful(Left(s"Email not sent: ${Review.cancelledMessage(reason)}."))
+      case outcome =>
+        val (finalTo, finalCc, finalSubject, finalBody) = outcome match
+          case Review.Outcome.Approved(value) =>
+            (strings(value.to, to), strings(value.cc, cc), str(value.subject), str(value.body))
+          case _ => (to, cc, subject, body)
+        val edited = (finalTo, finalCc, finalSubject, finalBody) != (to, cc, subject, body)
+        if finalTo.isEmpty then Future.successful(Left("Email not sent: the reviewed draft has no recipients"))
+        else
+          // The HTML variant is not editable in the review form, so an
+          // edited plain-text body invalidates it.
+          val finalHtml = if finalBody == body then html else None
+          for
+            client      <- clientFromSettings(settings)
+            hostId      <- invokingHostId(bb, ctx)
+            attachments <- readAttachments(bb, hostId, attach)
+            payload = outboundPayload(finalBody, finalHtml, attachments)
+            _       = payload.updateDynamic("to")(finalTo.toJSArray)
+            _       = if finalCc.nonEmpty then payload.updateDynamic("cc")(finalCc.toJSArray)
+            _       = if finalSubject.nonEmpty then payload.updateDynamic("subject")(finalSubject)
+            sent <- client.sendMessage(payload)
+          yield
+            val threadId  = sent.thread_id.asInstanceOf[String]
+            val messageId = sent.message_id.asInstanceOf[String]
+            val bbThread  = ctx.threadId.asInstanceOf[js.UndefOr[String]]
+            bbThread.foreach { tid =>
+              Mapping.record(db, threadId, tid, messageId, finalSubject, finalTo.head)
+            }
+            val note =
+              if bbThread.isDefined then "Replies will be delivered back to this thread."
+              else "Not invoked from a bb thread: replies will spawn a new thread."
+            val editNote =
+              if edited then
+                s"\nThe user edited the draft before sending; final version:\nTo: ${finalTo.mkString(", ")}\nSubject: $finalSubject\n\n$finalBody"
+              else ""
+            Right(s"Sent. AgentMail thread: $threadId, message: $messageId. $note$editNote")
+    }
+
+  def reply(
+      bb: BbApi,
+      settings: BbSettingsHandle,
+      db: SqliteDb,
+      emailThreadId: String,
+      body: String,
+      html: Option[String],
+      attach: List[String],
+      ctx: js.Dynamic
+  )(using ExecutionContext): Future[Either[String, String]] =
+    Mapping.lookup(db, emailThreadId) match
+      case None =>
+        Future.successful(Left(s"unknown email thread: $emailThreadId (see `bb agentmail threads`)"))
+      case Some(mapping) =>
+        val lastMessageId = str(mapping.last_message_id)
+        if lastMessageId.isEmpty then Future.successful(Left(s"no message to reply to in thread $emailThreadId"))
+        else
+          val reviewPayload = js.Dynamic.literal(
+            "kind"        -> "reply",
+            "to"          -> js.Array(str(mapping.counterparty)),
+            "subject"     -> str(mapping.subject),
+            "body"        -> body,
+            "hasHtml"     -> html.isDefined,
+            "attachments" -> attach.toJSArray
+          )
+          Review.request(bb, settings, ctx, "Review outgoing email reply", reviewPayload).flatMap {
+            case Review.Outcome.Cancelled(reason) =>
+              Future.successful(Left(s"Reply not sent: ${Review.cancelledMessage(reason)}."))
+            case outcome =>
+              val finalBody = outcome match
+                case Review.Outcome.Approved(value) => str(value.body)
+                case _                              => body
+              val finalHtml = if finalBody == body then html else None
+              for
+                client      <- clientFromSettings(settings)
+                hostId      <- invokingHostId(bb, ctx)
+                attachments <- readAttachments(bb, hostId, attach)
+                payload = outboundPayload(finalBody, finalHtml, attachments)
+                sent <- client.replyToMessage(lastMessageId, payload)
+              yield
+                val editNote =
+                  if finalBody != body then
+                    s"\nThe user edited the draft before sending; final version:\n$finalBody"
+                  else ""
+                Right(s"Replied. message: ${sent.message_id.asInstanceOf[String]}$editNote")
+          }
 
 object Cli:
   private def ok(stdout: String): js.Dynamic =
@@ -173,57 +343,6 @@ object Cli:
         case value :: tail => loop(tail, flags, positional :+ value)
         case Nil           => (flags, positional)
     loop(argv, Map.empty, Nil)
-
-  private def clientFromSettings(settings: BbSettingsHandle)(using ExecutionContext): Future[AgentMailClient] =
-    settings.get().toFuture.flatMap { s =>
-      val apiKey = str(s.apiKey)
-      val inbox  = str(s.inbox)
-      if apiKey.isEmpty || inbox.isEmpty then
-        Future.failed(AgentMailException("plugin not configured: set apiKey and inbox in the AgentMail plugin settings"))
-      else Future.successful(AgentMailClient(apiKey, inbox))
-    }
-
-  /** The host the invoking thread's environment lives on; undefined = the server's own host. */
-  private def invokingHostId(bb: BbApi, ctx: js.Dynamic)(using ExecutionContext): Future[js.UndefOr[String]] =
-    ctx.threadId.asInstanceOf[js.UndefOr[String]].fold(Future.successful(js.undefined: js.UndefOr[String])) { tid =>
-      bb.sdk.threads.get(js.Dynamic.literal("threadId" -> tid)).toFuture.flatMap { thread =>
-        val envId = thread.environmentId.asInstanceOf[String | Null]
-        if envId == null then Future.successful(js.undefined)
-        else
-          bb.sdk.environments
-            .get(js.Dynamic.literal("environmentId" -> envId))
-            .toFuture
-            .map(env => env.hostId.asInstanceOf[String]: js.UndefOr[String])
-      }
-    }
-
-  private def readAttachments(bb: BbApi, hostId: js.UndefOr[String], paths: List[String])(using
-      ExecutionContext
-  ): Future[js.Array[js.Any]] =
-    paths.foldLeft(Future.successful(js.Array[js.Any]())) { (acc, path) =>
-      acc.flatMap { collected =>
-        val args = js.Dynamic.literal("path" -> path)
-        hostId.foreach(h => args.updateDynamic("hostId")(h))
-        bb.sdk.files.read(args).toFuture.map { file =>
-          val attachment = js.Dynamic.literal(
-            "filename" -> basename(path),
-            "content"  -> toBase64(file.content.asInstanceOf[String], str(file.contentEncoding))
-          )
-          file.mimeType.asInstanceOf[js.UndefOr[String]].foreach(m => attachment.updateDynamic("content_type")(m))
-          val _ = collected.push(attachment)
-          collected
-        }
-      }
-    }
-
-  private def outboundPayload(body: String, html: Option[String], attachments: js.Array[js.Any]): js.Dynamic =
-    val payload = js.Dynamic.literal("text" -> body)
-    html.foreach(h => payload.updateDynamic("html")(h))
-    if attachments.nonEmpty then payload.updateDynamic("attachments")(attachments)
-    payload
-
-  private def strings(value: js.Dynamic, fallback: List[String]): List[String] =
-    value.asInstanceOf[js.UndefOr[js.Array[String]]].fold(fallback)(_.toList)
 
   def register(bb: BbApi, settings: BbSettingsHandle, db: SqliteDb): Unit =
     bb.cli.register(
@@ -298,59 +417,20 @@ object Cli:
     if to.isEmpty then Future.successful(err("--to is required"))
     else if !flags.contains("body") then Future.successful(err("--body is required"))
     else
-      val cc      = flags.getOrElse("cc", Nil)
-      val subject = flags.getOrElse("subject", Nil).mkString(" ")
-      val body    = flags.getOrElse("body", Nil).mkString("\n")
-      val html    = flags.get("html").map(_.mkString("\n"))
-      val attach  = flags.getOrElse("attach", Nil)
-      val reviewPayload = js.Dynamic.literal(
-        "kind"        -> "send",
-        "to"          -> to.toJSArray,
-        "cc"          -> cc.toJSArray,
-        "subject"     -> subject,
-        "body"        -> body,
-        "hasHtml"     -> html.isDefined,
-        "attachments" -> attach.toJSArray
-      )
-      Review.request(bb, settings, ctx, "Review outgoing email", reviewPayload).flatMap {
-        case Review.Outcome.Cancelled(reason) =>
-          Future.successful(err(s"Email not sent: ${Review.cancelledMessage(reason)}."))
-        case outcome =>
-          val (finalTo, finalCc, finalSubject, finalBody) = outcome match
-            case Review.Outcome.Approved(value) =>
-              (strings(value.to, to), strings(value.cc, cc), str(value.subject), str(value.body))
-            case _ => (to, cc, subject, body)
-          val edited = (finalTo, finalCc, finalSubject, finalBody) != (to, cc, subject, body)
-          if finalTo.isEmpty then Future.successful(err("Email not sent: the reviewed draft has no recipients"))
-          else
-            // The HTML variant is not editable in the review form, so an
-            // edited plain-text body invalidates it.
-            val finalHtml = if finalBody == body then html else None
-            for
-              client      <- clientFromSettings(settings)
-              hostId      <- invokingHostId(bb, ctx)
-              attachments <- readAttachments(bb, hostId, attach)
-              payload = outboundPayload(finalBody, finalHtml, attachments)
-              _       = payload.updateDynamic("to")(finalTo.toJSArray)
-              _       = if finalCc.nonEmpty then payload.updateDynamic("cc")(finalCc.toJSArray)
-              _       = if finalSubject.nonEmpty then payload.updateDynamic("subject")(finalSubject)
-              sent <- client.sendMessage(payload)
-            yield
-              val threadId  = sent.thread_id.asInstanceOf[String]
-              val messageId = sent.message_id.asInstanceOf[String]
-              val bbThread  = ctx.threadId.asInstanceOf[js.UndefOr[String]]
-              bbThread.foreach { tid =>
-                Mapping.record(db, threadId, tid, messageId, finalSubject, finalTo.head)
-              }
-              val note =
-                if bbThread.isDefined then "Replies will be delivered back to this thread."
-                else "Not invoked from a bb thread: replies will spawn a new thread."
-              val editNote =
-                if edited then
-                  s"\nThe user edited the draft before sending; final version:\nTo: ${finalTo.mkString(", ")}\nSubject: $finalSubject\n\n$finalBody"
-                else ""
-              ok(s"Sent. AgentMail thread: $threadId, message: $messageId. $note$editNote")
-      }
+      Outbound
+        .send(
+          bb,
+          settings,
+          db,
+          to = to,
+          cc = flags.getOrElse("cc", Nil),
+          subject = flags.getOrElse("subject", Nil).mkString(" "),
+          body = flags.getOrElse("body", Nil).mkString("\n"),
+          html = flags.get("html").map(_.mkString("\n")),
+          attach = flags.getOrElse("attach", Nil),
+          ctx = ctx
+        )
+        .map(_.fold(err, ok))
 
   private def reply(
       bb: BbApi,
@@ -361,47 +441,21 @@ object Cli:
   ): Future[js.Dynamic] =
     val (flags, _) = parseArgs(argv)
     (flags.get("thread").flatMap(_.headOption), flags.contains("body")) match
-      case (None, _) => Future.successful(err("--thread is required (see `bb agentmail threads`)"))
+      case (None, _)  => Future.successful(err("--thread is required (see `bb agentmail threads`)"))
       case (_, false) => Future.successful(err("--body is required"))
       case (Some(threadId), _) =>
-        Mapping.lookup(db, threadId) match
-          case None => Future.successful(err(s"unknown email thread: $threadId (see `bb agentmail threads`)"))
-          case Some(mapping) =>
-            val lastMessageId = str(mapping.last_message_id)
-            if lastMessageId.isEmpty then Future.successful(err(s"no message to reply to in thread $threadId"))
-            else
-              val body   = flags.getOrElse("body", Nil).mkString("\n")
-              val html   = flags.get("html").map(_.mkString("\n"))
-              val attach = flags.getOrElse("attach", Nil)
-              val reviewPayload = js.Dynamic.literal(
-                "kind"        -> "reply",
-                "to"          -> js.Array(str(mapping.counterparty)),
-                "subject"     -> str(mapping.subject),
-                "body"        -> body,
-                "hasHtml"     -> html.isDefined,
-                "attachments" -> attach.toJSArray
-              )
-              Review.request(bb, settings, ctx, "Review outgoing email reply", reviewPayload).flatMap {
-                case Review.Outcome.Cancelled(reason) =>
-                  Future.successful(err(s"Reply not sent: ${Review.cancelledMessage(reason)}."))
-                case outcome =>
-                  val finalBody = outcome match
-                    case Review.Outcome.Approved(value) => str(value.body)
-                    case _                              => body
-                  val finalHtml = if finalBody == body then html else None
-                  for
-                    client      <- clientFromSettings(settings)
-                    hostId      <- invokingHostId(bb, ctx)
-                    attachments <- readAttachments(bb, hostId, attach)
-                    payload = outboundPayload(finalBody, finalHtml, attachments)
-                    sent <- client.replyToMessage(lastMessageId, payload)
-                  yield
-                    val editNote =
-                      if finalBody != body then
-                        s"\nThe user edited the draft before sending; final version:\n$finalBody"
-                      else ""
-                    ok(s"Replied. message: ${sent.message_id.asInstanceOf[String]}$editNote")
-              }
+        Outbound
+          .reply(
+            bb,
+            settings,
+            db,
+            threadId,
+            body = flags.getOrElse("body", Nil).mkString("\n"),
+            html = flags.get("html").map(_.mkString("\n")),
+            attach = flags.getOrElse("attach", Nil),
+            ctx = ctx
+          )
+          .map(_.fold(err, ok))
 
   private def threads(db: SqliteDb, argv: List[String], ctx: js.Dynamic): js.Dynamic =
     val (flags, _) = parseArgs(argv)
@@ -475,6 +529,148 @@ object Cli:
         yield ok(s"Wrote ${str(written.sizeBytes)} bytes to $out (${str(meta.filename)})")
       case _ => Future.successful(err("--message, --attachment, and --out are all required"))
 
+/** Native agent tools for the review-then-send flow. Unlike the CLI run under
+  * a shell tool, a native tool call has no timeout of its own, so it simply
+  * waits while the user reviews (bounded by the host's one-hour interaction
+  * cap) and reports the outcome inline in the agent's turn.
+  */
+object Tools:
+  private val AttachmentsDescription =
+    "Absolute paths of files to attach, on the machine this thread's environment runs on"
+
+  private def textError(message: String): js.Any =
+    js.Dynamic.literal(
+      "content" -> js.Array(js.Dynamic.literal("type" -> "text", "text" -> message)),
+      "isError" -> true
+    )
+
+  private def stringList(value: js.Dynamic): List[String] =
+    value.asInstanceOf[js.UndefOr[js.Array[String]]].fold(Nil)(_.toList)
+
+  private def optionalStr(value: js.Dynamic): Option[String] =
+    Some(str(value)).filter(_.nonEmpty)
+
+  private def stringSchema(description: String): js.Dynamic =
+    js.Dynamic.literal("type" -> "string", "description" -> description)
+
+  private def stringArraySchema(description: String): js.Dynamic =
+    js.Dynamic.literal(
+      "type"        -> "array",
+      "items"       -> js.Dynamic.literal("type" -> "string"),
+      "description" -> description
+    )
+
+  def register(bb: BbApi, settings: BbSettingsHandle, db: SqliteDb): Unit =
+    bb.agents.registerTool(
+      js.Dynamic.literal(
+        "name" -> "agentmail_send",
+        "description" ->
+          ("Send an email from this thread via AgentMail. The call waits while the user reviews " +
+            "and possibly edits the draft in the thread, then reports whether the email was sent " +
+            "and the final text as actually sent. Replies to the email are delivered back into this thread."),
+        "experimental_statusLabels" -> js.Dynamic.literal(
+          "pending"   -> "Waiting for the user to review the email",
+          "completed" -> "Email review finished"
+        ),
+        "parameters" -> js.Dynamic.literal(
+          "type" -> "object",
+          "properties" -> js.Dynamic.literal(
+            "to"          -> stringArraySchema("Recipient email addresses"),
+            "cc"          -> stringArraySchema("Cc email addresses"),
+            "subject"     -> stringSchema("Subject line"),
+            "body"        -> stringSchema("Plain-text body"),
+            "html"        -> stringSchema("Optional HTML alternative body"),
+            "attachments" -> stringArraySchema(AttachmentsDescription)
+          ),
+          "required"             -> js.Array("to", "body"),
+          "additionalProperties" -> false
+        ),
+        "execute" -> ((input: js.Dynamic, toolCtx: js.Dynamic) =>
+          executeSend(bb, settings, db, input, toolCtx).toJSPromise
+        )
+      )
+    )
+    bb.agents.registerTool(
+      js.Dynamic.literal(
+        "name" -> "agentmail_reply",
+        "description" ->
+          ("Reply within an existing AgentMail email thread owned by this bb thread. The call waits " +
+            "for the user's review the same way agentmail_send does."),
+        "experimental_statusLabels" -> js.Dynamic.literal(
+          "pending"   -> "Waiting for the user to review the email reply",
+          "completed" -> "Email review finished"
+        ),
+        "parameters" -> js.Dynamic.literal(
+          "type" -> "object",
+          "properties" -> js.Dynamic.literal(
+            "thread"      -> stringSchema("AgentMail thread id (from `bb agentmail threads` or a delivered reply)"),
+            "body"        -> stringSchema("Plain-text body"),
+            "html"        -> stringSchema("Optional HTML alternative body"),
+            "attachments" -> stringArraySchema(AttachmentsDescription)
+          ),
+          "required"             -> js.Array("thread", "body"),
+          "additionalProperties" -> false
+        ),
+        "execute" -> ((input: js.Dynamic, toolCtx: js.Dynamic) =>
+          executeReply(bb, settings, db, input, toolCtx).toJSPromise
+        )
+      )
+    )
+
+  private def executeSend(
+      bb: BbApi,
+      settings: BbSettingsHandle,
+      db: SqliteDb,
+      input: js.Dynamic,
+      toolCtx: js.Dynamic
+  ): Future[js.Any] =
+    val to   = stringList(input.to)
+    val body = str(input.body)
+    if to.isEmpty then Future.successful(textError("to must contain at least one recipient address"))
+    else if body.isEmpty then Future.successful(textError("body is required"))
+    else
+      Outbound
+        .send(
+          bb,
+          settings,
+          db,
+          to = to,
+          cc = stringList(input.cc),
+          subject = str(input.subject),
+          body = body,
+          html = optionalStr(input.html),
+          attach = stringList(input.attachments),
+          ctx = toolCtx
+        )
+        .map(_.fold(textError, message => message: js.Any))
+        .recover { case e => textError(e.getMessage) }
+
+  private def executeReply(
+      bb: BbApi,
+      settings: BbSettingsHandle,
+      db: SqliteDb,
+      input: js.Dynamic,
+      toolCtx: js.Dynamic
+  ): Future[js.Any] =
+    val emailThreadId = str(input.thread)
+    val body          = str(input.body)
+    if emailThreadId.isEmpty then Future.successful(textError("thread is required"))
+    else if body.isEmpty then Future.successful(textError("body is required"))
+    else
+      Outbound
+        .reply(
+          bb,
+          settings,
+          db,
+          emailThreadId,
+          body = body,
+          html = optionalStr(input.html),
+          attach = stringList(input.attachments),
+          ctx = toolCtx
+        )
+        .map(_.fold(textError, message => message: js.Any))
+        .recover { case e => textError(e.getMessage) }
+
 object Poller:
   private def metaGet(db: SqliteDb, key: String): Option[String] =
     db.prepare("SELECT value FROM meta WHERE key = ?").get(key).toOption.map(row => str(row.value))
@@ -515,7 +711,7 @@ object Poller:
        |
        |$body$attachments
        |
-       |To reply by email: bb agentmail reply --thread $agentmailThreadId --body "..."""".stripMargin
+       |To reply by email: call the agentmail_reply tool with thread $agentmailThreadId.""".stripMargin
 
   private def deliverToThread(bb: BbApi, bbThreadId: String, text: String)(using ExecutionContext): Future[Unit] =
     bb.sdk.threads.get(js.Dynamic.literal("threadId" -> bbThreadId)).toFuture.flatMap { thread =>
