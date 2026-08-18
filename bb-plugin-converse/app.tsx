@@ -64,31 +64,36 @@ export default definePluginApp((app) => {
       const unmountWidget = ctl.mountWidget();
       // Badge the routing target's sidebar row while a session is active
       // (feature-detected: older bb clients lack the setter).
-      let marked: string | null = null;
-      let markedKey: string | null = null;
+      // Two independent badges: a mic on the routing target, and a speaker on
+      // the thread whose reply is currently playing (they can differ).
+      const marked = new Map<string, string>();
       let unsubscribe = () => {};
       if (experimental_setThreadRowStatus) {
         unsubscribe = ctl.subscribe(() => {
           const snap = ctl.getSnapshot();
-          const target = snap.phase === "idle" ? null : snap.threadId;
-          const speaking = snap.phase === "speaking";
-          const key = target === null ? null : `${target}:${speaking}`;
-          if (key !== markedKey) {
-            if (marked && marked !== target) experimental_setThreadRowStatus(marked, null);
-            if (target)
-              experimental_setThreadRowStatus(target, {
-                icon: speaking ? "Volume2" : "Mic",
-                label: speaking ? "Speaking reply aloud" : "Voice conversation target",
-                tone: "running",
-              });
-            marked = target;
-            markedKey = key;
+          const desired = new Map<string, { icon: string; label: string }>();
+          if (snap.phase !== "idle" && snap.threadId)
+            desired.set(snap.threadId, { icon: "Mic", label: "Voice conversation target" });
+          if (snap.speakingThread)
+            desired.set(snap.speakingThread, { icon: "AudioLines", label: "Speaking reply aloud" });
+          for (const id of [...marked.keys()])
+            if (!desired.has(id)) {
+              experimental_setThreadRowStatus(id, null);
+              marked.delete(id);
+            }
+          for (const [id, status] of desired) {
+            const key = `${id}:${status.icon}`;
+            if (marked.get(id) !== key) {
+              experimental_setThreadRowStatus(id, { ...status, tone: "running" });
+              marked.set(id, key);
+            }
           }
         });
       }
       return () => {
         unsubscribe();
-        if (marked && experimental_setThreadRowStatus) experimental_setThreadRowStatus(marked, null);
+        if (experimental_setThreadRowStatus)
+          for (const id of marked.keys()) experimental_setThreadRowStatus(id, null);
         unmountWidget();
         controller?.stop();
         controller = null;

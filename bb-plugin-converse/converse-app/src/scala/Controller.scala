@@ -70,6 +70,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
 
   // Playback
   private var speakingActive: Boolean  = false
+  private var speakingThread: String   = null
   private var generation: Int          = 0
   private var currentAudio: js.Dynamic = null
   private var abortCtl: js.Dynamic     = null
@@ -92,6 +93,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       "phase"     -> phase,
       "threadId"  -> displayThread,
       "viewed"    -> viewedThread,
+      "speakingThread" -> speakingThread,
       "error"     -> errorNote,
       "heard"     -> heardText,
       "interim"   -> interimText,
@@ -506,7 +508,8 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
           case "speak" =>
             val text = p.text.asInstanceOf[js.UndefOr[String]].getOrElse("")
             debug(s"speak signal (${text.length} chars)")
-            if text.trim.nonEmpty then speakText(text)
+            if text.trim.nonEmpty then
+              speakText(text, p.threadId.asInstanceOf[js.UndefOr[String]].getOrElse(null))
             else setPhase("listening")
           case "status" =>
             // Transient backend progress (e.g. managed service startup);
@@ -526,7 +529,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
 
   // --------------------------------------------------------------- playback
 
-  private def speakText(text: String): Unit =
+  private def speakText(text: String, sourceThread: String): Unit =
     stopSpeaking()
     val chunks = Speech.splitSpeechChunks(text)
     if chunks.isEmpty then setPhase("listening")
@@ -534,23 +537,31 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       generation += 1
       val gen = generation
       speakingActive = true
+      // The thread whose reply is playing — distinct from the routing target,
+      // which follows the thread currently in view.
+      speakingThread = sourceThread
       setPhase("speaking")
+      refreshSnapshot()
       val done = if ttsMode == "server" then speakServer(gen, chunks) else speakBrowser(gen, chunks)
       done.onComplete {
         case Success(_) if generation == gen =>
           speakingActive = false
-          if phase == "speaking" then setPhase("listening")
+          speakingThread = null
+          if phase == "speaking" then setPhase("listening") else refreshSnapshot()
         case Failure(e) if generation == gen =>
           debug(s"speech failed: ${e.getMessage}")
           speakingActive = false
+          speakingThread = null
           errorNote = s"speech failed: ${e.getMessage}"
           setPhase("listening")
+          refreshSnapshot()
         case _ => ()
       }
 
   private def stopSpeaking(): Unit =
     generation += 1
     speakingActive = false
+    speakingThread = null
     if abortCtl != null then { val _ = abortCtl.abort(); abortCtl = null }
     if !js.isUndefined(js.Dynamic.global.speechSynthesis) then { val _ = js.Dynamic.global.speechSynthesis.cancel() }
     if currentAudio != null then

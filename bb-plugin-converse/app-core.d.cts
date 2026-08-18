@@ -15,6 +15,8 @@ export interface ConverseSnapshot {
   threadId: string | null;
   /** The thread the app route currently shows. */
   viewed: string | null;
+  /** The thread whose reply is currently being spoken aloud. */
+  speakingThread: string | null;
   error: string | null;
   /** The last utterance that was transcribed and sent. */
   heard: string | null;
