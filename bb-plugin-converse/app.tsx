@@ -147,7 +147,8 @@ function VoiceBanner() {
   const { state } = useConverse();
 
   if (view.scope.kind !== "thread") return null;
-  if (state.phase === "idle" || state.threadId !== view.scope.threadId) return null;
+  if (state.phase === "idle") return null;
+  const elsewhere = state.threadId !== view.scope.threadId;
 
   const label = phaseLabels[state.phase] ?? state.phase;
   const color = phaseColors[state.phase] ?? "text-foreground";
@@ -166,6 +167,7 @@ function VoiceBanner() {
           <span>{label}</span>
         </span>
         <LevelMeter level={state.level} threshold={state.threshold} />
+        {elsewhere && <span className="text-muted-foreground">→ another thread</span>}
       </div>
       {text && <div className={"break-words " + textClass}>{text}</div>}
     </div>
@@ -173,6 +175,15 @@ function VoiceBanner() {
 }
 
 export default definePluginApp((app) => {
+  app.contentScripts.register({
+    id: "lifecycle",
+    mount() {
+      return () => {
+        controller?.stop();
+        controller = null;
+      };
+    },
+  });
   app.composer.customize({
     id: "voice",
     scopes: ["thread"],
