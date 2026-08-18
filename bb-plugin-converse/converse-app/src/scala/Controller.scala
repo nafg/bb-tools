@@ -18,7 +18,6 @@ given ExecutionContext = ExecutionContext.parasitic
   * singleton, which filters by session id.
   */
 final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynamic]]):
-  private val TtsPath        = "/api/v1/plugins/converse/http/tts"
   private val FrameMs        = 30.0
   private val MaxUtteranceMs = 60_000.0
 
@@ -28,7 +27,6 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   private var phase: String       = "idle"
   private var errorNote: String   = null
   private var heardText: String   = null
-  private var ttsMode: String     = "browser"
   private var lastEventId: String = null
 
   // Audio graph
@@ -68,12 +66,8 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   // widget can start a session without access to hooks.
   private var startOptions: js.Dynamic = js.Dynamic.literal()
 
-  // Playback
-  private var speakingActive: Boolean  = false
-  private var speakingThread: String   = null
-  private var generation: Int          = 0
-  private var currentAudio: js.Dynamic = null
-  private var abortCtl: js.Dynamic     = null
+  // Playback is tab-wide rather than part of the voice-session state machine.
+  private val player = new Player(() => refreshSnapshot())
 
   // React 18 external-store contract: a stable snapshot object per change.
   private var listeners: List[js.Function0[Unit]] = Nil
@@ -93,7 +87,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       "phase"     -> phase,
       "threadId"  -> displayThread,
       "viewed"    -> viewedThread,
-      "speakingThread" -> speakingThread,
+      "speakingThread" -> player.speakingThread,
       "error"     -> errorNote,
       "heard"     -> heardText,
       "interim"   -> interimText,
@@ -151,6 +145,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     // created after an await can start (and stay) suspended under autoplay
     // policies, which reads as permanent silence.
     audioContext = new AudioContext
+    player.setAudioContext(audioContext)
     val _    = audioContext.resume()
     val sess = js.Dynamic.global.crypto.randomUUID().asInstanceOf[String]
     sessionId = sess
@@ -159,7 +154,8 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     heardText = null
     interimText = null
     lastEventId = null
-    ttsMode = opts.ttsMode.asInstanceOf[js.UndefOr[String]].getOrElse("browser")
+    val ttsMode = opts.ttsMode.asInstanceOf[js.UndefOr[String]].getOrElse("browser")
+    player.setTtsMode(ttsMode)
     vadThreshold = opts.vadThreshold.asInstanceOf[js.UndefOr[Double]].filter(t => t > 0).getOrElse(0.01)
     setPhase("starting")
     debug(s"starting session $sess for thread $newThreadId (tts=$ttsMode threshold=$vadThreshold)")
@@ -226,13 +222,14 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     if audioContext != null then
       val ctx = audioContext
       audioContext = null
+      player.setAudioContext(null)
       ctx.close().toFuture.failed.foreach(_ => ())
 
   private def stopInternal(notifyServer: Boolean): Unit =
     if frameTimer != null then { clearInterval(frameTimer); frameTimer = null }
     if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
     discardRecorder()
-    stopSpeaking()
+    player.stop()
     if micStream != null then { micStream.getTracks().foreach(_.stop()); micStream = null }
     if analysisStream != null then { analysisStream.getTracks().foreach(_.stop()); analysisStream = null }
     closeAudioContext()
@@ -302,9 +299,9 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
         if recorder != null then finishRecorder(submit = longEnough)
         else if phase == "recording" then setPhase("listening")
       case VadEvent.BargeIn =>
-        if speakingActive then
+        if player.isSpeaking then
           debug("barge-in: stopping playback")
-          stopSpeaking()
+          player.stop()
           if phase == "speaking" then setPhase(if recorder != null then "recording" else "listening")
 
   // -------------------------------------------------------------- recording
@@ -532,139 +529,20 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   // --------------------------------------------------------------- playback
 
   private def speakText(text: String, sourceThread: String): Unit =
-    stopSpeaking()
     val chunks = Speech.splitSpeechChunks(text)
     if chunks.isEmpty then setPhase("listening")
     else
-      generation += 1
-      val gen = generation
-      speakingActive = true
-      // The thread whose reply is playing — distinct from the routing target,
-      // which follows the thread currently in view.
-      speakingThread = sourceThread
       setPhase("speaking")
-      refreshSnapshot()
-      val done = if ttsMode == "server" then speakServer(gen, chunks) else speakBrowser(gen, chunks)
-      done.onComplete {
-        case Success(_) if generation == gen =>
-          speakingActive = false
-          speakingThread = null
-          if phase == "speaking" then setPhase("listening") else refreshSnapshot()
-        case Failure(e) if generation == gen =>
+      player.play(text, sourceThread).onComplete {
+        case Success(completed) if completed =>
+          if phase == "speaking" then setPhase("listening")
+        case Failure(e) =>
           debug(s"speech failed: ${e.getMessage}")
-          speakingActive = false
-          speakingThread = null
           errorNote = s"speech failed: ${e.getMessage}"
           setPhase("listening")
           refreshSnapshot()
         case _ => ()
       }
-
-  private def stopSpeaking(): Unit =
-    generation += 1
-    speakingActive = false
-    speakingThread = null
-    if abortCtl != null then { val _ = abortCtl.abort(); abortCtl = null }
-    if !js.isUndefined(js.Dynamic.global.speechSynthesis) then { val _ = js.Dynamic.global.speechSynthesis.cancel() }
-    if currentAudio != null then
-      // An AudioBufferSourceNode stops with stop(); its onended settles the
-      // playback future.
-      try { val _ = currentAudio.stop() }
-      catch { case _: Throwable => () }
-      currentAudio = null
-
-  private def delay(seconds: Double): Future[Unit] =
-    if seconds <= 0 then Future.unit
-    else
-      val p = Promise[Unit]()
-      val _ = setTimeout(seconds * 1000) { val _ = p.success(()) }
-      p.future
-
-  private def speakBrowser(gen: Int, chunks: List[SpeechChunk]): Future[Unit] =
-    chunks.foldLeft(Future.unit) { (acc, chunk) =>
-      acc.flatMap { _ =>
-        if generation != gen then Future.unit
-        else
-          val p         = Promise[Unit]()
-          val utterance = js.Dynamic.newInstance(js.Dynamic.global.SpeechSynthesisUtterance)(chunk.text)
-          utterance.onend = js.Any.fromFunction1((_: js.Any) => { val _ = p.success(()) })
-          utterance.onerror = js.Any.fromFunction1((_: js.Any) => { val _ = p.success(()) })
-          val _ = js.Dynamic.global.speechSynthesis.speak(utterance)
-          p.future.flatMap(_ => delay(chunk.pauseSeconds))
-      }
-    }
-
-  private def fetchTts(text: String, signal: js.Any): Future[js.Dynamic] =
-    js.Dynamic.global
-      .fetch(
-        TtsPath,
-        js.Dynamic.literal(
-          "method"  -> "POST",
-          "headers" -> js.Dynamic.literal("content-type" -> "application/json"),
-          "body"    -> js.JSON.stringify(js.Dynamic.literal("text" -> text)),
-          "signal"  -> signal
-        )
-      )
-      .asInstanceOf[js.Promise[js.Dynamic]]
-      .toFuture
-      .flatMap { response =>
-        if !response.ok.asInstanceOf[Boolean] then
-          Future.failed(new RuntimeException(s"TTS endpoint returned ${response.status}"))
-        else response.blob().asInstanceOf[js.Promise[js.Dynamic]].toFuture
-      }
-
-  /** Plays through the session's AudioContext (created inside the toggle
-    * click), which is exempt from autoplay blocking — a standalone
-    * Audio.play() minutes after the last user gesture gets rejected by
-    * Firefox's autoplay policy and would silently skip every chunk.
-    */
-  private def playBlob(gen: Int, blob: js.Dynamic): Future[Unit] =
-    if generation != gen || audioContext == null then Future.unit
-    else
-      val ctx = audioContext.asInstanceOf[js.Dynamic]
-      blob
-        .arrayBuffer()
-        .asInstanceOf[js.Promise[js.Any]]
-        .toFuture
-        .flatMap { bytes =>
-          ctx.decodeAudioData(bytes).asInstanceOf[js.Promise[js.Dynamic]].toFuture
-        }
-        .flatMap { decoded =>
-          if generation != gen || audioContext == null then Future.unit
-          else
-            val p      = Promise[Unit]()
-            val source = ctx.createBufferSource()
-            source.buffer = decoded
-            val _ = source.connect(ctx.destination)
-            currentAudio = source
-            source.onended = js.Any.fromFunction1 { (_: js.Any) =>
-              if currentAudio eq source then currentAudio = null
-              if !p.isCompleted then { val _ = p.success(()) }
-            }
-            val _ = source.start()
-            p.future
-        }
-        .recover { case e => debug(s"playback failed: ${e.getMessage}") }
-
-  /** Sequential playback with a one-chunk synthesis prefetch. */
-  private def speakServer(gen: Int, chunks: List[SpeechChunk]): Future[Unit] =
-    val ctl = js.Dynamic.newInstance(js.Dynamic.global.AbortController)()
-    abortCtl = ctl
-    val all = chunks.toVector
-    def go(i: Int, fetched: Future[js.Dynamic]): Future[Unit] =
-      fetched.flatMap { blob =>
-        if generation != gen then Future.unit
-        else
-          val next =
-            if i + 1 < all.length then fetchTts(all(i + 1).text, ctl.signal) else null
-          playBlob(gen, blob)
-            .flatMap(_ => delay(all(i).pauseSeconds))
-            .flatMap { _ =>
-              if next == null || generation != gen then Future.unit else go(i + 1, next)
-            }
-      }
-    val result = if all.isEmpty then Future.unit else go(0, fetchTts(all(0).text, ctl.signal))
-    result.andThen { case _ => if abortCtl eq ctl then abortCtl = null }
 
 @JSExportTopLevel("createController")
 def createController(deps: js.Dynamic): js.Dynamic =
