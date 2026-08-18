@@ -110,7 +110,7 @@ function VoiceAction() {
       typeof values.vadThreshold === "string" ? values.vadThreshold : "0.01",
     );
     ctl.start(threadId as string, {
-      ttsMode: values.ttsMode === "server" ? "server" : "browser",
+      ttsMode: values.ttsProvider === "browser" || values.ttsProvider === undefined ? "browser" : "server",
       vadThreshold: Number.isFinite(vadThreshold) && vadThreshold > 0 ? vadThreshold : 0.01,
     });
   }

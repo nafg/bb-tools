@@ -79,62 +79,92 @@ def plugin(bb: BbApi): Unit =
 
   val settings = bb.settings.define(
     js.Dynamic.literal(
-      "ttsMode" -> js.Dynamic.literal(
+      "ttsProvider" -> js.Dynamic.literal(
         "type"    -> "select",
-        "label"   -> "Speech synthesis",
-        "options" -> js.Array("browser", "server"),
+        "label"   -> "Text-to-speech provider",
+        "options" -> js.Array("browser", "pocket-tts", "kokoro", "openai-compatible"),
         "default" -> "browser"
       ),
-      "ttsApi" -> js.Dynamic.literal(
-        "type"    -> "select",
-        "label"   -> "Server TTS API shape",
-        "options" -> js.Array("openai-compatible", "pocket-tts"),
-        "default" -> "openai-compatible"
-      ),
-      "ttsUrl" -> js.Dynamic.literal(
+      "pocketUrl" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Server TTS endpoint, e.g. http://127.0.0.1:8880/v1/audio/speech (OpenAI-compatible) or http://127.0.0.1:8000/tts (Pocket)",
+        "label"   -> "Pocket TTS: /tts endpoint",
+        "default" -> "http://127.0.0.1:8000/tts"
+      ),
+      "pocketVoice" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "Pocket TTS: voice",
+        "default" -> "alba"
+      ),
+      "kokoroUrl" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "Kokoro: OpenAI-compatible speech endpoint",
+        "default" -> "http://127.0.0.1:8880/v1/audio/speech"
+      ),
+      "kokoroVoice" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "Kokoro: voice",
+        "default" -> "af_heart"
+      ),
+      "ttsCustomUrl" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "Custom TTS: OpenAI-compatible speech endpoint (also covers Speaches, Piper, OpenAI)",
         "default" -> ""
       ),
-      "ttsModel" -> js.Dynamic.literal(
+      "ttsCustomModel" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "TTS model (e.g. kokoro, gpt-4o-mini-tts)",
+        "label"   -> "Custom TTS: model",
         "default" -> ""
       ),
-      "ttsVoice" -> js.Dynamic.literal(
+      "ttsCustomVoice" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "TTS voice (e.g. af_heart, alloy)",
+        "label"   -> "Custom TTS: voice",
         "default" -> ""
       ),
-      "ttsApiKey" -> js.Dynamic.literal(
+      "ttsCustomApiKey" -> js.Dynamic.literal(
         "type"   -> "string",
-        "label"  -> "TTS API key (sent as a Bearer token; leave empty for local services)",
+        "label"  -> "Custom TTS: API key (Bearer; empty for local services)",
         "secret" -> true
       ),
-      "vadThreshold" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "Voice detection threshold (normalized RMS; raise if noise triggers it)",
-        "default" -> "0.01"
+      "sttProvider" -> js.Dynamic.literal(
+        "type"    -> "select",
+        "label"   -> "Speech-to-text provider",
+        "options" -> js.Array("bb", "groq", "openai-compatible"),
+        "default" -> "bb"
       ),
-      "sttUrl" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "OpenAI-compatible transcription endpoint (empty = use bb's voice transcription), e.g. http://127.0.0.1:2022/v1/audio/transcriptions",
-        "default" -> ""
-      ),
-      "sttModel" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "Transcription model for the custom endpoint (e.g. base.en, whisper-large-v3)",
-        "default" -> ""
-      ),
-      "sttApiKey" -> js.Dynamic.literal(
+      "groqApiKey" -> js.Dynamic.literal(
         "type"   -> "string",
-        "label"  -> "Transcription API key (Bearer; empty for local services)",
+        "label"  -> "Groq: API key",
+        "secret" -> true
+      ),
+      "groqModel" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "Groq: transcription model",
+        "default" -> "whisper-large-v3-turbo"
+      ),
+      "sttCustomUrl" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "Custom STT: OpenAI-compatible transcription endpoint (also covers whisper.cpp, Speaches)",
+        "default" -> ""
+      ),
+      "sttCustomModel" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "Custom STT: model",
+        "default" -> ""
+      ),
+      "sttCustomApiKey" -> js.Dynamic.literal(
+        "type"   -> "string",
+        "label"  -> "Custom STT: API key (Bearer; empty for local services)",
         "secret" -> true
       ),
       "sttLanguage" -> js.Dynamic.literal(
         "type"    -> "string",
         "label"   -> "Transcription language hint (ISO code like en; empty = auto-detect)",
         "default" -> "en"
+      ),
+      "vadThreshold" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "Voice detection threshold (normalized RMS; raise if noise triggers it)",
+        "default" -> "0.01"
       )
     )
   )
@@ -225,15 +255,26 @@ def plugin(bb: BbApi): Unit =
   def transcribeAudio(mimeType: String, audioBase64: String, retryUnavailable: Boolean): Future[String] =
     val file = audioFile(mimeType, audioBase64)
     settings.get().toFuture.flatMap { s =>
-      val sttUrl = str(s.sttUrl)
-      if sttUrl.nonEmpty then
-        transcribeViaEndpoint(sttUrl, str(s.sttModel), str(s.sttApiKey), str(s.sttLanguage), file)
-      else
-        transcribeViaBb(file).recoverWith {
-          case e if retryUnavailable && e.getMessage != null && e.getMessage.contains("503") =>
-            bb.log.warn(s"transcription unavailable; retrying once: ${e.getMessage}")
-            delayMs(1500).flatMap(_ => transcribeViaBb(file))
-        }
+      val language = str(s.sttLanguage)
+      str(s.sttProvider) match
+        case "groq" =>
+          transcribeViaEndpoint(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            str(s.groqModel),
+            str(s.groqApiKey),
+            language,
+            file
+          )
+        case "openai-compatible" =>
+          val url = str(s.sttCustomUrl)
+          if url.isEmpty then Future.failed(new RuntimeException("sttCustomUrl is not configured"))
+          else transcribeViaEndpoint(url, str(s.sttCustomModel), str(s.sttCustomApiKey), language, file)
+        case _ =>
+          transcribeViaBb(file).recoverWith {
+            case e if retryUnavailable && e.getMessage != null && e.getMessage.contains("503") =>
+              bb.log.warn(s"transcription unavailable; retrying once: ${e.getMessage}")
+              delayMs(1500).flatMap(_ => transcribeViaBb(file))
+          }
     }
 
   bb.rpc.register(
@@ -370,47 +411,74 @@ def plugin(bb: BbApi): Unit =
           s    <- settings.get().toFuture
           response <- {
             val text = str(body.text)
-            val url  = str(s.ttsUrl)
             if text.isEmpty then Future.successful(jsonResponse(400, "text is required"))
-            else if url.isEmpty then
-              Future.successful(jsonResponse(400, "ttsUrl is not configured in the Converse plugin settings"))
             else
-              val voice = str(s.ttsVoice)
-              val init =
-                if str(s.ttsApi) == "pocket-tts" then
-                  // Pocket TTS: multipart form { text, voice_url }, wav response.
+              // Each provider owns its settings block; unused blocks persist
+              // untouched, so switching providers is never destructive.
+              val request: Either[String, (String, js.Dynamic)] = str(s.ttsProvider) match
+                case "pocket-tts" =>
                   val form = js.Dynamic.newInstance(js.Dynamic.global.FormData)()
                   val _    = form.set("text", text)
+                  val voice = str(s.pocketVoice)
                   if voice.nonEmpty then { val _ = form.set("voice_url", voice) }
-                  js.Dynamic.literal("method" -> "POST", "body" -> form)
-                else
-                  val headers = js.Dynamic.literal("content-type" -> "application/json")
-                  val apiKey  = str(s.ttsApiKey)
-                  if apiKey.nonEmpty then headers.updateDynamic("Authorization")(s"Bearer $apiKey")
-                  val payload = js.Dynamic.literal("input" -> text, "response_format" -> "mp3")
-                  val model   = str(s.ttsModel)
-                  if model.nonEmpty then payload.updateDynamic("model")(model)
+                  Right((str(s.pocketUrl), js.Dynamic.literal("method" -> "POST", "body" -> form)))
+                case "kokoro" =>
+                  val payload = js.Dynamic.literal(
+                    "model"           -> "kokoro",
+                    "input"           -> text,
+                    "response_format" -> "mp3"
+                  )
+                  val voice = str(s.kokoroVoice)
                   if voice.nonEmpty then payload.updateDynamic("voice")(voice)
-                  js.Dynamic.literal("method" -> "POST", "headers" -> headers, "body" -> js.JSON.stringify(payload))
-              js.Dynamic.global
-                .fetch(url, init)
-                .asInstanceOf[js.Promise[js.Dynamic]]
-                .toFuture
-                .map { upstream =>
-                  if !upstream.ok.asInstanceOf[Boolean] then
-                    jsonResponse(502, s"TTS provider returned ${str(upstream.status)}")
-                  else
-                    val contentType = upstream.headers.get("content-type")
-                    js.Dynamic.newInstance(js.Dynamic.global.Response)(
-                      upstream.body,
+                  Right(
+                    (
+                      str(s.kokoroUrl),
                       js.Dynamic.literal(
-                        "status" -> 200,
-                        "headers" -> js.Dynamic.literal(
-                          "content-type" -> (if contentType == null then "audio/mpeg" else contentType)
-                        )
+                        "method"  -> "POST",
+                        "headers" -> js.Dynamic.literal("content-type" -> "application/json"),
+                        "body"    -> js.JSON.stringify(payload)
                       )
                     )
-                }
+                  )
+                case "openai-compatible" =>
+                  val url = str(s.ttsCustomUrl)
+                  if url.isEmpty then Left("ttsCustomUrl is not configured in the Converse plugin settings")
+                  else
+                    val headers = js.Dynamic.literal("content-type" -> "application/json")
+                    val apiKey  = str(s.ttsCustomApiKey)
+                    if apiKey.nonEmpty then headers.updateDynamic("Authorization")(s"Bearer $apiKey")
+                    val payload = js.Dynamic.literal("input" -> text, "response_format" -> "mp3")
+                    val model   = str(s.ttsCustomModel)
+                    if model.nonEmpty then payload.updateDynamic("model")(model)
+                    val voice = str(s.ttsCustomVoice)
+                    if voice.nonEmpty then payload.updateDynamic("voice")(voice)
+                    Right(
+                      (url, js.Dynamic.literal("method" -> "POST", "headers" -> headers, "body" -> js.JSON.stringify(payload)))
+                    )
+                case other =>
+                  Left(s"ttsProvider is '$other'; the /tts route serves only server-side providers")
+              request match
+                case Left(message) => Future.successful(jsonResponse(400, message))
+                case Right((url, init)) =>
+                  js.Dynamic.global
+                    .fetch(url, init)
+                    .asInstanceOf[js.Promise[js.Dynamic]]
+                    .toFuture
+                    .map { upstream =>
+                      if !upstream.ok.asInstanceOf[Boolean] then
+                        jsonResponse(502, s"TTS provider returned ${str(upstream.status)}")
+                      else
+                        val contentType = upstream.headers.get("content-type")
+                        js.Dynamic.newInstance(js.Dynamic.global.Response)(
+                          upstream.body,
+                          js.Dynamic.literal(
+                            "status" -> 200,
+                            "headers" -> js.Dynamic.literal(
+                              "content-type" -> (if contentType == null then "audio/mpeg" else contentType)
+                            )
+                          )
+                        )
+                    }
           }
         yield response
       handled.toJSPromise
