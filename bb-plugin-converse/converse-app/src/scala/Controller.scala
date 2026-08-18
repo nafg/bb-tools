@@ -265,15 +265,17 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     debug(s"vad: $event (level=${(currentLevel * 1000).round / 1000.0})")
     event match
       case VadEvent.CandidateStart =>
-        if !speakingActive then startRecorder()
+        // Recording proceeds during playback too: echo cancellation keeps the
+        // TTS out of the mic, and suppressing here silently ate anything said
+        // at normal volume while a reply was speaking.
+        startRecorder()
       case VadEvent.CandidateAbandoned =>
         if recorder != null && vad != null && !vad.isInSpeech then discardRecorder()
         if phase == "recording" then setPhase("listening")
       case VadEvent.SpeechStart =>
-        if !speakingActive then
-          startRecorder()
-          utteranceTarget = currentTarget
-          setPhase("recording")
+        startRecorder()
+        utteranceTarget = currentTarget
+        setPhase("recording")
       case VadEvent.Partial =>
         // Previews are best-effort extra transcription load; throttle them so
         // they can never rate-limit the provider out from under final submits.
@@ -291,12 +293,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
         if speakingActive then
           debug("barge-in: stopping playback")
           stopSpeaking()
-          setPhase("listening")
-          // The recorder was suppressed during playback; capture the rest of
-          // the interrupting utterance from here.
-          if vad != null && vad.isInSpeech && recorder == null then
-            startRecorder()
-            setPhase("recording")
+          if phase == "speaking" then setPhase(if recorder != null then "recording" else "listening")
 
   // -------------------------------------------------------------- recording
 
