@@ -19,18 +19,25 @@ object Speech:
   private val SentenceEnding = ".*[.!?]$".r
   private val ListLine       = "^\\s*(?:[-*+]\\s|\\d+\\.\\s).*".r
 
+  // No (?m)/(?s) flags: Scala.js rejects MULTILINE and DOTALL on the default
+  // ES target, so line anchors are handled by splitting instead.
   def stripMarkdown(text: String): String =
     var out = text
-    out = out.replaceAll("(?s)```.*?```", " (code omitted) ")
+    out = out.replaceAll("```[\\S\\s]*?```", " (code omitted) ")
     out = out.replaceAll("`([^`]+)`", "$1")
     out = out.replaceAll("\\*{1,3}(.+?)\\*{1,3}", "$1")
     out = out.replaceAll("_{1,3}(.+?)_{1,3}", "$1")
-    out = out.replaceAll("(?m)^#{1,6}\\s+", "")
     out = out.replaceAll("\\[([^\\]]+)\\]\\([^)]+\\)", "$1")
-    out = out.replaceAll("(?m)^[-*_]{3,}\\s*$", "")
     out = out.replaceAll("<[^>]+>", "")
-    out = out.replaceAll("(?m)^\\s*[-*+]\\s+", "")
-    out = out.replaceAll("(?m)^\\s*\\d+\\.\\s+", "")
+    out = out
+      .split("\n", -1)
+      .map { line =>
+        var l = line.replaceFirst("^#{1,6}\\s+", "")
+        l = if l.matches("[-*_]{3,}\\s*") then "" else l
+        l = l.replaceFirst("^\\s*[-*+]\\s+", "")
+        l.replaceFirst("^\\s*\\d+\\.\\s+", "")
+      }
+      .mkString("\n")
     out.trim
 
   private def splitSentences(text: String): List[String] =
