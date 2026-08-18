@@ -33,22 +33,24 @@ object Widget:
     "error"        -> "var(--destructive, #ef4444)"
   )
 
-  /** Mounts the widget into the document; returns a disposer. */
+  /** Mounts the widget into the sidebar, above its footer (anchored on the
+    * stable /settings link); re-attaches when bb re-renders the sidebar and
+    * hides while it is collapsed. Returns a disposer.
+    */
   def mount(ctl: Controller): js.Function0[Unit] =
     val document = js.Dynamic.global.document
 
     val root = document.createElement("div")
     root.setAttribute("data-converse-widget", "")
     root.style.cssText =
-      "position:fixed;bottom:14px;left:50%;transform:translateX(-50%);z-index:60;" +
-        "max-width:min(560px,90vw);font-size:12px;line-height:1.4;" +
+      "font-size:11px;line-height:1.4;margin:4px 8px;" +
         "font-family:var(--font-sans, system-ui, sans-serif);"
 
     val pill = document.createElement("div")
     pill.style.cssText =
-      "display:flex;flex-direction:column;gap:2px;padding:6px 12px;border-radius:14px;" +
+      "display:flex;flex-direction:column;gap:2px;padding:5px 8px;border-radius:10px;" +
         "background:var(--card, var(--background, #1e1e1e));color:var(--card-foreground, inherit);" +
-        "border:1px solid var(--border, #4443);box-shadow:0 4px 16px #0004;"
+        "border:1px solid var(--border, #4443);"
     val _ = root.appendChild(pill)
 
     val row = document.createElement("div")
@@ -69,7 +71,7 @@ object Widget:
 
     val meter = document.createElement("span")
     meter.style.cssText =
-      "display:inline-block;width:48px;height:4px;border-radius:999px;overflow:hidden;" +
+      "display:inline-block;width:32px;height:4px;border-radius:999px;overflow:hidden;" +
         "background:var(--border, #4443);flex-shrink:0;"
     val meterFill = document.createElement("span")
     meterFill.style.cssText = "display:block;height:100%;border-radius:999px;width:0%;"
@@ -138,8 +140,35 @@ object Widget:
 
     render()
     val unsubscribe = ctl.subscribe(() => render())
-    val _           = document.body.appendChild(root)
+
+    // The sidebar is host-owned React DOM: anchor above its footer list (the
+    // /settings link is the stable landmark) and re-attach whenever a
+    // re-render drops our node. Hidden while the sidebar is collapsed.
+    def attach(): Unit =
+      val link = document.querySelector("a[href='/settings']")
+      if link != null then
+        val list = link.closest("ul,ol,[role='list']")
+        if list != null && list.parentElement != null then
+          val _ = list.parentElement.insertBefore(root, list)
+
+    attach()
+    var reattachQueued = false
+    val observer = js.Dynamic.newInstance(js.Dynamic.global.MutationObserver)(
+      js.Any.fromFunction2 { (_: js.Any, _: js.Any) =>
+        if !root.isConnected.asInstanceOf[Boolean] && !reattachQueued then
+          reattachQueued = true
+          val _ = js.Dynamic.global.setTimeout(
+            js.Any.fromFunction0 { () =>
+              reattachQueued = false
+              if !root.isConnected.asInstanceOf[Boolean] then attach()
+            },
+            200
+          )
+      }
+    )
+    val _ = observer.observe(document.body, js.Dynamic.literal("childList" -> true, "subtree" -> true))
 
     () =>
+      val _ = observer.disconnect()
       unsubscribe()
       val _ = root.remove()

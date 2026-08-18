@@ -74,4 +74,16 @@ export default definePluginApp((app) => {
     scopes: ["thread"],
     banners: [{ id: "bridge", chrome: "bare", component: VoiceBridge }],
   });
+  // Native fallback toggle: always reachable even if the injected sidebar
+  // widget cannot anchor (e.g. bb's sidebar DOM changes).
+  app.slots.sidebarFooterAction({
+    id: "voice-toggle",
+    title: "Toggle voice conversation",
+    icon: "Mic",
+    run: () => {
+      const ctl = getController();
+      if (ctl.getSnapshot().phase !== "idle") ctl.stop();
+      else ctl.startViewed();
+    },
+  });
 });
