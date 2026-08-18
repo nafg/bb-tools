@@ -59,10 +59,32 @@ function VoiceBridge() {
 export default definePluginApp((app) => {
   app.contentScripts.register({
     id: "voice-widget",
-    mount() {
+    mount({ experimental_setThreadRowStatus }) {
       const ctl = getController();
       const unmountWidget = ctl.mountWidget();
+      // Badge the routing target's sidebar row while a session is active
+      // (feature-detected: older bb clients lack the setter).
+      let marked: string | null = null;
+      let unsubscribe = () => {};
+      if (experimental_setThreadRowStatus) {
+        unsubscribe = ctl.subscribe(() => {
+          const snap = ctl.getSnapshot();
+          const target = snap.phase === "idle" ? null : snap.threadId;
+          if (target !== marked) {
+            if (marked) experimental_setThreadRowStatus(marked, null);
+            if (target)
+              experimental_setThreadRowStatus(target, {
+                icon: "Mic",
+                label: "Voice conversation target",
+                tone: "running",
+              });
+            marked = target;
+          }
+        });
+      }
       return () => {
+        unsubscribe();
+        if (marked && experimental_setThreadRowStatus) experimental_setThreadRowStatus(marked, null);
         unmountWidget();
         controller?.stop();
         controller = null;
