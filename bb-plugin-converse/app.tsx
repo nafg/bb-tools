@@ -121,7 +121,7 @@ export default definePluginApp((app) => {
   app.slots.messageAction({
     id: "speak-message",
     title: "Speak this message",
-    icon: "Volume2",
+    icon: "Play",
     run: ({ threadId, message, selectedText }) =>
       getController().replay(selectedText ?? message.text, threadId),
   });
