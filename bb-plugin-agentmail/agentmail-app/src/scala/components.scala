@@ -39,7 +39,7 @@ private def mailIcon(cls: String): VdomElement =
 
 private val AutosaveDelayMs = 1200.0
 
-private def formattedEmailPreview(html: String): VdomElement =
+private def formattedEmailContent(html: String, label: Option[String], accessibleName: String): VdomElement =
   val hostStyle = dom.window.getComputedStyle(dom.document.body)
   val themedHtml =
     s"""<style>
@@ -51,9 +51,9 @@ private def formattedEmailPreview(html: String): VdomElement =
        |$html""".stripMargin
   <.div(
     ^.className := "space-y-1",
-    <.div(^.className := "text-xs font-medium text-muted-foreground", "Formatted preview"),
+    label.map(text => <.div(^.className := "text-xs font-medium text-muted-foreground", text)),
     <.iframe(
-      ^.title := "Formatted email preview",
+      ^.title := accessibleName,
       ^.className := "h-80 w-full rounded-md border border-border bg-background",
       VdomAttr("sandbox")        := "",
       VdomAttr("referrerPolicy") := "no-referrer",
@@ -213,7 +213,8 @@ object DraftCard:
               )
             )
           ),
-        formattedEmailPreview(draft.html).when(draft.html.nonEmpty),
+        formattedEmailContent(draft.html, Some("Formatted preview"), "Formatted email preview")
+          .when(draft.html.nonEmpty),
         field(if draft.html.nonEmpty then "Plain-text fallback" else "Body")(
           <.textarea(
             ^.className := (inputClass + " min-h-40 resize-y"),
@@ -313,7 +314,7 @@ object EmailThreadCard:
         ),
         if m.html.nonEmpty then
           React.Fragment(
-            formattedEmailPreview(m.html),
+            formattedEmailContent(m.html, None, "Formatted email message"),
             if m.text.nonEmpty then
               <.details(
                 ^.className := "text-xs text-muted-foreground",
