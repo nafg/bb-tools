@@ -1,2 +1,4 @@
 .bleep/
 /.playwright-mcp/
+.scala-build/
+.bsp/
