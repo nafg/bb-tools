@@ -1,6 +1,6 @@
 ---
 name: agentmail
-description: Send and receive email from this thread via AgentMail. Use when the user asks to email someone (a proposal, a question, a document) or to check for / act on email replies. Replies to email you send arrive back in this thread automatically.
+description: Send and receive email from this thread via AgentMail. Use when the user asks to email someone (a proposal, a question, a document) or to check for / act on email replies. Email is drafted for the user's review; replies to sent email arrive back in this thread automatically.
 ---
 
 # Email via AgentMail
@@ -11,43 +11,56 @@ when a reply arrives (polled every few minutes) it is delivered back into that
 bb thread as a new message. You do not need to poll for replies — they show up
 on their own.
 
-The inbox is the AI assistant's address, not the user's. Outgoing email
-normally pauses in the bb thread for the user to review, edit, and approve
-before anything is sent, so the user has final say over the text. Compose the
-draft the way the user asked; if they gave no direction on voice, write as
-their assistant and let them adjust it in review.
+The inbox is the AI assistant's address, not the user's.
 
-## Sending
+## The one rule: you file drafts; only the user sends
 
-Use the `agentmail_send` tool: `to` (required list of addresses) and `body`
-(required plain text), plus optional `cc`, `subject`, `html` (an HTML
-alternative body), and `attachments` (absolute paths on the machine this
-thread's environment runs on).
+You cannot send email. The tools below create and revise *drafts*; the user
+reviews each draft in this thread's **Email panel** (a tab in the thread's
+right panel) and sends it there with the Send button — or discards it. Never
+tell the user an email was sent unless you received the message in this thread
+saying the user sent it.
 
-- The tool call waits while the user reviews the draft in a form that
-  replaces the thread's composer (unless review is disabled in the plugin
-  settings). It is a native tool call, not a shell command — there is no
-  timeout to configure; it simply waits, up to bb's one-hour cap on the
-  review form.
-- The email is NOT sent until the tool result says so. Never tell the user an
-  email was sent before then. If the result says the review was cancelled or
-  timed out, nothing was sent; tell the user and do not retry unless they ask.
-- When the user edited the draft before approving, the result includes the
-  final version that was actually sent — treat that, not your draft, as what
-  the recipient received.
-- The result includes the AgentMail thread id — mention it when telling the
-  user the email was sent, so follow-ups are easy to correlate.
+- `agentmail_send` — file a new-email draft: `to` (required list) and `body`
+  (required plain text), plus optional `cc`, `subject`, `html`, and
+  `attachments` (absolute paths on the machine this thread's environment runs
+  on). Returns immediately with the draft id.
+- `agentmail_reply` — file a reply draft within an existing email thread:
+  `thread` (the AgentMail thread id) and `body`, plus optional `html` and
+  `attachments`. Recipients, subject, and threading derive from the message
+  being replied to.
+- `agentmail_update_draft` — revise a pending draft when the user asks for
+  changes: `draft` (the id) plus any of `to`, `cc`, `subject`, `body`, `html`,
+  `attachments` (attachments are added, not replaced). A new `body` replaces
+  any earlier HTML alternative unless fresh `html` comes with it.
 
-## Replying within an existing email thread
+The user can also edit the draft directly in the panel (autosaved), so a
+draft's current content may differ from what you filed.
 
-When an email reply is delivered to this thread it names its AgentMail thread
-id. To respond by email, use the `agentmail_reply` tool: `thread` (the
-AgentMail thread id) and `body`, plus optional `html` and `attachments`.
-Replies wait for user review exactly the way `agentmail_send` does.
+After filing or updating a draft, tell the user it is ready to review and
+include this directive on its own line so they can open the review in one
+click:
+
+```
+::agentmail{draft="DRAFT_ID"}
+```
+
+When the user sends a draft, a message is delivered into this thread with the
+final recipients and subject, and the AgentMail thread id for follow-ups.
+
+## Incoming email
+
+Incoming replies are delivered into this thread as messages containing the
+sender, subject, and body. Respond to them conversationally; if the user wants
+to reply by email, file a reply draft with `agentmail_reply`. The user can
+read the full back-and-forth in the Email panel, so keep your summary of a
+received email brief and include the `::agentmail{}` directive (no draft
+attribute) to link the panel.
 
 ## Inspecting
 
 ```
+bb agentmail drafts             # pending drafts filed by this bb thread
 bb agentmail threads            # email threads owned by this bb thread
 bb agentmail read --thread ID   # full messages of one email thread
 bb agentmail attachment --message MESSAGE_ID --attachment ATTACHMENT_ID --out /abs/path
@@ -58,14 +71,15 @@ command to download each one.
 
 ## If the tools are missing
 
-The `agentmail_send` / `agentmail_reply` tools appear in sessions started
-after the plugin was installed. If this session predates that, the CLI
-equivalents behave identically but run under your shell tool:
+The native tools appear in sessions started after the plugin was installed.
+If this session predates that, the CLI equivalents behave identically but run
+under your shell tool:
 
 ```
 bb agentmail send --to a@b.com [--to ...] [--cc ...] --subject S --body TEXT [--html HTML] [--attach /abs/path]...
 bb agentmail reply --thread AGENTMAIL_THREAD_ID --body TEXT [--html HTML] [--attach /abs/path]...
+bb agentmail update-draft --draft DRAFT_ID [--subject S] [--body TEXT] ...
 ```
 
-Run them with a generous tool timeout (10 minutes) since they block on the
-user's review; if the command times out, nothing was sent.
+These also only file drafts — nothing is sent until the user sends it from
+the Email panel.

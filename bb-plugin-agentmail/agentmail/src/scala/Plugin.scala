@@ -12,6 +12,9 @@ given ExecutionContext = ExecutionContext.parasitic
 private def str(value: js.Dynamic): String =
   value.asInstanceOf[js.UndefOr[Any]].fold("")(v => if v == null then "" else v.toString)
 
+private def strArray(value: js.Dynamic): List[String] =
+  value.asInstanceOf[js.UndefOr[js.Array[String]]].fold(Nil)(_.toList)
+
 private def toBase64(content: String, encoding: String): String =
   if encoding == "base64" then content
   else js.Dynamic.global.Buffer.from(content, "utf8").applyDynamic("toString")("base64").asInstanceOf[String]
@@ -60,11 +63,12 @@ private def readAttachments(bb: BbApi, hostId: js.UndefOr[String], paths: List[S
     }
   }
 
-private def outboundPayload(body: String, html: Option[String], attachments: js.Array[js.Any]): js.Dynamic =
-  val payload = js.Dynamic.literal("text" -> body)
-  html.foreach(h => payload.updateDynamic("html")(h))
-  if attachments.nonEmpty then payload.updateDynamic("attachments")(attachments)
-  payload
+/** All open panels and header icons listen on this channel; any change to a
+  * thread's email state (draft filed/updated/sent/discarded, mail delivered)
+  * publishes { type: "changed", threadId } so they refetch.
+  */
+private def publishChanged(bb: BbApi, bbThreadId: String): Unit =
+  bb.realtime.publish("agentmail", js.Dynamic.literal("type" -> "changed", "threadId" -> bbThreadId))
 
 @JSExportTopLevel("default")
 def plugin(bb: BbApi): js.Promise[Unit] =
@@ -84,7 +88,12 @@ def plugin(bb: BbApi): js.Promise[Unit] =
         |  message_id TEXT PRIMARY KEY,
         |  delivered_at INTEGER NOT NULL DEFAULT (unixepoch())
         |)""".stripMargin,
-      "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+      "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+      """CREATE TABLE IF NOT EXISTS drafts (
+        |  draft_id TEXT PRIMARY KEY,
+        |  bb_thread_id TEXT NOT NULL,
+        |  created_at INTEGER NOT NULL DEFAULT (unixepoch())
+        |)""".stripMargin
     )
   )
 
@@ -100,11 +109,6 @@ def plugin(bb: BbApi): js.Promise[Unit] =
         "label"   -> "Inbox address (e.g. you@agentmail.to)",
         "default" -> ""
       ),
-      "reviewBeforeSend" -> js.Dynamic.literal(
-        "type"    -> "boolean",
-        "label"   -> "Review outgoing email in the thread before it is sent",
-        "default" -> true
-      ),
       "pollMinutes" -> js.Dynamic.literal(
         "type"    -> "select",
         "label"   -> "Poll interval in minutes (reload plugin after changing)",
@@ -116,6 +120,7 @@ def plugin(bb: BbApi): js.Promise[Unit] =
 
   Cli.register(bb, settings, db)
   Tools.register(bb, settings, db)
+  Rpc.register(bb, settings, db)
 
   settings.get().toFuture.map { s =>
     if str(s.apiKey).isEmpty || str(s.inbox).isEmpty then
@@ -154,63 +159,45 @@ private object Mapping:
       )
       .run(agentmailThreadId, bbThreadId, lastMessageId, subject, counterparty)
 
-private object Review:
-  /** bb.ui.requestInput's hard maximum; a review left unattended this long is cancelled. */
-  private val TimeoutMs = 60 * 60 * 1000
+private object Drafts:
+  def lookup(db: SqliteDb, draftId: String): Option[js.Dynamic] =
+    db.prepare("SELECT * FROM drafts WHERE draft_id = ?").get(draftId).toOption
 
-  enum Outcome:
-    case Skipped
-    case Approved(value: js.Dynamic)
-    case Cancelled(reason: String)
+  def rowsFor(db: SqliteDb, bbThreadId: String): List[js.Dynamic] =
+    db.prepare("SELECT * FROM drafts WHERE bb_thread_id = ? ORDER BY created_at").all(bbThreadId).toList
 
-  /** Replaces the thread's composer with the plugin's review form and waits
-    * for the user (up to [[TimeoutMs]]); Skipped when review is disabled or
-    * there is no invoking thread.
-    */
-  def request(
-      bb: BbApi,
-      settings: BbSettingsHandle,
-      ctx: js.Dynamic,
-      title: String,
-      payload: js.Dynamic
-  )(using ExecutionContext): Future[Outcome] =
-    settings.get().toFuture.flatMap { s =>
-      val enabled  = s.reviewBeforeSend.asInstanceOf[js.UndefOr[Boolean]].getOrElse(true)
-      val bbThread = ctx.threadId.asInstanceOf[js.UndefOr[String]]
-      bbThread.toOption.filter(_ => enabled) match
-        case None => Future.successful(Outcome.Skipped)
-        case Some(tid) =>
-          val request = js.Dynamic.literal(
-            "threadId"   -> tid,
-            "rendererId" -> "email-review",
-            "title"      -> title,
-            "payload"    -> payload,
-            "timeoutMs"  -> TimeoutMs
-          )
-          val options = js.Dynamic.literal()
-          ctx.signal.asInstanceOf[js.UndefOr[js.Any]].foreach(sig => options.updateDynamic("signal")(sig))
-          bb.ui.requestInput(request, options).toFuture.map { result =>
-            str(result.outcome) match
-              case "submitted" => Outcome.Approved(result.value.asInstanceOf[js.Dynamic])
-              case _           => Outcome.Cancelled(str(result.reason))
-          }
-    }
+  def all(db: SqliteDb): List[js.Dynamic] =
+    db.prepare("SELECT * FROM drafts ORDER BY created_at").all().toList
 
-  def cancelledMessage(reason: String): String =
-    reason match
-      case "user"    => "the user dismissed the review form without sending"
-      case "timeout" => "the review form timed out after an hour without user action"
-      case other     => s"the review was cancelled ($other)"
+  def record(db: SqliteDb, draftId: String, bbThreadId: String): Unit =
+    val _ = db.prepare("INSERT OR IGNORE INTO drafts (draft_id, bb_thread_id) VALUES (?, ?)").run(draftId, bbThreadId)
 
-/** The review-then-send flow shared by the native tools and the CLI. Left is
-  * a not-sent explanation; Right is a success report that includes the final
-  * text whenever the user edited the draft.
+  def remove(db: SqliteDb, draftId: String): Unit =
+    val _ = db.prepare("DELETE FROM drafts WHERE draft_id = ?").run(draftId)
+
+/** Draft-filing flows shared by the native tools and the CLI. Nothing here
+  * sends email: tools and CLI can only create and revise AgentMail drafts,
+  * and only the user's Send button in the Email panel (the sendDraft rpc)
+  * actually sends. Left is an error explanation; Right is a report for the
+  * agent.
   */
 private object Outbound:
-  private def strings(value: js.Dynamic, fallback: List[String]): List[String] =
-    value.asInstanceOf[js.UndefOr[js.Array[String]]].fold(fallback)(_.toList)
+  private def draftBase(body: String, html: Option[String], attachments: js.Array[js.Any]): js.Dynamic =
+    val payload = js.Dynamic.literal("text" -> body)
+    html.foreach(h => payload.updateDynamic("html")(h))
+    if attachments.nonEmpty then payload.updateDynamic("attachments")(attachments)
+    payload
 
-  def send(
+  private def filedReport(draftId: String, inThread: Boolean): String =
+    if inThread then
+      s"""Filed email draft $draftId for the user's review. NOT SENT — only the user can send it, from this thread's Email panel; never tell the user it was sent.
+         |To revise it, call agentmail_update_draft with draft $draftId.
+         |To give the user a one-click way to open the review, include this directive on its own line in your reply: ::agentmail{draft="$draftId"}
+         |You will receive a message in this thread if the user sends the draft.""".stripMargin
+    else
+      s"Filed email draft $draftId. NOT SENT — not invoked from a bb thread, so the draft can only be reviewed and sent from the AgentMail console."
+
+  def fileSend(
       bb: BbApi,
       settings: BbSettingsHandle,
       db: SqliteDb,
@@ -222,56 +209,27 @@ private object Outbound:
       attach: List[String],
       ctx: js.Dynamic
   )(using ExecutionContext): Future[Either[String, String]] =
-    val reviewPayload = js.Dynamic.literal(
-      "kind"        -> "send",
-      "to"          -> to.toJSArray,
-      "cc"          -> cc.toJSArray,
-      "subject"     -> subject,
-      "body"        -> body,
-      "hasHtml"     -> html.isDefined,
-      "attachments" -> attach.toJSArray
-    )
-    Review.request(bb, settings, ctx, "Review outgoing email", reviewPayload).flatMap {
-      case Review.Outcome.Cancelled(reason) =>
-        Future.successful(Left(s"Email not sent: ${Review.cancelledMessage(reason)}."))
-      case outcome =>
-        val (finalTo, finalCc, finalSubject, finalBody) = outcome match
-          case Review.Outcome.Approved(value) =>
-            (strings(value.to, to), strings(value.cc, cc), str(value.subject), str(value.body))
-          case _ => (to, cc, subject, body)
-        val edited = (finalTo, finalCc, finalSubject, finalBody) != (to, cc, subject, body)
-        if finalTo.isEmpty then Future.successful(Left("Email not sent: the reviewed draft has no recipients"))
-        else
-          // The HTML variant is not editable in the review form, so an
-          // edited plain-text body invalidates it.
-          val finalHtml = if finalBody == body then html else None
-          for
-            client      <- clientFromSettings(settings)
-            hostId      <- invokingHostId(bb, ctx)
-            attachments <- readAttachments(bb, hostId, attach)
-            payload = outboundPayload(finalBody, finalHtml, attachments)
-            _       = payload.updateDynamic("to")(finalTo.toJSArray)
-            _       = if finalCc.nonEmpty then payload.updateDynamic("cc")(finalCc.toJSArray)
-            _       = if finalSubject.nonEmpty then payload.updateDynamic("subject")(finalSubject)
-            sent <- client.sendMessage(payload)
-          yield
-            val threadId  = sent.thread_id.asInstanceOf[String]
-            val messageId = sent.message_id.asInstanceOf[String]
-            val bbThread  = ctx.threadId.asInstanceOf[js.UndefOr[String]]
-            bbThread.foreach { tid =>
-              Mapping.record(db, threadId, tid, messageId, finalSubject, finalTo.head)
-            }
-            val note =
-              if bbThread.isDefined then "Replies will be delivered back to this thread."
-              else "Not invoked from a bb thread: replies will spawn a new thread."
-            val editNote =
-              if edited then
-                s"\nThe user edited the draft before sending; final version:\nTo: ${finalTo.mkString(", ")}\nSubject: $finalSubject\n\n$finalBody"
-              else ""
-            Right(s"Sent. AgentMail thread: $threadId, message: $messageId. $note$editNote")
-    }
+    if to.isEmpty then Future.successful(Left("to must contain at least one recipient address"))
+    else
+      for
+        client      <- clientFromSettings(settings)
+        hostId      <- invokingHostId(bb, ctx)
+        attachments <- readAttachments(bb, hostId, attach)
+        payload = draftBase(body, html, attachments)
+        _       = payload.updateDynamic("to")(to.toJSArray)
+        _       = if cc.nonEmpty then payload.updateDynamic("cc")(cc.toJSArray)
+        _       = if subject.nonEmpty then payload.updateDynamic("subject")(subject)
+        draft <- client.createDraft(payload)
+      yield
+        val draftId  = str(draft.draft_id)
+        val bbThread = ctx.threadId.asInstanceOf[js.UndefOr[String]]
+        bbThread.foreach { tid =>
+          Drafts.record(db, draftId, tid)
+          publishChanged(bb, tid)
+        }
+        Right(filedReport(draftId, bbThread.isDefined))
 
-  def reply(
+  def fileReply(
       bb: BbApi,
       settings: BbSettingsHandle,
       db: SqliteDb,
@@ -288,35 +246,59 @@ private object Outbound:
         val lastMessageId = str(mapping.last_message_id)
         if lastMessageId.isEmpty then Future.successful(Left(s"no message to reply to in thread $emailThreadId"))
         else
-          val reviewPayload = js.Dynamic.literal(
-            "kind"        -> "reply",
-            "to"          -> js.Array(str(mapping.counterparty)),
-            "subject"     -> str(mapping.subject),
-            "body"        -> body,
-            "hasHtml"     -> html.isDefined,
-            "attachments" -> attach.toJSArray
-          )
-          Review.request(bb, settings, ctx, "Review outgoing email reply", reviewPayload).flatMap {
-            case Review.Outcome.Cancelled(reason) =>
-              Future.successful(Left(s"Reply not sent: ${Review.cancelledMessage(reason)}."))
-            case outcome =>
-              val finalBody = outcome match
-                case Review.Outcome.Approved(value) => str(value.body)
-                case _                              => body
-              val finalHtml = if finalBody == body then html else None
-              for
-                client      <- clientFromSettings(settings)
-                hostId      <- invokingHostId(bb, ctx)
-                attachments <- readAttachments(bb, hostId, attach)
-                payload = outboundPayload(finalBody, finalHtml, attachments)
-                sent <- client.replyToMessage(lastMessageId, payload)
-              yield
-                val editNote =
-                  if finalBody != body then
-                    s"\nThe user edited the draft before sending; final version:\n$finalBody"
-                  else ""
-                Right(s"Replied. message: ${sent.message_id.asInstanceOf[String]}$editNote")
-          }
+          for
+            client      <- clientFromSettings(settings)
+            hostId      <- invokingHostId(bb, ctx)
+            attachments <- readAttachments(bb, hostId, attach)
+            payload = draftBase(body, html, attachments)
+            _       = payload.updateDynamic("in_reply_to")(lastMessageId)
+            draft <- client.createDraft(payload)
+          yield
+            val draftId  = str(draft.draft_id)
+            val bbThread = ctx.threadId.asInstanceOf[js.UndefOr[String]]
+            bbThread.foreach { tid =>
+              Drafts.record(db, draftId, tid)
+              publishChanged(bb, tid)
+            }
+            Right(filedReport(draftId, bbThread.isDefined))
+
+  /** Revises a pending draft in place. `body` invalidates a previously supplied
+    * HTML alternative unless a fresh `html` comes with it; `attach` adds files.
+    */
+  def update(
+      bb: BbApi,
+      settings: BbSettingsHandle,
+      db: SqliteDb,
+      draftId: String,
+      to: List[String],
+      cc: List[String],
+      subject: Option[String],
+      body: Option[String],
+      html: Option[String],
+      attach: List[String],
+      ctx: js.Dynamic
+  )(using ExecutionContext): Future[Either[String, String]] =
+    Drafts.lookup(db, draftId) match
+      case None => Future.successful(Left(s"unknown draft: $draftId (see `bb agentmail drafts`)"))
+      case Some(row) =>
+        for
+          client      <- clientFromSettings(settings)
+          hostId      <- invokingHostId(bb, ctx)
+          attachments <- readAttachments(bb, hostId, attach)
+          payload = js.Dynamic.literal()
+          _       = if to.nonEmpty then payload.updateDynamic("to")(to.toJSArray)
+          _       = if cc.nonEmpty then payload.updateDynamic("cc")(cc.toJSArray)
+          _       = subject.foreach(s => payload.updateDynamic("subject")(s))
+          _       = body.foreach(b => payload.updateDynamic("text")(b))
+          _       = html match
+            case Some(h)               => payload.updateDynamic("html")(h)
+            case None if body.nonEmpty => payload.updateDynamic("html")(null)
+            case None                  => ()
+          _ = if attachments.nonEmpty then payload.updateDynamic("add_attachments")(attachments)
+          _ <- client.updateDraft(draftId, payload)
+        yield
+          publishChanged(bb, str(row.bb_thread_id))
+          Right(s"Draft $draftId updated. Still pending the user's review — NOT SENT.")
 
 object Cli:
   private def ok(stdout: String): js.Dynamic =
@@ -348,17 +330,27 @@ object Cli:
     bb.cli.register(
       js.Dynamic.literal(
         "name"    -> "agentmail",
-        "summary" -> "Send and receive email via AgentMail; replies come back to the sending thread",
+        "summary" -> "Email via AgentMail: file drafts the user reviews and sends; replies come back to the sending thread",
         "commands" -> js.Array(
           js.Dynamic.literal(
             "name"    -> "send",
-            "summary" -> "Send an email from this thread; replies will be delivered back here",
+            "summary" -> "File a new-email draft for the user to review and send (nothing is sent directly)",
             "usage"   -> "bb agentmail send --to a@b.com [--to ...] [--cc ...] --subject S --body TEXT [--html HTML] [--attach /abs/path]..."
           ),
           js.Dynamic.literal(
             "name"    -> "reply",
-            "summary" -> "Reply within an existing email thread",
+            "summary" -> "File a reply draft within an existing email thread",
             "usage"   -> "bb agentmail reply --thread AGENTMAIL_THREAD_ID --body TEXT [--html HTML] [--attach /abs/path]..."
+          ),
+          js.Dynamic.literal(
+            "name"    -> "update-draft",
+            "summary" -> "Revise a pending draft in place",
+            "usage"   -> "bb agentmail update-draft --draft DRAFT_ID [--to ...] [--cc ...] [--subject S] [--body TEXT] [--html HTML] [--attach /abs/path]..."
+          ),
+          js.Dynamic.literal(
+            "name"    -> "drafts",
+            "summary" -> "List pending drafts filed by this bb thread (all with --all)",
+            "usage"   -> "bb agentmail drafts [--all]"
           ),
           js.Dynamic.literal(
             "name"    -> "threads",
@@ -393,15 +385,19 @@ object Cli:
       ctx: js.Dynamic
   ): Future[js.Dynamic] =
     val result = argv match
-      case "send" :: rest      => send(bb, settings, db, rest, ctx)
-      case "reply" :: rest     => reply(bb, settings, db, rest, ctx)
-      case "poll" :: _         => Poller.poll(bb, settings, db).map(_ => ok("poll completed (see bb plugin logs agentmail)"))
-      case "threads" :: rest   => Future.successful(threads(db, rest, ctx))
-      case "read" :: rest      => read(settings, rest)
-      case "attachment" :: rest => attachment(bb, settings, rest, ctx)
+      case "send" :: rest         => send(bb, settings, db, rest, ctx)
+      case "reply" :: rest        => reply(bb, settings, db, rest, ctx)
+      case "update-draft" :: rest => updateDraft(bb, settings, db, rest, ctx)
+      case "drafts" :: rest       => Future.successful(drafts(db, rest, ctx))
+      case "poll" :: _            => Poller.poll(bb, settings, db).map(_ => ok("poll completed (see bb plugin logs agentmail)"))
+      case "threads" :: rest      => Future.successful(threads(db, rest, ctx))
+      case "read" :: rest         => read(settings, rest)
+      case "attachment" :: rest   => attachment(bb, settings, rest, ctx)
       case other =>
         Future.successful(
-          err(s"unknown command: ${other.mkString(" ")}\nCommands: send, reply, threads, read, attachment, poll")
+          err(
+            s"unknown command: ${other.mkString(" ")}\nCommands: send, reply, update-draft, drafts, threads, read, attachment, poll"
+          )
         )
     result.recover { case e => err(e.getMessage) }
 
@@ -418,7 +414,7 @@ object Cli:
     else if !flags.contains("body") then Future.successful(err("--body is required"))
     else
       Outbound
-        .send(
+        .fileSend(
           bb,
           settings,
           db,
@@ -445,7 +441,7 @@ object Cli:
       case (_, false) => Future.successful(err("--body is required"))
       case (Some(threadId), _) =>
         Outbound
-          .reply(
+          .fileReply(
             bb,
             settings,
             db,
@@ -456,6 +452,45 @@ object Cli:
             ctx = ctx
           )
           .map(_.fold(err, ok))
+
+  private def updateDraft(
+      bb: BbApi,
+      settings: BbSettingsHandle,
+      db: SqliteDb,
+      argv: List[String],
+      ctx: js.Dynamic
+  ): Future[js.Dynamic] =
+    val (flags, _) = parseArgs(argv)
+    flags.get("draft").flatMap(_.headOption) match
+      case None => Future.successful(err("--draft is required (see `bb agentmail drafts`)"))
+      case Some(draftId) =>
+        Outbound
+          .update(
+            bb,
+            settings,
+            db,
+            draftId,
+            to = flags.getOrElse("to", Nil),
+            cc = flags.getOrElse("cc", Nil),
+            subject = flags.get("subject").map(_.mkString(" ")),
+            body = flags.get("body").map(_.mkString("\n")),
+            html = flags.get("html").map(_.mkString("\n")),
+            attach = flags.getOrElse("attach", Nil),
+            ctx = ctx
+          )
+          .map(_.fold(err, ok))
+
+  private def drafts(db: SqliteDb, argv: List[String], ctx: js.Dynamic): js.Dynamic =
+    val (flags, _) = parseArgs(argv)
+    val all        = flags.get("all").exists(_.lastOption.exists(_ != "false"))
+    val bbThread   = ctx.threadId.asInstanceOf[js.UndefOr[String]]
+    val rows =
+      if all || bbThread.isEmpty then Drafts.all(db)
+      else Drafts.rowsFor(db, bbThread.get)
+    if rows.isEmpty then ok("No pending drafts.")
+    else
+      val lines = rows.map(row => s"${str(row.draft_id)}  bbThread=${str(row.bb_thread_id)}")
+      ok(lines.mkString("\n"))
 
   private def threads(db: SqliteDb, argv: List[String], ctx: js.Dynamic): js.Dynamic =
     val (flags, _) = parseArgs(argv)
@@ -529,10 +564,9 @@ object Cli:
         yield ok(s"Wrote ${str(written.sizeBytes)} bytes to $out (${str(meta.filename)})")
       case _ => Future.successful(err("--message, --attachment, and --out are all required"))
 
-/** Native agent tools for the review-then-send flow. Unlike the CLI run under
-  * a shell tool, a native tool call has no timeout of its own, so it simply
-  * waits while the user reviews (bounded by the host's one-hour interaction
-  * cap) and reports the outcome inline in the agent's turn.
+/** Native agent tools. All of them only file or revise drafts — none of them
+  * can send email; sending is exclusively the user's Send button in the Email
+  * panel (the sendDraft rpc).
   */
 object Tools:
   private val AttachmentsDescription =
@@ -543,9 +577,6 @@ object Tools:
       "content" -> js.Array(js.Dynamic.literal("type" -> "text", "text" -> message)),
       "isError" -> true
     )
-
-  private def stringList(value: js.Dynamic): List[String] =
-    value.asInstanceOf[js.UndefOr[js.Array[String]]].fold(Nil)(_.toList)
 
   private def optionalStr(value: js.Dynamic): Option[String] =
     Some(str(value)).filter(_.nonEmpty)
@@ -565,12 +596,13 @@ object Tools:
       js.Dynamic.literal(
         "name" -> "agentmail_send",
         "description" ->
-          ("Send an email from this thread via AgentMail. The call waits while the user reviews " +
-            "and possibly edits the draft in the thread, then reports whether the email was sent " +
-            "and the final text as actually sent. Replies to the email are delivered back into this thread."),
+          ("File a new-email draft via AgentMail for the user to review. This does NOT send anything: " +
+            "the draft appears in this thread's Email panel, where only the user can send (or discard) it. " +
+            "Returns the draft id; revise the draft with agentmail_update_draft. If the user sends it, a " +
+            "message is delivered into this thread, and replies to the email arrive here too."),
         "experimental_statusLabels" -> js.Dynamic.literal(
-          "pending"   -> "Waiting for the user to review the email",
-          "completed" -> "Email review finished"
+          "pending"   -> "Filing email draft",
+          "completed" -> "Filed email draft"
         ),
         "parameters" -> js.Dynamic.literal(
           "type" -> "object",
@@ -594,11 +626,12 @@ object Tools:
       js.Dynamic.literal(
         "name" -> "agentmail_reply",
         "description" ->
-          ("Reply within an existing AgentMail email thread owned by this bb thread. The call waits " +
-            "for the user's review the same way agentmail_send does."),
+          ("File a reply draft within an existing AgentMail email thread owned by this bb thread. " +
+            "Like agentmail_send, this does NOT send anything — the user reviews and sends the draft " +
+            "from the Email panel."),
         "experimental_statusLabels" -> js.Dynamic.literal(
-          "pending"   -> "Waiting for the user to review the email reply",
-          "completed" -> "Email review finished"
+          "pending"   -> "Filing email reply draft",
+          "completed" -> "Filed email reply draft"
         ),
         "parameters" -> js.Dynamic.literal(
           "type" -> "object",
@@ -616,6 +649,37 @@ object Tools:
         )
       )
     )
+    bb.agents.registerTool(
+      js.Dynamic.literal(
+        "name" -> "agentmail_update_draft",
+        "description" ->
+          ("Revise a pending email draft in place (e.g. after the user asks for changes). Only the " +
+            "supplied fields change; a new body replaces any earlier HTML alternative unless fresh html " +
+            "is supplied too; attachments are added, not replaced. The draft stays pending until the " +
+            "user sends it from the Email panel."),
+        "experimental_statusLabels" -> js.Dynamic.literal(
+          "pending"   -> "Updating email draft",
+          "completed" -> "Updated email draft"
+        ),
+        "parameters" -> js.Dynamic.literal(
+          "type" -> "object",
+          "properties" -> js.Dynamic.literal(
+            "draft"       -> stringSchema("Draft id returned by agentmail_send / agentmail_reply"),
+            "to"          -> stringArraySchema("Replacement recipient addresses"),
+            "cc"          -> stringArraySchema("Replacement Cc addresses"),
+            "subject"     -> stringSchema("Replacement subject line"),
+            "body"        -> stringSchema("Replacement plain-text body"),
+            "html"        -> stringSchema("Replacement HTML alternative body"),
+            "attachments" -> stringArraySchema(AttachmentsDescription + " (added to the draft)")
+          ),
+          "required"             -> js.Array("draft"),
+          "additionalProperties" -> false
+        ),
+        "execute" -> ((input: js.Dynamic, toolCtx: js.Dynamic) =>
+          executeUpdate(bb, settings, db, input, toolCtx).toJSPromise
+        )
+      )
+    )
 
   private def executeSend(
       bb: BbApi,
@@ -624,22 +688,22 @@ object Tools:
       input: js.Dynamic,
       toolCtx: js.Dynamic
   ): Future[js.Any] =
-    val to   = stringList(input.to)
+    val to   = strArray(input.to)
     val body = str(input.body)
     if to.isEmpty then Future.successful(textError("to must contain at least one recipient address"))
     else if body.isEmpty then Future.successful(textError("body is required"))
     else
       Outbound
-        .send(
+        .fileSend(
           bb,
           settings,
           db,
           to = to,
-          cc = stringList(input.cc),
+          cc = strArray(input.cc),
           subject = str(input.subject),
           body = body,
           html = optionalStr(input.html),
-          attach = stringList(input.attachments),
+          attach = strArray(input.attachments),
           ctx = toolCtx
         )
         .map(_.fold(textError, message => message: js.Any))
@@ -658,18 +722,289 @@ object Tools:
     else if body.isEmpty then Future.successful(textError("body is required"))
     else
       Outbound
-        .reply(
+        .fileReply(
           bb,
           settings,
           db,
           emailThreadId,
           body = body,
           html = optionalStr(input.html),
-          attach = stringList(input.attachments),
+          attach = strArray(input.attachments),
           ctx = toolCtx
         )
         .map(_.fold(textError, message => message: js.Any))
         .recover { case e => textError(e.getMessage) }
+
+  private def executeUpdate(
+      bb: BbApi,
+      settings: BbSettingsHandle,
+      db: SqliteDb,
+      input: js.Dynamic,
+      toolCtx: js.Dynamic
+  ): Future[js.Any] =
+    val draftId = str(input.draft)
+    if draftId.isEmpty then Future.successful(textError("draft is required"))
+    else
+      Outbound
+        .update(
+          bb,
+          settings,
+          db,
+          draftId,
+          to = strArray(input.to),
+          cc = strArray(input.cc),
+          subject = optionalStr(input.subject),
+          body = optionalStr(input.body),
+          html = optionalStr(input.html),
+          attach = strArray(input.attachments),
+          ctx = toolCtx
+        )
+        .map(_.fold(textError, message => message: js.Any))
+        .recover { case e => textError(e.getMessage) }
+
+/** The frontend data plane: the Email panel, the thread-header badge, and the
+  * user-only send/discard/edit operations.
+  */
+object Rpc:
+  /** Minimal Standard Schema v1 value: bb's RPC layer only needs `~standard.validate`. */
+  private def make(validate: js.Function1[js.Any, js.Any]): js.Any =
+    js.Dynamic.literal(
+      "~standard" -> js.Dynamic.literal("version" -> 1, "vendor" -> "bb-plugin-agentmail", "validate" -> validate)
+    )
+
+  private def invalid(message: String): js.Any =
+    js.Dynamic.literal("issues" -> js.Array(js.Dynamic.literal("message" -> message)))
+
+  private val passthrough: js.Any =
+    make(js.Any.fromFunction1(value => js.Dynamic.literal("value" -> value.asInstanceOf[js.Any])))
+
+  /** An object with exactly these required non-empty string fields (extra fields pass through). */
+  private def strings(fields: String*): js.Any =
+    make(js.Any.fromFunction1 { value =>
+      if value == null || js.typeOf(value) != "object" then invalid("expected an object")
+      else
+        val d = value.asInstanceOf[js.Dynamic]
+        fields
+          .collectFirst {
+            case name
+                if {
+                  val v = d.selectDynamic(name)
+                  js.typeOf(v) != "string" || v.asInstanceOf[String].isEmpty
+                } =>
+              invalid(s"$name must be a non-empty string")
+          }
+          .getOrElse(js.Dynamic.literal("value" -> value.asInstanceOf[js.Any]))
+    })
+
+  private def method(input: js.Any): js.Any =
+    js.Dynamic.literal("input" -> input, "output" -> passthrough)
+
+  private def draftSummary(d: js.Dynamic): js.Dynamic =
+    val attachments = d.attachments
+      .asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]]
+      .fold(js.Array[String]())(_.map(a => str(a.filename)))
+    js.Dynamic.literal(
+      "draftId"     -> str(d.draft_id),
+      "to"          -> strArray(d.to).toJSArray,
+      "cc"          -> strArray(d.cc).toJSArray,
+      "subject"     -> str(d.subject),
+      "body"        -> str(d.text),
+      "hasHtml"     -> str(d.html).nonEmpty,
+      "isReply"     -> str(d.in_reply_to).nonEmpty,
+      "updatedAt"   -> str(d.updated_at),
+      "attachments" -> attachments
+    )
+
+  def register(bb: BbApi, settings: BbSettingsHandle, db: SqliteDb): Unit =
+    bb.rpc.register(
+      js.Dynamic.literal(
+        "emailBadge"     -> method(strings("threadId")),
+        "emailState"     -> method(strings("threadId")),
+        "threadMessages" -> method(strings("emailThreadId")),
+        "saveDraft"      -> method(strings("draftId")),
+        "sendDraft"      -> method(strings("draftId")),
+        "discardDraft"   -> method(strings("draftId"))
+      ),
+      js.Dynamic.literal(
+        "emailBadge" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+          val tid = str(input.threadId)
+          js.Dynamic.literal(
+            "pendingDrafts" -> Drafts.rowsFor(db, tid).size,
+            "emailThreads"  -> db
+              .prepare("SELECT COUNT(*) AS n FROM email_threads WHERE bb_thread_id = ?")
+              .get(tid)
+              .fold(0)(row => str(row.n).toIntOption.getOrElse(0))
+          )
+        },
+        "emailState" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+          emailState(bb, settings, db, str(input.threadId)).toJSPromise
+        },
+        "threadMessages" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+          threadMessages(settings, str(input.emailThreadId)).toJSPromise
+        },
+        "saveDraft" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+          saveDraft(bb, settings, db, input).toJSPromise
+        },
+        "sendDraft" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+          sendDraft(bb, settings, db, str(input.draftId)).toJSPromise
+        },
+        "discardDraft" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+          discardDraft(bb, settings, db, str(input.draftId)).toJSPromise
+        }
+      )
+    )
+
+  private def emailState(
+      bb: BbApi,
+      settings: BbSettingsHandle,
+      db: SqliteDb,
+      bbThreadId: String
+  ): Future[js.Dynamic] =
+    clientFromSettings(settings).flatMap { client =>
+      val rows = Drafts.rowsFor(db, bbThreadId)
+      rows
+        .foldLeft(Future.successful(js.Array[js.Any]())) { (acc, row) =>
+          acc.flatMap { collected =>
+            val draftId = str(row.draft_id)
+            client
+              .getDraft(draftId)
+              .map { d =>
+                val _ = collected.push(draftSummary(d))
+                collected
+              }
+              .recover { case e =>
+                // A draft deleted outside bb (e.g. AgentMail console) self-heals here.
+                bb.log.warn(s"dropping stale draft $draftId: ${e.getMessage}")
+                Drafts.remove(db, draftId)
+                collected
+              }
+          }
+        }
+        .map { drafts =>
+          val threads = db
+            .prepare("SELECT * FROM email_threads WHERE bb_thread_id = ? ORDER BY created_at DESC")
+            .all(bbThreadId)
+            .map(row =>
+              js.Dynamic.literal(
+                "emailThreadId" -> str(row.agentmail_thread_id),
+                "subject"       -> str(row.subject),
+                "counterparty"  -> str(row.counterparty)
+              ): js.Any
+            )
+          js.Dynamic.literal("drafts" -> drafts, "threads" -> threads)
+        }
+    }
+
+  private def threadMessages(settings: BbSettingsHandle, emailThreadId: String): Future[js.Dynamic] =
+    settings.get().toFuture.flatMap { s =>
+      val inbox = str(s.inbox)
+      clientFromSettings(settings).flatMap { client =>
+        client.getThread(emailThreadId).map { thread =>
+          val messages = thread.messages
+            .asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]]
+            .fold(js.Array[js.Any]())(_.map { m =>
+              val from = str(m.selectDynamic("from"))
+              val attachments = m.attachments
+                .asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]]
+                .fold(js.Array[js.Any]())(_.map(a =>
+                  js.Dynamic.literal(
+                    "filename"     -> str(a.filename),
+                    "attachmentId" -> str(a.attachment_id)
+                  ): js.Any
+                ))
+              js.Dynamic.literal(
+                "messageId"   -> str(m.message_id),
+                "from"        -> from,
+                "timestamp"   -> str(m.timestamp),
+                "body"        -> Seq(str(m.text), str(m.preview)).find(_.nonEmpty).getOrElse("(no text)"),
+                "direction"   -> (if inbox.nonEmpty && from.contains(inbox) then "sent" else "received"),
+                "attachments" -> attachments
+              ): js.Any
+            })
+          js.Dynamic.literal("messages" -> messages)
+        }
+      }
+    }
+
+  private def rejected(message: String): Future[js.Dynamic] =
+    Future.failed(new js.JavaScriptException(new js.Error(message)))
+
+  private def saveDraft(
+      bb: BbApi,
+      settings: BbSettingsHandle,
+      db: SqliteDb,
+      input: js.Dynamic
+  ): Future[js.Dynamic] =
+    val draftId = str(input.draftId)
+    Drafts.lookup(db, draftId) match
+      case None => rejected(s"unknown draft: $draftId")
+      case Some(row) =>
+        clientFromSettings(settings).flatMap { client =>
+          val payload = js.Dynamic.literal()
+          input.to.asInstanceOf[js.UndefOr[js.Array[String]]].foreach(v => payload.updateDynamic("to")(v))
+          input.cc.asInstanceOf[js.UndefOr[js.Array[String]]].foreach(v => payload.updateDynamic("cc")(v))
+          input.subject.asInstanceOf[js.UndefOr[String]].foreach(v => payload.updateDynamic("subject")(v))
+          input.body.asInstanceOf[js.UndefOr[String]].foreach { v =>
+            payload.updateDynamic("text")(v)
+            // The panel edits plain text only, so an edited body invalidates
+            // a previously composed HTML alternative.
+            payload.updateDynamic("html")(null)
+          }
+          client.updateDraft(draftId, payload).map { d =>
+            publishChanged(bb, str(row.bb_thread_id))
+            draftSummary(d)
+          }
+        }
+
+  private def sendDraft(
+      bb: BbApi,
+      settings: BbSettingsHandle,
+      db: SqliteDb,
+      draftId: String
+  ): Future[js.Dynamic] =
+    Drafts.lookup(db, draftId) match
+      case None => rejected(s"unknown draft: $draftId")
+      case Some(row) =>
+        val bbThreadId = str(row.bb_thread_id)
+        clientFromSettings(settings).flatMap { client =>
+          for
+            draft <- client.getDraft(draftId)
+            sent  <- client.sendDraft(draftId)
+          yield
+            val emailThreadId = str(sent.thread_id)
+            val messageId     = str(sent.message_id)
+            val to            = strArray(draft.to)
+            val subject       = str(draft.subject)
+            Mapping.record(db, emailThreadId, bbThreadId, messageId, subject, to.headOption.getOrElse(""))
+            Drafts.remove(db, draftId)
+            publishChanged(bb, bbThreadId)
+            val notice =
+              s"""The user reviewed and sent email draft $draftId from the Email panel.
+                 |To: ${to.mkString(", ")}
+                 |Subject: $subject
+                 |AgentMail thread: $emailThreadId, message: $messageId. Replies will be delivered back to this thread.""".stripMargin
+            Poller.deliverToThread(bb, bbThreadId, notice).failed.foreach { e =>
+              bb.log.warn(s"failed to notify thread $bbThreadId of sent draft: ${e.getMessage}")
+            }
+            js.Dynamic.literal("messageId" -> messageId, "emailThreadId" -> emailThreadId)
+        }
+
+  private def discardDraft(
+      bb: BbApi,
+      settings: BbSettingsHandle,
+      db: SqliteDb,
+      draftId: String
+  ): Future[js.Dynamic] =
+    Drafts.lookup(db, draftId) match
+      case None => rejected(s"unknown draft: $draftId")
+      case Some(row) =>
+        clientFromSettings(settings).flatMap { client =>
+          client.deleteDraft(draftId).map { _ =>
+            Drafts.remove(db, draftId)
+            publishChanged(bb, str(row.bb_thread_id))
+            js.Dynamic.literal("ok" -> true)
+          }
+        }
 
 object Poller:
   private def metaGet(db: SqliteDb, key: String): Option[String] =
@@ -711,9 +1046,9 @@ object Poller:
        |
        |$body$attachments
        |
-       |To reply by email: call the agentmail_reply tool with thread $agentmailThreadId.""".stripMargin
+       |To reply by email: call the agentmail_reply tool with thread $agentmailThreadId (it files a draft the user reviews and sends from the Email panel).""".stripMargin
 
-  private def deliverToThread(bb: BbApi, bbThreadId: String, text: String)(using ExecutionContext): Future[Unit] =
+  def deliverToThread(bb: BbApi, bbThreadId: String, text: String)(using ExecutionContext): Future[Unit] =
     bb.sdk.threads.get(js.Dynamic.literal("threadId" -> bbThreadId)).toFuture.flatMap { thread =>
       val archived = thread.archivedAt.asInstanceOf[Any] != null
       val unarchive =
@@ -735,7 +1070,7 @@ object Poller:
 
   private def spawnForUnmatched(bb: BbApi, db: SqliteDb, full: js.Dynamic, agentmailThreadId: String, text: String)(
       using ExecutionContext
-  ): Future[Unit] =
+  ): Future[String] =
     bb.sdk.projects.list(js.Dynamic.literal("includePersonal" -> true)).toFuture.flatMap { projects =>
       projects.find(p => str(p.kind) == "personal") match
         case None => Future.failed(AgentMailException("no personal project found for unmatched inbound email"))
@@ -753,14 +1088,16 @@ object Poller:
             )
             .toFuture
             .map { spawned =>
+              val spawnedId = str(spawned.id)
               Mapping.record(
                 db,
                 agentmailThreadId,
-                str(spawned.id),
+                spawnedId,
                 str(full.message_id),
                 subject,
                 str(full.selectDynamic("from"))
               )
+              spawnedId
             }
     }
 
@@ -780,19 +1117,22 @@ object Poller:
         val text              = formatInbound(full, agentmailThreadId)
         val deliver = Mapping.lookup(db, agentmailThreadId) match
           case Some(mapping) =>
-            deliverToThread(bb, str(mapping.bb_thread_id), text).map { _ =>
+            val bbThreadId = str(mapping.bb_thread_id)
+            deliverToThread(bb, bbThreadId, text).map { _ =>
               Mapping.record(
                 db,
                 agentmailThreadId,
-                str(mapping.bb_thread_id),
+                bbThreadId,
                 messageId,
                 str(mapping.subject),
                 from
               )
+              bbThreadId
             }
           case None => spawnForUnmatched(bb, db, full, agentmailThreadId, text)
-        deliver.map { _ =>
+        deliver.map { bbThreadId =>
           markDelivered(db, messageId)
+          publishChanged(bb, bbThreadId)
           bb.log.info(s"delivered email message $messageId (thread $agentmailThreadId)")
         }
       }

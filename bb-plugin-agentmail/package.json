@@ -4,7 +4,7 @@
   "type": "module",
   "engines": { "bbPluginSdk": "^0.4.1" },
   "scripts": {
-    "build": "bleep --directory .. link agentmail && cp ../.bleep/builds/normal/.bloop/agentmail/link-output/debug/js/main.js server.js"
+    "build": "bleep --directory .. link agentmail && cp ../.bleep/builds/normal/.bloop/agentmail/link-output/debug/js/main.js server.js && bleep --directory .. link agentmail-app && cp ../.bleep/builds/normal/.bloop/agentmail-app/link-output/debug/js/main.js app-core.cjs"
   },
   "bb": {
     "name": "AgentMail",

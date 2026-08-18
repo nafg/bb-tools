@@ -13,6 +13,13 @@ projects:
     - template-common
     - template-js
     folder: ./bb-plugin-agentmail/agentmail
+  agentmail-app:
+    extends:
+    - template-common
+    - template-js
+    dependencies:
+    - com.github.japgolly.scalajs-react::core:4.0.0
+    folder: ./bb-plugin-agentmail/agentmail-app
   converse:
     dependsOn: bb-plugin-facades
     extends:

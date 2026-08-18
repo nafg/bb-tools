@@ -37,12 +37,37 @@ class AgentMailClient(apiKey: String, inboxId: String)(using ExecutionContext):
         resp.text().asInstanceOf[js.Promise[String]].toFuture.flatMap { text =>
           Future.failed(AgentMailException(s"AgentMail $method $url failed: $status $text"))
         }
-      else resp.json().asInstanceOf[js.Promise[js.Dynamic]].toFuture
+      else
+        resp.text().asInstanceOf[js.Promise[String]].toFuture.map { text =>
+          if text.isEmpty then js.Dynamic.literal() else js.JSON.parse(text)
+        }
     }
 
   /** Returns { message_id, thread_id }. */
   def sendMessage(payload: js.Any): Future[js.Dynamic] =
     request("POST", s"$inboxPath/messages/send", Some(payload))
+
+  /** Creates a draft; `in_reply_to` in the payload makes it a reply draft whose
+    * recipients, subject, and threading derive from the referenced message.
+    * Returns the draft object including draft_id.
+    */
+  def createDraft(payload: js.Any): Future[js.Dynamic] =
+    request("POST", s"$inboxPath/drafts", Some(payload))
+
+  /** Full draft object. */
+  def getDraft(draftId: String): Future[js.Dynamic] =
+    request("GET", s"$inboxPath/drafts/${URLEncoder.encode(draftId, "UTF-8")}", None)
+
+  /** Partial update; null clears a field. Returns the updated draft. */
+  def updateDraft(draftId: String, payload: js.Any): Future[js.Dynamic] =
+    request("PATCH", s"$inboxPath/drafts/${URLEncoder.encode(draftId, "UTF-8")}", Some(payload))
+
+  def deleteDraft(draftId: String): Future[js.Dynamic] =
+    request("DELETE", s"$inboxPath/drafts/${URLEncoder.encode(draftId, "UTF-8")}", None)
+
+  /** Sends an existing draft as-is. Returns { message_id, thread_id }. */
+  def sendDraft(draftId: String): Future[js.Dynamic] =
+    request("POST", s"$inboxPath/drafts/${URLEncoder.encode(draftId, "UTF-8")}/send", Some(js.Dynamic.literal()))
 
   /** Returns { message_id, thread_id }. */
   def replyToMessage(messageId: String, payload: js.Any): Future[js.Dynamic] =
