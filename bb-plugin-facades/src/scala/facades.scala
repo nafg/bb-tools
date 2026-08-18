@@ -40,8 +40,16 @@ trait BbSettingsHandle extends js.Object:
 
 @js.native
 trait BbStorageArea extends js.Object:
+  val kv: BbKvStorage                                            = js.native
   def database(): SqliteDb                                       = js.native
   def migrate(db: SqliteDb, statements: js.Array[String]): Unit  = js.native
+
+@js.native
+trait BbKvStorage extends js.Object:
+  /** Resolves undefined when the key is absent. Values are JSON, ≤256KB. */
+  def get(key: String): js.Promise[js.Dynamic]              = js.native
+  def set(key: String, value: js.Any): js.Promise[Unit]     = js.native
+  def delete(key: String): js.Promise[Unit]                 = js.native
 
 @js.native
 trait SqliteDb extends js.Object:
@@ -103,6 +111,18 @@ trait BbSdk extends js.Object:
   val files: BbFilesArea               = js.native
   val projects: BbProjectsArea         = js.native
   val system: BbSystemArea             = js.native
+  val hosts: BbHostsArea               = js.native
+  val terminals: BbTerminalsArea       = js.native
+
+@js.native
+trait BbHostsArea extends js.Object:
+  def list(args: js.Any): js.Promise[js.Dynamic] = js.native
+
+@js.native
+trait BbTerminalsArea extends js.Object:
+  def create(args: js.Any): js.Promise[js.Dynamic] = js.native
+  def get(args: js.Any): js.Promise[js.Dynamic]    = js.native
+  def close(args: js.Any): js.Promise[js.Dynamic]  = js.native
 
 @js.native
 trait BbSystemArea extends js.Object:

@@ -87,13 +87,28 @@ def plugin(bb: BbApi): Unit =
       ),
       "pocketUrl" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "POCKET TTS: /tts endpoint",
-        "default" -> "http://127.0.0.1:8000/tts"
+        "label"   -> "POCKET TTS: external /tts endpoint (empty = managed locally by the plugin)",
+        "default" -> ""
       ),
       "pocketVoice" -> js.Dynamic.literal(
         "type"    -> "string",
         "label"   -> "POCKET TTS: voice",
         "default" -> "alba"
+      ),
+      "pocketPort" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "POCKET TTS: local port (managed mode)",
+        "default" -> "8000"
+      ),
+      "pocketStartCommand" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "POCKET TTS: start command (managed mode; empty = do not manage)",
+        "default" -> "uvx pocket-tts serve --host localhost --port 8000"
+      ),
+      "serviceIdleMinutes" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "SERVICES: stop managed services after this many idle minutes",
+        "default" -> "15"
       ),
       "kokoroUrl" -> js.Dynamic.literal(
         "type"    -> "string",
@@ -277,6 +292,126 @@ def plugin(bb: BbApi): Unit =
           }
     }
 
+  // ------------------------------------------------------- managed services
+
+  /** Any HTTP response (even an error status) means the service is up;
+    * only a network failure means it is down.
+    */
+  def probeService(url: String): Future[Boolean] =
+    js.Dynamic.global
+      .fetch(url, js.Dynamic.literal("method" -> "POST", "signal" -> js.Dynamic.global.AbortSignal.timeout(1500)))
+      .asInstanceOf[js.Promise[js.Dynamic]]
+      .toFuture
+      .map(_ => true)
+      .recover(_ => false)
+
+  def connectedHostId(): Future[Option[String]] =
+    bb.sdk.hosts.list(js.Dynamic.literal()).toFuture.map { result =>
+      val rows =
+        if js.Array.isArray(result.asInstanceOf[js.Any]) then result.asInstanceOf[js.Array[js.Dynamic]]
+        else result.hosts.asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]].getOrElse(js.Array[js.Dynamic]())
+      rows.find(h => str(h.status) == "connected").map(h => str(h.id))
+    }
+
+  def touchPocketUse(): Unit =
+    bb.storage.kv.set("pocket.lastUseAt", js.Date.now()).toFuture.failed.foreach(_ => ())
+
+  var pocketStarting: Future[Either[String, String]] = null
+
+  /** Resolve the Pocket TTS base URL, starting the managed service into a bb
+    * terminal when it is not running. External pocketUrl disables management.
+    */
+  def ensurePocket(s: js.Dynamic): Future[Either[String, String]] =
+    val external = str(s.pocketUrl)
+    if external.nonEmpty then Future.successful(Right(external))
+    else
+      val port = str(s.pocketPort) match
+        case "" => "8000"
+        case p  => p
+      val url = s"http://127.0.0.1:$port/tts"
+      probeService(url).flatMap {
+        case true =>
+          touchPocketUse()
+          Future.successful(Right(url))
+        case false =>
+          val command = str(s.pocketStartCommand)
+          if command.isEmpty then
+            Future.successful(Left("Pocket TTS is not running and no start command is configured"))
+          else if pocketStarting != null then pocketStarting
+          else
+            bb.log.info(s"starting managed Pocket TTS: $command")
+            state.active.foreach { a =>
+              publishSignal("status", a.sessionId, a.threadId, "text" -> "Starting Pocket TTS…")
+            }
+            val started =
+              connectedHostId()
+                .flatMap {
+                  case None => Future.successful(Left("no connected host to start Pocket TTS on"))
+                  case Some(hostId) =>
+                    val home = str(js.Dynamic.global.process.env.HOME) match
+                      case "" => "/tmp"
+                      case h  => h
+                    bb.sdk.terminals
+                      .create(
+                        js.Dynamic.literal(
+                          "cols"  -> 120,
+                          "rows"  -> 30,
+                          "scope" -> js.Dynamic.literal("kind" -> "host_path", "hostId" -> hostId, "cwd" -> home),
+                          "title" -> "pocket-tts (converse)",
+                          "start" -> js.Dynamic.literal("mode" -> "command", "command" -> command)
+                        )
+                      )
+                      .toFuture
+                      .flatMap { result =>
+                        val terminal =
+                          result.terminal.asInstanceOf[js.UndefOr[js.Dynamic]].getOrElse(result)
+                        val terminalId = str(terminal.id)
+                        bb.storage.kv.set("pocket.terminalId", terminalId).toFuture.map(_ => terminalId)
+                      }
+                      .flatMap { terminalId =>
+                        def awaitReady(attempt: Int): Future[Either[String, String]] =
+                          probeService(url).flatMap {
+                            case true =>
+                              bb.log.info(s"Pocket TTS is up (terminal $terminalId)")
+                              touchPocketUse()
+                              Future.successful(Right(url))
+                            case false if attempt >= 90 =>
+                              Future.successful(Left("Pocket TTS did not become ready within 90s"))
+                            case false => delayMs(1000).flatMap(_ => awaitReady(attempt + 1))
+                          }
+                        awaitReady(0)
+                      }
+                }
+                .recover { case e => Left(s"could not start Pocket TTS: ${e.getMessage}") }
+            pocketStarting = started
+            started.onComplete(_ => pocketStarting = null)
+            started
+      }
+
+  bb.background.schedule(
+    "service-idle",
+    "*/5 * * * *",
+    () =>
+      (for
+        s          <- settings.get().toFuture
+        terminalId <- bb.storage.kv.get("pocket.terminalId").toFuture
+        lastUse    <- bb.storage.kv.get("pocket.lastUseAt").toFuture
+        _ <- {
+          val idleMinutes = str(s.serviceIdleMinutes).toIntOption.filter(_ > 0).getOrElse(15)
+          val tid         = str(terminalId)
+          val last        = lastUse.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
+          if tid.nonEmpty && last > 0 && js.Date.now() - last > idleMinutes * 60_000.0 then
+            bb.log.info(s"stopping managed Pocket TTS after $idleMinutes idle minutes")
+            for
+              _ <- bb.sdk.terminals.close(js.Dynamic.literal("terminalId" -> tid)).toFuture.recover(_ => ())
+              _ <- bb.storage.kv.delete("pocket.terminalId").toFuture
+              _ <- bb.storage.kv.delete("pocket.lastUseAt").toFuture
+            yield ()
+          else Future.unit
+        }
+      yield ()).toJSPromise
+  )
+
   bb.rpc.register(
     js.Dynamic.literal(
       "startSession" -> js.Dynamic.literal(
@@ -315,6 +450,15 @@ def plugin(bb: BbApi): Unit =
         state.active = Some(ActiveSession(sessionId, threadId))
         state.awaiting.filterInPlace((_, sess) => sess == sessionId)
         bb.log.info(s"voice session $sessionId started for thread $threadId")
+        // Warm the managed TTS service while the user starts talking so the
+        // first spoken reply is not delayed by service startup.
+        settings.get().toFuture.foreach { s =>
+          if str(s.ttsProvider) == "pocket-tts" then
+            ensurePocket(s).foreach {
+              case Left(message) => bb.log.warn(s"TTS warm-up: $message")
+              case Right(_)      => ()
+            }
+        }
         js.Dynamic.literal("ok" -> true)
       },
       "stopSession" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
@@ -415,49 +559,56 @@ def plugin(bb: BbApi): Unit =
             else
               // Each provider owns its settings block; unused blocks persist
               // untouched, so switching providers is never destructive.
-              val request: Either[String, (String, js.Dynamic)] = str(s.ttsProvider) match
+              val requestF: Future[Either[String, (String, js.Dynamic)]] = str(s.ttsProvider) match
                 case "pocket-tts" =>
-                  val form = js.Dynamic.newInstance(js.Dynamic.global.FormData)()
-                  val _    = form.set("text", text)
-                  val voice = str(s.pocketVoice)
-                  if voice.nonEmpty then { val _ = form.set("voice_url", voice) }
-                  Right((str(s.pocketUrl), js.Dynamic.literal("method" -> "POST", "body" -> form)))
+                  ensurePocket(s).map(_.map { url =>
+                    touchPocketUse()
+                    val form = js.Dynamic.newInstance(js.Dynamic.global.FormData)()
+                    val _    = form.set("text", text)
+                    val voice = str(s.pocketVoice)
+                    if voice.nonEmpty then { val _ = form.set("voice_url", voice) }
+                    (url, js.Dynamic.literal("method" -> "POST", "body" -> form))
+                  })
                 case "kokoro" =>
-                  val payload = js.Dynamic.literal(
-                    "model"           -> "kokoro",
-                    "input"           -> text,
-                    "response_format" -> "mp3"
-                  )
-                  val voice = str(s.kokoroVoice)
-                  if voice.nonEmpty then payload.updateDynamic("voice")(voice)
-                  Right(
-                    (
-                      str(s.kokoroUrl),
-                      js.Dynamic.literal(
-                        "method"  -> "POST",
-                        "headers" -> js.Dynamic.literal("content-type" -> "application/json"),
-                        "body"    -> js.JSON.stringify(payload)
-                      )
+                  Future.successful {
+                    val payload = js.Dynamic.literal(
+                      "model"           -> "kokoro",
+                      "input"           -> text,
+                      "response_format" -> "mp3"
                     )
-                  )
-                case "openai-compatible" =>
-                  val url = str(s.ttsCustomUrl)
-                  if url.isEmpty then Left("ttsCustomUrl is not configured in the Converse plugin settings")
-                  else
-                    val headers = js.Dynamic.literal("content-type" -> "application/json")
-                    val apiKey  = str(s.ttsCustomApiKey)
-                    if apiKey.nonEmpty then headers.updateDynamic("Authorization")(s"Bearer $apiKey")
-                    val payload = js.Dynamic.literal("input" -> text, "response_format" -> "mp3")
-                    val model   = str(s.ttsCustomModel)
-                    if model.nonEmpty then payload.updateDynamic("model")(model)
-                    val voice = str(s.ttsCustomVoice)
+                    val voice = str(s.kokoroVoice)
                     if voice.nonEmpty then payload.updateDynamic("voice")(voice)
                     Right(
-                      (url, js.Dynamic.literal("method" -> "POST", "headers" -> headers, "body" -> js.JSON.stringify(payload)))
+                      (
+                        str(s.kokoroUrl),
+                        js.Dynamic.literal(
+                          "method"  -> "POST",
+                          "headers" -> js.Dynamic.literal("content-type" -> "application/json"),
+                          "body"    -> js.JSON.stringify(payload)
+                        )
+                      )
                     )
+                  }
+                case "openai-compatible" =>
+                  Future.successful {
+                    val url = str(s.ttsCustomUrl)
+                    if url.isEmpty then Left("ttsCustomUrl is not configured in the Converse plugin settings")
+                    else
+                      val headers = js.Dynamic.literal("content-type" -> "application/json")
+                      val apiKey  = str(s.ttsCustomApiKey)
+                      if apiKey.nonEmpty then headers.updateDynamic("Authorization")(s"Bearer $apiKey")
+                      val payload = js.Dynamic.literal("input" -> text, "response_format" -> "mp3")
+                      val model   = str(s.ttsCustomModel)
+                      if model.nonEmpty then payload.updateDynamic("model")(model)
+                      val voice = str(s.ttsCustomVoice)
+                      if voice.nonEmpty then payload.updateDynamic("voice")(voice)
+                      Right(
+                        (url, js.Dynamic.literal("method" -> "POST", "headers" -> headers, "body" -> js.JSON.stringify(payload)))
+                      )
+                  }
                 case other =>
-                  Left(s"ttsProvider is '$other'; the /tts route serves only server-side providers")
-              request match
+                  Future.successful(Left(s"ttsProvider is '$other'; the /tts route serves only server-side providers"))
+              requestF.flatMap {
                 case Left(message) => Future.successful(jsonResponse(400, message))
                 case Right((url, init)) =>
                   js.Dynamic.global
@@ -479,6 +630,7 @@ def plugin(bb: BbApi): Unit =
                           )
                         )
                     }
+              }
           }
         yield response
       handled.toJSPromise

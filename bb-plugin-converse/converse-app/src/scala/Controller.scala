@@ -501,6 +501,11 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
             debug(s"speak signal (${text.length} chars)")
             if text.trim.nonEmpty then speakText(text)
             else setPhase("listening")
+          case "status" =>
+            // Transient backend progress (e.g. managed service startup);
+            // shown as interim text and naturally replaced by later updates.
+            interimText = p.text.asInstanceOf[js.UndefOr[String]].getOrElse("")
+            refreshSnapshot()
           case "agent-failed" =>
             errorNote = p.error.asInstanceOf[js.UndefOr[String]].getOrElse("the agent failed")
             setPhase("listening")
