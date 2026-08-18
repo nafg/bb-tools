@@ -547,7 +547,10 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     if abortCtl != null then { val _ = abortCtl.abort(); abortCtl = null }
     if !js.isUndefined(js.Dynamic.global.speechSynthesis) then { val _ = js.Dynamic.global.speechSynthesis.cancel() }
     if currentAudio != null then
-      val _ = currentAudio.pause()
+      // An AudioBufferSourceNode stops with stop(); its onended settles the
+      // playback future.
+      try { val _ = currentAudio.stop() }
+      catch { case _: Throwable => () }
       currentAudio = null
 
   private def delay(seconds: Double): Future[Unit] =
@@ -590,22 +593,38 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
         else response.blob().asInstanceOf[js.Promise[js.Dynamic]].toFuture
       }
 
+  /** Plays through the session's AudioContext (created inside the toggle
+    * click), which is exempt from autoplay blocking — a standalone
+    * Audio.play() minutes after the last user gesture gets rejected by
+    * Firefox's autoplay policy and would silently skip every chunk.
+    */
   private def playBlob(gen: Int, blob: js.Dynamic): Future[Unit] =
-    if generation != gen then Future.unit
+    if generation != gen || audioContext == null then Future.unit
     else
-      val url   = js.Dynamic.global.URL.createObjectURL(blob).asInstanceOf[String]
-      val p     = Promise[Unit]()
-      val audio = js.Dynamic.newInstance(js.Dynamic.global.Audio)(url)
-      currentAudio = audio
-      def settle(): Unit =
-        if currentAudio eq audio then currentAudio = null
-        val _ = js.Dynamic.global.URL.revokeObjectURL(url)
-        if !p.isCompleted then { val _ = p.success(()) }
-      audio.onended = js.Any.fromFunction1((_: js.Any) => settle())
-      audio.onerror = js.Any.fromFunction1((_: js.Any) => settle())
-      audio.onpause = js.Any.fromFunction1((_: js.Any) => settle())
-      audio.play().asInstanceOf[js.Promise[Unit]].toFuture.failed.foreach(_ => settle())
-      p.future
+      val ctx = audioContext.asInstanceOf[js.Dynamic]
+      blob
+        .arrayBuffer()
+        .asInstanceOf[js.Promise[js.Any]]
+        .toFuture
+        .flatMap { bytes =>
+          ctx.decodeAudioData(bytes).asInstanceOf[js.Promise[js.Dynamic]].toFuture
+        }
+        .flatMap { decoded =>
+          if generation != gen || audioContext == null then Future.unit
+          else
+            val p      = Promise[Unit]()
+            val source = ctx.createBufferSource()
+            source.buffer = decoded
+            val _ = source.connect(ctx.destination)
+            currentAudio = source
+            source.onended = js.Any.fromFunction1 { (_: js.Any) =>
+              if currentAudio eq source then currentAudio = null
+              if !p.isCompleted then { val _ = p.success(()) }
+            }
+            val _ = source.start()
+            p.future
+        }
+        .recover { case e => debug(s"playback failed: ${e.getMessage}") }
 
   /** Sequential playback with a one-chunk synthesis prefetch. */
   private def speakServer(gen: Int, chunks: List[SpeechChunk]): Future[Unit] =
