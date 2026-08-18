@@ -118,4 +118,11 @@ export default definePluginApp((app) => {
       else ctl.startViewed();
     },
   });
+  app.slots.messageAction({
+    id: "speak-message",
+    title: "Speak this message",
+    icon: "Volume2",
+    run: ({ threadId, message, selectedText }) =>
+      getController().replay(selectedText ?? message.text, threadId),
+  });
 });

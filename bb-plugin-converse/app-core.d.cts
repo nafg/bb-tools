@@ -40,6 +40,8 @@ export interface ConverseController {
   stop(): void;
   /** Store the effective settings used by startViewed. */
   configure(opts: ConverseStartOptions): void;
+  /** Speak text without starting or advancing a voice session. */
+  replay(text: string, sourceThreadId: string): Promise<void>;
   handleSignal(payload: unknown): void;
   /** Report the thread the app route currently shows; utterances route here. */
   noteViewed(threadId: string): void;

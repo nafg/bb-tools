@@ -4,6 +4,7 @@ import conversecore.*
 
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.scalajs.js
+import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.annotation.JSExportTopLevel
 import scala.scalajs.js.timers.{SetIntervalHandle, SetTimeoutHandle, clearInterval, clearTimeout, setInterval, setTimeout}
 import scala.scalajs.js.typedarray.Float32Array
@@ -119,6 +120,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
 
   def configure(opts: js.Dynamic): Unit =
     startOptions = opts
+    player.setTtsMode(opts.ttsMode.asInstanceOf[js.UndefOr[String]].getOrElse("browser"))
 
   /** Start a session targeting the thread currently in view. */
   def startViewed(): Unit =
@@ -139,14 +141,18 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
 
   // ---------------------------------------------------------------- session
 
+  private def ensureAudioContext(): Unit =
+    if audioContext == null then
+      audioContext = new AudioContext
+      player.setAudioContext(audioContext)
+    val _ = audioContext.resume()
+
   def start(newThreadId: String, opts: js.Dynamic): Unit =
     stopInternal(notifyServer = true)
     // Created synchronously inside the click's user gesture: an AudioContext
     // created after an await can start (and stay) suspended under autoplay
     // policies, which reads as permanent silence.
-    audioContext = new AudioContext
-    player.setAudioContext(audioContext)
-    val _    = audioContext.resume()
+    ensureAudioContext()
     val sess = js.Dynamic.global.crypto.randomUUID().asInstanceOf[String]
     sessionId = sess
     threadId = newThreadId
@@ -528,6 +534,16 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
 
   // --------------------------------------------------------------- playback
 
+  /** Speak message text without starting or advancing a voice session. */
+  def replay(text: String, sourceThread: String): Future[Unit] =
+    if Speech.splitSpeechChunks(text).isEmpty then Future.unit
+    else
+      // Replay replaces session-driven speech, so release that session from
+      // its speaking phase before the Player supersedes the old playback.
+      if phase == "speaking" then setPhase("listening")
+      ensureAudioContext()
+      player.play(text, sourceThread).map(_ => ())
+
   private def speakText(text: String, sourceThread: String): Unit =
     val chunks = Speech.splitSpeechChunks(text)
     if chunks.isEmpty then setPhase("listening")
@@ -552,6 +568,7 @@ def createController(deps: js.Dynamic): js.Dynamic =
     "startViewed"  -> js.Any.fromFunction0(() => ctl.startViewed()),
     "stop"         -> js.Any.fromFunction0(() => ctl.stop()),
     "configure"    -> js.Any.fromFunction1((opts: js.Dynamic) => ctl.configure(opts)),
+    "replay"       -> js.Any.fromFunction2((text: String, threadId: String) => ctl.replay(text, threadId).toJSPromise),
     "handleSignal" -> js.Any.fromFunction1((p: js.Any) => ctl.handleSignal(p)),
     "noteViewed"   -> js.Any.fromFunction1((tid: String) => ctl.noteViewed(tid)),
     "mountWidget"  -> js.Any.fromFunction0(() => Widget.mount(ctl)),
