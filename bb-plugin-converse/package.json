@@ -1,0 +1,27 @@
+{
+  "name": "bb-plugin-converse",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "bbPluginSdk": "^0.4.1"
+  },
+  "scripts": {
+    "build": "bleep --directory .. link converse && cp ../.bleep/builds/normal/.bloop/converse/link-output/debug/js/main.js server.js && bleep --directory .. link converse-app && cp ../.bleep/builds/normal/.bloop/converse-app/link-output/debug/js/main.js app-core.cjs"
+  },
+  "bb": {
+    "name": "Converse",
+    "description": "Two-way voice conversations with agent threads: continuous listening, transcription into the thread, and spoken replies.",
+    "branding": {
+      "icon": "Mic"
+    },
+    "server": "./server.js",
+    "app": "./app.tsx"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.4.6",
+    "@types/react": "^19.2.18",
+    "react": "^19.2.8",
+    "sonner": "^2.0.8",
+    "typescript": "^7.0.2"
+  }
+}

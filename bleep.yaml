@@ -13,7 +13,42 @@ projects:
     - template-common
     - template-js
     folder: ./bb-plugin-agentmail/agentmail
+  converse:
+    dependsOn: bb-plugin-facades
+    extends:
+    - template-common
+    - template-js
+    folder: ./bb-plugin-converse/converse
+  converse-core:
+    cross:
+      jvm3:
+        extends:
+        - template-common
+        - template-jvm
+      js3:
+        extends:
+        - template-common
+        - template-js
+    folder: ./bb-plugin-converse/converse-core
+  converse-core-test:
+    dependsOn: converse-core
+    extends:
+    - template-common
+    - template-jvm
+    isTestProject: true
+    dependencies:
+    - org.scalameta::munit:1.1.1
+    folder: ./bb-plugin-converse/converse-core-test
+  converse-app:
+    dependsOn: converse-core
+    extends:
+    - template-common
+    - template-js
+    folder: ./bb-plugin-converse/converse-app
 templates:
+  template-jvm:
+    platform:
+      name: jvm
   template-common:
     scala:
       options: -encoding utf8 -feature -unchecked
