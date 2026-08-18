@@ -60,9 +60,9 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   private var interimText: String                 = null
   private var interimAccum: String                = ""
 
-  // Mounted composer views, in mount order: the most recent one is the thread
-  // the user is looking at, which is where utterances are routed.
-  private var mountedViews: List[String] = Nil
+  // The thread the app route currently shows (reported by mounted converse
+  // components); utterances are routed here.
+  private var viewedThread: String = null
 
   // Playback
   private var speakingActive: Boolean  = false
@@ -107,22 +107,17 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
 
   def getSnapshot(): js.Dynamic = snapshot
 
-  /** A composer for `tid` is on screen. Utterances go to the most recently
-    * mounted view; the session's starting thread is only the fallback.
+  /** The thread currently in view per the app route. Mount order is not a
+    * reliable proxy: bb keeps previously visited thread surfaces mounted, so
+    * returning to a thread mounts nothing new and a stale thread would win.
     */
-  def registerView(tid: String): js.Function0[Unit] =
-    mountedViews = mountedViews :+ tid
-    if sessionId != null then retarget()
-    var released = false
-    () =>
-      if !released then
-        released = true
-        val idx = mountedViews.lastIndexOf(tid)
-        if idx >= 0 then mountedViews = mountedViews.patch(idx, Nil, 1)
-        if sessionId != null then retarget()
+  def noteViewed(tid: String): Unit =
+    if tid != null && tid != viewedThread then
+      viewedThread = tid
+      if sessionId != null then retarget()
 
   private def currentTarget: String =
-    mountedViews.lastOption.getOrElse(threadId)
+    if viewedThread != null then viewedThread else threadId
 
   private def retarget(): Unit =
     val target = currentTarget
@@ -650,7 +645,7 @@ def createController(deps: js.Dynamic): js.Dynamic =
     "start"        -> js.Any.fromFunction2((threadId: String, opts: js.Dynamic) => ctl.start(threadId, opts)),
     "stop"         -> js.Any.fromFunction0(() => ctl.stop()),
     "handleSignal" -> js.Any.fromFunction1((p: js.Any) => ctl.handleSignal(p)),
-    "registerView" -> js.Any.fromFunction1((tid: String) => ctl.registerView(tid)),
+    "noteViewed"   -> js.Any.fromFunction1((tid: String) => ctl.noteViewed(tid)),
     "subscribe"    -> js.Any.fromFunction1((cb: js.Function0[Unit]) => ctl.subscribe(cb)),
     "getSnapshot"  -> js.Any.fromFunction0(() => ctl.getSnapshot())
   )

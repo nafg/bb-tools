@@ -33,9 +33,8 @@ export interface ConverseController {
   start(threadId: string, opts: ConverseStartOptions): void;
   stop(): void;
   handleSignal(payload: unknown): void;
-  /** Report that a composer for this thread is mounted; returns unregister.
-   *  Utterances route to the most recently mounted thread. */
-  registerView(threadId: string): () => void;
+  /** Report the thread the app route currently shows; utterances route here. */
+  noteViewed(threadId: string): void;
   subscribe(onChange: () => void): () => void;
   getSnapshot(): ConverseSnapshot;
 }

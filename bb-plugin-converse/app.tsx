@@ -5,6 +5,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 import {
   definePluginApp,
+  useBbContext,
   useComposerView,
   useRealtime,
   useRpc,
@@ -91,11 +92,14 @@ function useConverse() {
 function VoiceAction() {
   const settings = useSettings();
   const view = useComposerView();
+  const bbContext = useBbContext();
   const { ctl, state } = useConverse();
   const threadId = view.scope.kind === "thread" ? view.scope.threadId : null;
+  // Route-derived: what the user is actually looking at, even when bb keeps
+  // other thread surfaces mounted in the background.
   useEffect(() => {
-    if (threadId !== null) return ctl.registerView(threadId);
-  }, [ctl, threadId]);
+    if (bbContext.threadId) ctl.noteViewed(bbContext.threadId);
+  }, [ctl, bbContext.threadId]);
 
   if (threadId === null) return null;
   const active = state.phase !== "idle";
