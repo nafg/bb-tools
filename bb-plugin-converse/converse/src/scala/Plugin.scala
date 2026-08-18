@@ -479,24 +479,33 @@ def plugin(bb: BbApi): Unit =
               if text.isEmpty then Future.successful(js.Dynamic.literal("text" -> "", "sent" -> false))
               else
                 state.awaiting.update(threadId, sessionId)
-                bb.sdk.threads
-                  .send(
-                    js.Dynamic.literal(
-                      "threadId" -> threadId,
-                      "mode"     -> "steer-if-active",
-                      "input" -> js.Array(
-                        js.Dynamic.literal("type" -> "text", "text" -> text),
-                        js.Dynamic.literal(
-                          "type" -> "text",
-                          "text" ->
-                            ("(The message above is a voice transcription, not typed text: " +
-                              "expect filler words, homophone and punctuation errors, and spoken phrasing.)"),
-                          "visibility" -> "agent-only"
+                def send(mode: String): Future[js.Dynamic] =
+                  bb.sdk.threads
+                    .send(
+                      js.Dynamic.literal(
+                        "threadId" -> threadId,
+                        "mode"     -> mode,
+                        "input" -> js.Array(
+                          js.Dynamic.literal("type" -> "text", "text" -> text),
+                          js.Dynamic.literal(
+                            "type" -> "text",
+                            "text" ->
+                              ("(The message above is a voice transcription, not typed text: " +
+                                "expect filler words, homophone and punctuation errors, and spoken phrasing.)"),
+                            "visibility" -> "agent-only"
+                          )
                         )
                       )
                     )
-                  )
-                  .toFuture
+                    .toFuture
+                send("steer-if-active")
+                  .recoverWith {
+                    // steer-if-active 409s ("Thread is not active") when the
+                    // thread is starting or errored; auto resolves those to a
+                    // plain start, so the utterance is not dropped.
+                    case e if e.getMessage != null && e.getMessage.contains("Thread is not active") =>
+                      send("auto")
+                  }
                   .map(_ => js.Dynamic.literal("text" -> text, "sent" -> true))
                   .recoverWith { case e =>
                     val _ = state.awaiting.remove(threadId)

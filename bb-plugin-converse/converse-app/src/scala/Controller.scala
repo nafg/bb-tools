@@ -490,7 +490,9 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
             if phase == "transcribing" then setPhase("listening")
         case Failure(e) =>
           debug(s"submit failed: ${e.getMessage}")
-          errorNote = s"transcription failed: ${e.getMessage}"
+          // Covers the whole submit pipeline (reading the recording,
+          // transcription, and the thread send), so don't blame transcription.
+          errorNote = s"voice message failed: ${e.getMessage}"
           if phase == "transcribing" then setPhase("listening") else refreshSnapshot()
       }
 

@@ -105,8 +105,9 @@ export default definePluginApp((app) => {
     scopes: ["thread"],
     banners: [{ id: "bridge", chrome: "bare", component: VoiceBridge }],
   });
-  // Native fallback toggle: always reachable even if the injected sidebar
-  // widget cannot anchor (e.g. bb's sidebar DOM changes).
+  // Native fallback toggle: always registered, but Widget.scala hides it
+  // (matching this title) while the injected widget is anchored, so it only
+  // shows when the widget cannot anchor (e.g. bb's sidebar DOM changes).
   app.slots.sidebarFooterAction({
     id: "voice-toggle",
     title: "Toggle voice conversation",

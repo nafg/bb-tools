@@ -151,7 +151,18 @@ object Widget:
         if list != null && list.parentElement != null then
           val _ = list.parentElement.insertBefore(root, list)
 
+    // The host-rendered fallback toggle (the sidebarFooterAction in app.tsx,
+    // matched by its title) is redundant while this widget is anchored: keep
+    // it visible only when the widget has nowhere to dock.
+    def syncFallbackToggle(show: Boolean): Unit =
+      val selector =
+        "button[title='Toggle voice conversation'],button[aria-label='Toggle voice conversation']"
+      val buttons = document.querySelectorAll(selector)
+      for i <- 0 until buttons.length.asInstanceOf[Int] do
+        buttons.item(i).style.display = if show then "" else "none"
+
     attach()
+    syncFallbackToggle(show = !root.isConnected.asInstanceOf[Boolean])
     var reattachQueued = false
     val observer = js.Dynamic.newInstance(js.Dynamic.global.MutationObserver)(
       js.Any.fromFunction2 { (_: js.Any, _: js.Any) =>
@@ -161,9 +172,13 @@ object Widget:
             js.Any.fromFunction0 { () =>
               reattachQueued = false
               if !root.isConnected.asInstanceOf[Boolean] then attach()
+              syncFallbackToggle(show = !root.isConnected.asInstanceOf[Boolean])
             },
             200
           )
+        // The host may re-render the footer at any time, recreating the
+        // fallback button visible; re-hide it while the widget is anchored.
+        else if root.isConnected.asInstanceOf[Boolean] then syncFallbackToggle(show = false)
       }
     )
     val _ = observer.observe(document.body, js.Dynamic.literal("childList" -> true, "subtree" -> true))
@@ -171,4 +186,5 @@ object Widget:
     () =>
       val _ = observer.disconnect()
       unsubscribe()
+      syncFallbackToggle(show = true)
       val _ = root.remove()
