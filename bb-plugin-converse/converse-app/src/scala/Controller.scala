@@ -79,9 +79,14 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     val _ = js.Dynamic.global.console.debug(s"[converse] $message")
 
   private def refreshSnapshot(): Unit =
+    // While an utterance is being captured or transcribed, the banner belongs
+    // on the thread it is latched to, not the thread currently in view.
+    val displayThread =
+      if utteranceTarget != null && (recorder != null || phase == "transcribing") then utteranceTarget
+      else threadId
     snapshot = js.Dynamic.literal(
       "phase"     -> phase,
-      "threadId"  -> threadId,
+      "threadId"  -> displayThread,
       "error"     -> errorNote,
       "heard"     -> heardText,
       "interim"   -> interimText,
