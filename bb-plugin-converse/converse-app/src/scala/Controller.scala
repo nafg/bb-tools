@@ -64,6 +64,10 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   // components); utterances are routed here.
   private var viewedThread: String = null
 
+  // Latest effective settings, pushed by the React bridge so the chrome-level
+  // widget can start a session without access to hooks.
+  private var startOptions: js.Dynamic = js.Dynamic.literal()
+
   // Playback
   private var speakingActive: Boolean  = false
   private var generation: Int          = 0
@@ -87,6 +91,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     snapshot = js.Dynamic.literal(
       "phase"     -> phase,
       "threadId"  -> displayThread,
+      "viewed"    -> viewedThread,
       "error"     -> errorNote,
       "heard"     -> heardText,
       "interim"   -> interimText,
@@ -114,7 +119,17 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   def noteViewed(tid: String): Unit =
     if tid != null && tid != viewedThread then
       viewedThread = tid
-      if sessionId != null then retarget()
+      if sessionId != null then retarget() else refreshSnapshot()
+
+  def configure(opts: js.Dynamic): Unit =
+    startOptions = opts
+
+  /** Start a session targeting the thread currently in view. */
+  def startViewed(): Unit =
+    if viewedThread == null then
+      errorNote = "open a thread first"
+      refreshSnapshot()
+    else start(viewedThread, startOptions)
 
   private def currentTarget: String =
     if viewedThread != null then viewedThread else threadId
@@ -643,9 +658,12 @@ def createController(deps: js.Dynamic): js.Dynamic =
   val ctl = new Controller(deps.rpcCall.asInstanceOf[js.Function2[String, js.Any, js.Promise[js.Dynamic]]])
   js.Dynamic.literal(
     "start"        -> js.Any.fromFunction2((threadId: String, opts: js.Dynamic) => ctl.start(threadId, opts)),
+    "startViewed"  -> js.Any.fromFunction0(() => ctl.startViewed()),
     "stop"         -> js.Any.fromFunction0(() => ctl.stop()),
+    "configure"    -> js.Any.fromFunction1((opts: js.Dynamic) => ctl.configure(opts)),
     "handleSignal" -> js.Any.fromFunction1((p: js.Any) => ctl.handleSignal(p)),
     "noteViewed"   -> js.Any.fromFunction1((tid: String) => ctl.noteViewed(tid)),
+    "mountWidget"  -> js.Any.fromFunction0(() => Widget.mount(ctl)),
     "subscribe"    -> js.Any.fromFunction1((cb: js.Function0[Unit]) => ctl.subscribe(cb)),
     "getSnapshot"  -> js.Any.fromFunction0(() => ctl.getSnapshot())
   )

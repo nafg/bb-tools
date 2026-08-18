@@ -13,6 +13,8 @@ export interface ConverseSnapshot {
     | "error";
   /** The thread utterances currently route to; null when idle. */
   threadId: string | null;
+  /** The thread the app route currently shows. */
+  viewed: string | null;
   error: string | null;
   /** The last utterance that was transcribed and sent. */
   heard: string | null;
@@ -31,10 +33,16 @@ export interface ConverseStartOptions {
 
 export interface ConverseController {
   start(threadId: string, opts: ConverseStartOptions): void;
+  /** Start a session targeting the thread currently in view. */
+  startViewed(): void;
   stop(): void;
+  /** Store the effective settings used by startViewed. */
+  configure(opts: ConverseStartOptions): void;
   handleSignal(payload: unknown): void;
   /** Report the thread the app route currently shows; utterances route here. */
   noteViewed(threadId: string): void;
+  /** Render the floating chrome widget; returns a disposer. */
+  mountWidget(): () => void;
   subscribe(onChange: () => void): () => void;
   getSnapshot(): ConverseSnapshot;
 }
