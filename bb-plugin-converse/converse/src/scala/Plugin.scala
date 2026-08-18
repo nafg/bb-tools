@@ -81,89 +81,89 @@ def plugin(bb: BbApi): Unit =
     js.Dynamic.literal(
       "ttsProvider" -> js.Dynamic.literal(
         "type"    -> "select",
-        "label"   -> "Text-to-speech provider",
+        "label"   -> "TEXT-TO-SPEECH PROVIDER",
         "options" -> js.Array("browser", "pocket-tts", "kokoro", "openai-compatible"),
         "default" -> "browser"
       ),
       "pocketUrl" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Pocket TTS: /tts endpoint",
+        "label"   -> "POCKET TTS: /tts endpoint",
         "default" -> "http://127.0.0.1:8000/tts"
       ),
       "pocketVoice" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Pocket TTS: voice",
+        "label"   -> "POCKET TTS: voice",
         "default" -> "alba"
       ),
       "kokoroUrl" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Kokoro: OpenAI-compatible speech endpoint",
+        "label"   -> "KOKORO: OpenAI-compatible speech endpoint",
         "default" -> "http://127.0.0.1:8880/v1/audio/speech"
       ),
       "kokoroVoice" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Kokoro: voice",
+        "label"   -> "KOKORO: voice",
         "default" -> "af_heart"
       ),
       "ttsCustomUrl" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Custom TTS: OpenAI-compatible speech endpoint (also covers Speaches, Piper, OpenAI)",
+        "label"   -> "CUSTOM TTS: OpenAI-compatible speech endpoint (also covers Speaches, Piper, OpenAI)",
         "default" -> ""
       ),
       "ttsCustomModel" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Custom TTS: model",
+        "label"   -> "CUSTOM TTS: model",
         "default" -> ""
       ),
       "ttsCustomVoice" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Custom TTS: voice",
+        "label"   -> "CUSTOM TTS: voice",
         "default" -> ""
       ),
       "ttsCustomApiKey" -> js.Dynamic.literal(
         "type"   -> "string",
-        "label"  -> "Custom TTS: API key (Bearer; empty for local services)",
+        "label"  -> "CUSTOM TTS: API key (Bearer; empty for local services)",
         "secret" -> true
       ),
       "sttProvider" -> js.Dynamic.literal(
         "type"    -> "select",
-        "label"   -> "Speech-to-text provider",
+        "label"   -> "SPEECH-TO-TEXT PROVIDER",
         "options" -> js.Array("bb", "groq", "openai-compatible"),
         "default" -> "bb"
       ),
       "groqApiKey" -> js.Dynamic.literal(
         "type"   -> "string",
-        "label"  -> "Groq: API key",
+        "label"  -> "GROQ: API key",
         "secret" -> true
       ),
       "groqModel" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Groq: transcription model",
+        "label"   -> "GROQ: transcription model",
         "default" -> "whisper-large-v3-turbo"
       ),
       "sttCustomUrl" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Custom STT: OpenAI-compatible transcription endpoint (also covers whisper.cpp, Speaches)",
+        "label"   -> "CUSTOM STT: OpenAI-compatible transcription endpoint (also covers whisper.cpp, Speaches)",
         "default" -> ""
       ),
       "sttCustomModel" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Custom STT: model",
+        "label"   -> "CUSTOM STT: model",
         "default" -> ""
       ),
       "sttCustomApiKey" -> js.Dynamic.literal(
         "type"   -> "string",
-        "label"  -> "Custom STT: API key (Bearer; empty for local services)",
+        "label"  -> "CUSTOM STT: API key (Bearer; empty for local services)",
         "secret" -> true
       ),
       "sttLanguage" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Transcription language hint (ISO code like en; empty = auto-detect)",
+        "label"   -> "STT: language hint (ISO code like en; empty = auto-detect)",
         "default" -> "en"
       ),
       "vadThreshold" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "Voice detection threshold (normalized RMS; raise if noise triggers it)",
+        "label"   -> "MIC: voice detection threshold (normalized RMS; raise if noise triggers it)",
         "default" -> "0.01"
       )
     )
