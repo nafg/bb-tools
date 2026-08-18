@@ -39,6 +39,19 @@ private def mailIcon(cls: String): VdomElement =
 
 private val AutosaveDelayMs = 1200.0
 
+private def formattedEmailPreview(html: String): VdomElement =
+  <.div(
+    ^.className := "space-y-1",
+    <.div(^.className := "text-xs font-medium text-muted-foreground", "Formatted preview"),
+    <.iframe(
+      ^.title := "Formatted email preview",
+      ^.className := "h-80 w-full rounded-md border border-border bg-white",
+      VdomAttr("sandbox")        := "",
+      VdomAttr("referrerPolicy") := "no-referrer",
+      VdomAttr("srcDoc")         := html
+    )
+  )
+
 object DraftCard:
   final case class Props(draft: DraftSummary, call: RpcCall, onChanged: Callback)
 
@@ -47,7 +60,7 @@ object DraftCard:
       to: String,
       cc: String,
       subject: String,
-      body: String,
+      plainText: String,
       busy: Boolean,
       stale: Boolean,
       error: Option[String]
@@ -56,7 +69,7 @@ object DraftCard:
       to != baseline.to.mkString(", ") ||
         cc != baseline.cc.mkString(", ") ||
         subject != baseline.subject ||
-        body != baseline.body
+        plainText != baseline.text
 
   private def stateFrom(draft: DraftSummary, busy: Boolean = false, error: Option[String] = None): State =
     State(
@@ -64,7 +77,7 @@ object DraftCard:
       to = draft.to.mkString(", "),
       cc = draft.cc.mkString(", "),
       subject = draft.subject,
-      body = draft.body,
+      plainText = draft.text,
       busy = busy,
       stale = false,
       error = error
@@ -91,7 +104,7 @@ object DraftCard:
         if state.to != base.to.mkString(", ") then changes.updateDynamic("to")(splitAddresses(state.to).toJSArray)
         if state.cc != base.cc.mkString(", ") then changes.updateDynamic("cc")(splitAddresses(state.cc).toJSArray)
         if state.subject != base.subject then changes.updateDynamic("subject")(state.subject)
-        if state.body != base.body then changes.updateDynamic("body")(state.body)
+        if state.plainText != base.text then changes.updateDynamic("text")(state.plainText)
         props.call("saveDraft", changes).toFuture.onComplete { result =>
           val update = result.fold(
             e => $.modState(_.copy(error = Some(errorMessage(e)))),
@@ -148,7 +161,7 @@ object DraftCard:
 
     def render(props: Props, s: State): VdomElement =
       val draft   = props.draft
-      val canSend = s.body.trim.nonEmpty && (draft.isReply || splitAddresses(s.to).nonEmpty)
+      val canSend = s.plainText.trim.nonEmpty && (draft.isReply || splitAddresses(s.to).nonEmpty)
       <.div(
         ^.className := "space-y-3 rounded-lg border border-border bg-card p-4 text-sm",
         <.div(
@@ -191,12 +204,13 @@ object DraftCard:
               )
             )
           ),
-        field("Body")(
+        formattedEmailPreview(draft.html).when(draft.html.nonEmpty),
+        field(if draft.html.nonEmpty then "Plain-text fallback" else "Body")(
           <.textarea(
             ^.className := (inputClass + " min-h-40 resize-y"),
             ^.rows      := 10,
-            ^.value     := s.body,
-            ^.onChange ==> setField((st, v) => st.copy(body = v))
+            ^.value     := s.plainText,
+            ^.onChange ==> setField((st, v) => st.copy(plainText = v))
           )
         ),
         <.div(
@@ -206,8 +220,8 @@ object DraftCard:
         ).when(draft.attachments.nonEmpty),
         <.div(
           ^.className := "text-xs text-muted-foreground",
-          "An HTML version was also composed; if you edit the body text, the email is sent as plain text only."
-        ).when(draft.hasHtml),
+          "Editing the plain-text fallback removes the formatted version from this draft."
+        ).when(draft.html.nonEmpty),
         s.error.map(message => <.div(^.className := "text-xs text-destructive", message)),
         <.div(
           ^.className := "flex items-center justify-between gap-2",

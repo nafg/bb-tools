@@ -808,8 +808,11 @@ object Rpc:
       "to"          -> strArray(d.to).toJSArray,
       "cc"          -> strArray(d.cc).toJSArray,
       "subject"     -> str(d.subject),
+      "text"        -> str(d.text),
+      // Compatibility for an already-open panel from before the field was
+      // disambiguated as text/html. New panel code reads `text`.
       "body"        -> str(d.text),
-      "hasHtml"     -> str(d.html).nonEmpty,
+      "html"        -> str(d.html),
       "isReply"     -> str(d.in_reply_to).nonEmpty,
       "updatedAt"   -> str(d.updated_at),
       "attachments" -> attachments
@@ -944,12 +947,14 @@ object Rpc:
           input.to.asInstanceOf[js.UndefOr[js.Array[String]]].foreach(v => payload.updateDynamic("to")(v))
           input.cc.asInstanceOf[js.UndefOr[js.Array[String]]].foreach(v => payload.updateDynamic("cc")(v))
           input.subject.asInstanceOf[js.UndefOr[String]].foreach(v => payload.updateDynamic("subject")(v))
-          input.body.asInstanceOf[js.UndefOr[String]].foreach { v =>
+          def updateText(v: String): Unit =
             payload.updateDynamic("text")(v)
-            // The panel edits plain text only, so an edited body invalidates
+            // The panel edits plain text only, so an edited fallback invalidates
             // a previously composed HTML alternative.
             payload.updateDynamic("html")(null)
-          }
+          val text = input.text.asInstanceOf[js.UndefOr[String]]
+          if text.isDefined then text.foreach(updateText)
+          else input.body.asInstanceOf[js.UndefOr[String]].foreach(updateText)
           client.updateDraft(draftId, payload).map { d =>
             publishChanged(bb, str(row.bb_thread_id))
             draftSummary(d)

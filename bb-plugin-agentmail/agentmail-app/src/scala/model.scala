@@ -15,8 +15,8 @@ trait DraftSummary extends js.Object:
   val to: js.Array[String]
   val cc: js.Array[String]
   val subject: String
-  val body: String
-  val hasHtml: Boolean
+  val text: String
+  val html: String
   val isReply: Boolean
   val updatedAt: String
   val attachments: js.Array[String]
