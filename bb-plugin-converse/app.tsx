@@ -65,20 +65,24 @@ export default definePluginApp((app) => {
       // Badge the routing target's sidebar row while a session is active
       // (feature-detected: older bb clients lack the setter).
       let marked: string | null = null;
+      let markedKey: string | null = null;
       let unsubscribe = () => {};
       if (experimental_setThreadRowStatus) {
         unsubscribe = ctl.subscribe(() => {
           const snap = ctl.getSnapshot();
           const target = snap.phase === "idle" ? null : snap.threadId;
-          if (target !== marked) {
-            if (marked) experimental_setThreadRowStatus(marked, null);
+          const speaking = snap.phase === "speaking";
+          const key = target === null ? null : `${target}:${speaking}`;
+          if (key !== markedKey) {
+            if (marked && marked !== target) experimental_setThreadRowStatus(marked, null);
             if (target)
               experimental_setThreadRowStatus(target, {
-                icon: "Mic",
-                label: "Voice conversation target",
+                icon: speaking ? "Volume2" : "Mic",
+                label: speaking ? "Speaking reply aloud" : "Voice conversation target",
                 tone: "running",
               });
             marked = target;
+            markedKey = key;
           }
         });
       }
