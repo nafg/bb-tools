@@ -40,15 +40,24 @@ private def mailIcon(cls: String): VdomElement =
 private val AutosaveDelayMs = 1200.0
 
 private def formattedEmailPreview(html: String): VdomElement =
+  val hostStyle = dom.window.getComputedStyle(dom.document.body)
+  val themedHtml =
+    s"""<style>
+       |html, body {
+       |  background-color: ${hostStyle.backgroundColor};
+       |  color: ${hostStyle.color};
+       |}
+       |</style>
+       |$html""".stripMargin
   <.div(
     ^.className := "space-y-1",
     <.div(^.className := "text-xs font-medium text-muted-foreground", "Formatted preview"),
     <.iframe(
       ^.title := "Formatted email preview",
-      ^.className := "h-80 w-full rounded-md border border-border bg-white",
+      ^.className := "h-80 w-full rounded-md border border-border bg-background",
       VdomAttr("sandbox")        := "",
       VdomAttr("referrerPolicy") := "no-referrer",
-      VdomAttr("srcDoc")         := html
+      VdomAttr("srcDoc")         := themedHtml
     )
   )
 
@@ -302,7 +311,18 @@ object EmailThreadCard:
           <.span(^.className := "truncate", m.from),
           <.span(^.className := "ml-auto shrink-0", m.timestamp)
         ),
-        <.div(^.className := "whitespace-pre-wrap", m.body),
+        if m.html.nonEmpty then
+          React.Fragment(
+            formattedEmailPreview(m.html),
+            if m.text.nonEmpty then
+              <.details(
+                ^.className := "text-xs text-muted-foreground",
+                <.summary(^.className := "cursor-pointer", "Plain-text version"),
+                <.div(^.className := "mt-2 whitespace-pre-wrap text-sm text-foreground", m.text)
+              )
+            else EmptyVdom
+          )
+        else <.div(^.className := "whitespace-pre-wrap", if m.text.nonEmpty then m.text else "(no text)"),
         <.div(
           ^.className := "text-xs text-muted-foreground",
           m.attachments

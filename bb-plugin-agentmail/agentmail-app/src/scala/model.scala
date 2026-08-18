@@ -38,7 +38,8 @@ trait EmailMessage extends js.Object:
   val messageId: String
   val from: String
   val timestamp: String
-  val body: String
+  val text: String
+  val html: String
   val direction: String // "sent" | "received"
   val attachments: js.Array[EmailAttachment]
 

@@ -907,6 +907,7 @@ object Rpc:
             .asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]]
             .fold(js.Array[js.Any]())(_.map { m =>
               val from = str(m.selectDynamic("from"))
+              val text = Seq(str(m.text), str(m.preview)).find(_.nonEmpty).getOrElse("")
               val attachments = m.attachments
                 .asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]]
                 .fold(js.Array[js.Any]())(_.map(a =>
@@ -919,7 +920,11 @@ object Rpc:
                 "messageId"   -> str(m.message_id),
                 "from"        -> from,
                 "timestamp"   -> str(m.timestamp),
-                "body"        -> Seq(str(m.text), str(m.preview)).find(_.nonEmpty).getOrElse("(no text)"),
+                "text"        -> text,
+                // Compatibility for an already-open panel. New panel code
+                // distinguishes the message's text and HTML alternatives.
+                "body"        -> (if text.nonEmpty then text else "(no text)"),
+                "html"        -> str(m.html),
                 "direction"   -> (if inbox.nonEmpty && from.contains(inbox) then "sent" else "received"),
                 "attachments" -> attachments
               ): js.Any
