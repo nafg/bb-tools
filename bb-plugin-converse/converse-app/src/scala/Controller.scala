@@ -63,6 +63,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   // The thread the app route currently shows (reported by mounted converse
   // components); utterances are routed here.
   private var viewedThread: String = null
+  private var threadDisplayNamesById = js.Dictionary.empty[String]
 
   // Latest effective settings, pushed by the React bridge so the chrome-level
   // widget can start a session without access to hooks.
@@ -86,15 +87,17 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       if utteranceTarget != null && (recorder != null || phase == "transcribing") then utteranceTarget
       else threadId
     snapshot = js.Dynamic.literal(
-      "phase"     -> phase,
-      "threadId"  -> displayThread,
-      "viewed"    -> viewedThread,
-      "speakingThread" -> player.speakingThread,
-      "error"     -> errorNote,
-      "heard"     -> heardText,
-      "interim"   -> interimText,
-      "level"     -> currentLevel,
-      "threshold" -> vadThreshold
+      "phase"                     -> phase,
+      "threadId"                  -> displayThread,
+      "viewed"                    -> viewedThread,
+      "speakingThread"            -> player.speakingThread,
+      "targetThreadDisplayName"   -> threadDisplayName(displayThread),
+      "speakingThreadDisplayName" -> threadDisplayName(player.speakingThread),
+      "error"                     -> errorNote,
+      "heard"                     -> heardText,
+      "interim"                   -> interimText,
+      "level"                     -> currentLevel,
+      "threshold"                 -> vadThreshold
     )
     listeners.foreach(_())
 
@@ -118,6 +121,13 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     if tid != null && tid != viewedThread then
       viewedThread = tid
       if sessionId != null then retarget() else refreshSnapshot()
+
+  private def threadDisplayName(tid: String): String =
+    if tid == null then null else threadDisplayNamesById.getOrElse(tid, tid)
+
+  def setThreadDisplayNames(namesByThreadId: js.Dictionary[String]): Unit =
+    threadDisplayNamesById = namesByThreadId
+    refreshSnapshot()
 
   def configure(opts: js.Dynamic): Unit =
     startOptions = opts
@@ -573,13 +583,16 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
 def createController(deps: js.Dynamic): js.Dynamic =
   val ctl = new Controller(deps.rpcCall.asInstanceOf[js.Function2[String, js.Any, js.Promise[js.Dynamic]]])
   js.Dynamic.literal(
-    "start"        -> js.Any.fromFunction2((threadId: String, opts: js.Dynamic) => ctl.start(threadId, opts)),
-    "startViewed"  -> js.Any.fromFunction0(() => ctl.startViewed()),
-    "stop"         -> js.Any.fromFunction0(() => ctl.stop()),
-    "configure"    -> js.Any.fromFunction1((opts: js.Dynamic) => ctl.configure(opts)),
-    "replay"       -> js.Any.fromFunction2((text: String, threadId: String) => ctl.replay(text, threadId).toJSPromise),
+    "start"       -> js.Any.fromFunction2((threadId: String, opts: js.Dynamic) => ctl.start(threadId, opts)),
+    "startViewed" -> js.Any.fromFunction0(() => ctl.startViewed()),
+    "stop"        -> js.Any.fromFunction0(() => ctl.stop()),
+    "configure"   -> js.Any.fromFunction1((opts: js.Dynamic) => ctl.configure(opts)),
+    "replay"      -> js.Any.fromFunction2((text: String, threadId: String) => ctl.replay(text, threadId).toJSPromise),
     "handleSignal" -> js.Any.fromFunction1((p: js.Any) => ctl.handleSignal(p)),
-    "noteViewed"   -> js.Any.fromFunction1((tid: String) => ctl.noteViewed(tid)),
+    "noteViewed" -> js.Any.fromFunction1((tid: String) => ctl.noteViewed(tid)),
+    "setThreadDisplayNames" -> js.Any.fromFunction1(
+      (namesByThreadId: js.Dictionary[String]) => ctl.setThreadDisplayNames(namesByThreadId)
+    ),
     "mountWidget"  -> js.Any.fromFunction0(() => Widget.mount(ctl)),
     "subscribe"    -> js.Any.fromFunction1((cb: js.Function0[Unit]) => ctl.subscribe(cb)),
     "getSnapshot"  -> js.Any.fromFunction0(() => ctl.getSnapshot())

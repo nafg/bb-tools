@@ -78,10 +78,13 @@ object Widget:
     val _ = meter.appendChild(meterFill)
     val _ = row.appendChild(meter)
 
-    val elsewhere = document.createElement("span")
-    elsewhere.style.cssText = "color:var(--muted-foreground, #888);white-space:nowrap;"
-    elsewhere.textContent = "→ another thread"
-    val _ = row.appendChild(elsewhere)
+    val speechTarget = document.createElement("div")
+    speechTarget.style.cssText = "color:var(--muted-foreground, #888);overflow-wrap:anywhere;"
+    val _ = pill.appendChild(speechTarget)
+
+    val speakingSource = document.createElement("div")
+    speakingSource.style.cssText = "color:var(--muted-foreground, #888);overflow-wrap:anywhere;"
+    val _ = pill.appendChild(speakingSource)
 
     button.onclick = js.Any.fromFunction1 { (_: js.Any) =>
       val snap = ctl.getSnapshot()
@@ -89,12 +92,15 @@ object Widget:
     }
 
     def render(): Unit =
-      val snap    = ctl.getSnapshot()
-      val phase   = snap.phase.asInstanceOf[String]
-      val active  = phase != "idle"
-      val viewed  = snap.viewed.asInstanceOf[String | Null]
-      val target  = snap.threadId.asInstanceOf[String | Null]
-      val error   = snap.error.asInstanceOf[String | Null]
+      val snap           = ctl.getSnapshot()
+      val phase          = snap.phase.asInstanceOf[String]
+      val active         = phase != "idle"
+      val viewed         = snap.viewed.asInstanceOf[String | Null]
+      val target         = snap.threadId.asInstanceOf[String | Null]
+      val targetName     = snap.targetThreadDisplayName.asInstanceOf[String | Null]
+      val speakingThread = snap.speakingThread.asInstanceOf[String | Null]
+      val speakingName   = snap.speakingThreadDisplayName.asInstanceOf[String | Null]
+      val error          = snap.error.asInstanceOf[String | Null]
 
       val color = phaseColors.getOrElse(phase, "var(--muted-foreground, #888)")
       button.style.color = if active then color else "var(--muted-foreground, #888)"
@@ -120,8 +126,17 @@ object Widget:
         meterFill.style.background =
           if level > threshold then "var(--destructive, #ef4444)" else "var(--success, #22c55e)"
 
-      elsewhere.style.display =
-        if active && target != null && viewed != null && target != viewed then "inline" else "none"
+      speechTarget.style.display = if active && target != null then "block" else "none"
+      if target != null then
+        val name = if targetName == null then target else targetName
+        speechTarget.textContent = s"Speech goes to: $name"
+        val _ = speechTarget.setAttribute("title", name)
+
+      speakingSource.style.display = if speakingThread != null then "block" else "none"
+      if speakingThread != null then
+        val name = if speakingName == null then speakingThread else speakingName
+        speakingSource.textContent = s"Speaking from: $name"
+        val _ = speakingSource.setAttribute("title", name)
 
     render()
     val unsubscribe = ctl.subscribe(() => render())

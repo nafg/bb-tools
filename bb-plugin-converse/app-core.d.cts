@@ -17,6 +17,10 @@ export interface ConverseSnapshot {
   viewed: string | null;
   /** The thread whose reply is currently being spoken aloud. */
   speakingThread: string | null;
+  /** Human-readable name of the thread currently receiving speech. */
+  targetThreadDisplayName: string | null;
+  /** Human-readable name of the thread whose reply is being spoken aloud. */
+  speakingThreadDisplayName: string | null;
   error: string | null;
   /** The last utterance that was transcribed and sent. */
   heard: string | null;
@@ -46,6 +50,8 @@ export interface ConverseController {
   handleSignal(payload: unknown): void;
   /** Report the thread the app route currently shows; utterances route here. */
   noteViewed(threadId: string): void;
+  /** Supply current sidebar names for identifying routing and playback. */
+  setThreadDisplayNames(namesByThreadId: Record<string, string>): void;
   /** Render the floating chrome widget; returns a disposer. */
   mountWidget(): () => void;
   subscribe(onChange: () => void): () => void;

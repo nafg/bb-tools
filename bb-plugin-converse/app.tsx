@@ -3,6 +3,7 @@
 import { useEffect, useSyncExternalStore } from "react";
 import {
   definePluginApp,
+  experimental_useSidebarThreads,
   useBbContext,
   useComposerView,
   useRealtime,
@@ -35,11 +36,22 @@ function getController(): ConverseController {
 function VoiceBridge() {
   const bbContext = useBbContext();
   const settings = useSettings();
+  const sidebar = experimental_useSidebarThreads();
   const ctl = getController();
   useRealtime("converse", (payload) => ctl.handleSignal(payload));
   useEffect(() => {
     if (bbContext.threadId) ctl.noteViewed(bbContext.threadId);
   }, [ctl, bbContext.threadId]);
+  useEffect(() => {
+    ctl.setThreadDisplayNames(
+      Object.fromEntries(
+        sidebar.threads.map((thread) => [
+          thread.id,
+          thread.title ?? thread.titleFallback ?? thread.id,
+        ]),
+      ),
+    );
+  }, [ctl, sidebar.threads]);
   useEffect(() => {
     const values = settings.values ?? {};
     const vadThreshold = Number.parseFloat(
