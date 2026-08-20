@@ -2,6 +2,7 @@ package converseapp
 
 import conversecore.*
 
+import scala.collection.mutable
 import scala.concurrent.{Future, Promise}
 import scala.scalajs.js
 import scala.scalajs.js.timers.setTimeout
@@ -9,11 +10,13 @@ import scala.util.{Failure, Success}
 
 /** Owns audio output for the tab: splits text into speech chunks (markdown
   * stripped), synthesizes them via browser speechSynthesis or the server TTS
-  * endpoint, and plays them. At most one playback at a time; starting a new
-  * one stops the current. Session-agnostic: callers drive their own state
+  * endpoint, and plays them. Agent replies queue across threads; an explicit
+  * replay replaces that queue. Session-agnostic: callers drive their own state
   * from the returned future and `onChange` notifications.
   */
 final class Player(onChange: () => Unit):
+  private final case class QueuedSpeech(text: String, sourceThread: String, settled: Promise[Boolean])
+
   private val TtsPath = "/api/v1/plugins/converse/http/tts"
 
   private var ttsMode: String = "browser"
@@ -26,6 +29,8 @@ final class Player(onChange: () => Unit):
   private var generation: Int            = 0
   private var currentAudio: js.Dynamic   = null
   private var abortCtl: js.Dynamic       = null
+  private var currentSettled: Promise[Boolean] = null
+  private val queuedSpeech = mutable.Queue.empty[QueuedSpeech]
 
   private def debug(message: String): Unit =
     val _ = js.Dynamic.global.console.debug(s"[converse] $message")
@@ -39,41 +44,57 @@ final class Player(onChange: () => Unit):
   /** The thread whose text is playing, or null when nothing is. */
   def speakingThread: String = currentThread
 
-  /** Stops any current playback and speaks `text`. The future resolves true
-    * when this playback ran to completion (or the text had nothing to say),
-    * false when a later play()/stop() superseded it, and fails only when this
-    * playback was still current and synthesis or playback failed.
+  /** Adds speech to the tab-wide FIFO queue. The future resolves when this
+    * particular response finishes, or false if stop()/play() clears it.
     */
+  def enqueue(text: String, sourceThread: String): Future[Boolean] =
+    if Speech.splitSpeechChunks(text).isEmpty then Future.successful(true)
+    else
+      val settled = Promise[Boolean]()
+      queuedSpeech.enqueue(QueuedSpeech(text, sourceThread, settled))
+      startNextQueuedSpeech()
+      settled.future
+
+  /** Explicit replay is immediate: it clears queued agent speech first. */
   def play(text: String, sourceThread: String): Future[Boolean] =
     stop()
-    val chunks = Speech.splitSpeechChunks(text)
-    if chunks.isEmpty then Future.successful(true)
-    else
+    enqueue(text, sourceThread)
+
+  private def startNextQueuedSpeech(): Unit =
+    if !speakingActive && queuedSpeech.nonEmpty then
+      val item   = queuedSpeech.dequeue()
+      val chunks = Speech.splitSpeechChunks(item.text)
       generation += 1
       val gen = generation
       speakingActive = true
-      currentThread = sourceThread
+      currentThread = item.sourceThread
+      currentSettled = item.settled
       onChange()
-      val settled = Promise[Boolean]()
-      val done    = if ttsMode == "server" then speakServer(gen, chunks) else speakBrowser(gen, chunks)
+      val done = if ttsMode == "server" then speakServer(gen, chunks) else speakBrowser(gen, chunks)
       done.onComplete {
         case Success(_) if generation == gen =>
           speakingActive = false
           currentThread = null
-          onChange()
-          settled.success(true)
+          if currentSettled eq item.settled then currentSettled = null
+          if queuedSpeech.nonEmpty then startNextQueuedSpeech() else onChange()
+          val _ = item.settled.trySuccess(true)
         case Failure(e) if generation == gen =>
           debug(s"speech failed: ${e.getMessage}")
           speakingActive = false
           currentThread = null
-          onChange()
-          settled.failure(e)
-        case _ => settled.success(false)
+          if currentSettled eq item.settled then currentSettled = null
+          if queuedSpeech.nonEmpty then startNextQueuedSpeech() else onChange()
+          val _ = item.settled.tryFailure(e)
+        case _ =>
+          val _ = item.settled.trySuccess(false)
       }
-      settled.future
 
   def stop(): Unit =
     generation += 1
+    queuedSpeech.dequeueAll(_ => true).foreach(_.settled.success(false))
+    if currentSettled != null then
+      val _ = currentSettled.trySuccess(false)
+      currentSettled = null
     val wasActive = speakingActive
     speakingActive = false
     currentThread = null

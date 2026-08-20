@@ -568,14 +568,13 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     if chunks.isEmpty then setPhase("listening")
     else
       setPhase("speaking")
-      player.play(text, sourceThread).onComplete {
-        case Success(completed) if completed =>
+      player.enqueue(text, sourceThread).onComplete {
+        case Success(completed) if completed && !player.isSpeaking =>
           if phase == "speaking" then setPhase("listening")
         case Failure(e) =>
           debug(s"speech failed: ${e.getMessage}")
           errorNote = s"speech failed: ${e.getMessage}"
-          setPhase("listening")
-          refreshSnapshot()
+          if player.isSpeaking then refreshSnapshot() else setPhase("listening")
         case _ => ()
       }
 
