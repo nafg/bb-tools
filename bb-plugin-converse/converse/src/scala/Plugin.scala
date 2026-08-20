@@ -203,7 +203,9 @@ def plugin(bb: BbApi): Unit =
         ("Wait briefly for the user to continue the current voice-transcribed message. " +
           "Call this only when whether to act depends on whether more speech immediately follows."),
       "instructions" ->
-        ("Voice messages are accompanied by an agent-only note identifying them as transcriptions. " +
+        ("Voice messages are enclosed in agent-only [heard] tags and introduced with Transcribed:. " +
+          "Treat their contents as speech recognition that may contain filler words, homophones, " +
+          "punctuation errors, or spoken phrasing. " +
           "If the latest voice message appears unfinished or genuinely ambiguous, call " +
           "converse_wait_for_more_speech before replying or taking action. Do not silently stop and " +
           "wait without the tool: it has a bounded timeout and tells you whether speech arrived."),
@@ -556,12 +558,15 @@ def plugin(bb: BbApi): Unit =
                         "threadId" -> threadId,
                         "mode"     -> mode,
                         "input" -> js.Array(
+                          js.Dynamic.literal(
+                            "type"       -> "text",
+                            "text"       -> "[heard]\nTranscribed:",
+                            "visibility" -> "agent-only"
+                          ),
                           js.Dynamic.literal("type" -> "text", "text" -> text),
                           js.Dynamic.literal(
-                            "type" -> "text",
-                            "text" ->
-                              ("(The message above is a voice transcription, not typed text: " +
-                                "expect filler words, homophone and punctuation errors, and spoken phrasing.)"),
+                            "type"       -> "text",
+                            "text"       -> "[/heard]",
                             "visibility" -> "agent-only"
                           )
                         )
