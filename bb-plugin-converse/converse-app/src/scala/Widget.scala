@@ -83,10 +83,6 @@ object Widget:
     elsewhere.textContent = "→ another thread"
     val _ = row.appendChild(elsewhere)
 
-    val text = document.createElement("div")
-    text.style.cssText = "overflow-wrap:anywhere;max-height:4.2em;overflow-y:auto;"
-    val _ = pill.appendChild(text)
-
     button.onclick = js.Any.fromFunction1 { (_: js.Any) =>
       val snap = ctl.getSnapshot()
       if snap.phase.asInstanceOf[String] != "idle" then ctl.stop() else ctl.startViewed()
@@ -99,14 +95,13 @@ object Widget:
       val viewed  = snap.viewed.asInstanceOf[String | Null]
       val target  = snap.threadId.asInstanceOf[String | Null]
       val error   = snap.error.asInstanceOf[String | Null]
-      val interim = snap.interim.asInstanceOf[String | Null]
-      val heard   = snap.heard.asInstanceOf[String | Null]
 
       val color = phaseColors.getOrElse(phase, "var(--muted-foreground, #888)")
       button.style.color = if active then color else "var(--muted-foreground, #888)"
       button.setAttribute(
         "title",
-        if active then "Voice conversation is on — click to stop"
+        if error != null then error
+        else if active then "Voice conversation is on — click to stop"
         else if viewed == null then "Open a thread to start a voice conversation"
         else "Start a voice conversation (utterances go to the thread you are viewing)"
       )
@@ -127,16 +122,6 @@ object Widget:
 
       elsewhere.style.display =
         if active && target != null && viewed != null && target != viewed then "inline" else "none"
-
-      val shown = if error != null then error else if interim != null then interim else heard
-      text.style.display = if active && shown != null then "block" else "none"
-      if shown != null then
-        text.textContent = shown
-        text.style.color =
-          if error != null then "var(--destructive, #ef4444)"
-          else if interim != null then "var(--foreground, inherit)"
-          else "var(--muted-foreground, #888)"
-        text.style.fontStyle = if error == null && interim != null then "italic" else "normal"
 
     render()
     val unsubscribe = ctl.subscribe(() => render())

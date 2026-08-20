@@ -1,13 +1,10 @@
-// Frontend entry. The visible voice UI is application chrome: a floating
-// widget at the bottom of the window, rendered by the Scala.js core from a
-// content script, outside any thread surface. React's only remaining job is
-// an invisible bridge that forwards what content scripts cannot reach —
-// realtime signals, the routed thread, and settings — to the global
-// controller.
-import { useEffect } from "react";
+// Frontend entry. Persistent voice controls live in application chrome while
+// the pending transcript appears beside the composer receiving that utterance.
+import { useEffect, useSyncExternalStore } from "react";
 import {
   definePluginApp,
   useBbContext,
+  useComposerView,
   useRealtime,
   useSettings,
 } from "@get-bb/plugin-sdk/app";
@@ -63,6 +60,32 @@ function VoiceBridge() {
   return null;
 }
 
+// The live transcription belongs to the thread that will receive it, not to
+// the global microphone control. It grows with its contents instead of
+// clipping inside the narrow sidebar widget. Once submitted, the ordinary
+// timeline message replaces it.
+function PendingVoiceTranscript() {
+  const view = useComposerView();
+  const ctl = getController();
+  const state = useSyncExternalStore(ctl.subscribe, ctl.getSnapshot);
+
+  if (view.scope.kind !== "thread" || state.threadId !== view.scope.threadId) return null;
+  const text = state.error ?? state.interim;
+  if (!text) return null;
+
+  return (
+    <div
+      aria-live="polite"
+      className={
+        "w-full min-w-0 break-words px-2 py-1 text-xs " +
+        (state.error ? "text-destructive" : "italic text-foreground")
+      }
+    >
+      {text}
+    </div>
+  );
+}
+
 export default definePluginApp((app) => {
   app.contentScripts.register({
     id: "voice-widget",
@@ -110,7 +133,10 @@ export default definePluginApp((app) => {
   app.composer.customize({
     id: "voice",
     scopes: ["thread"],
-    banners: [{ id: "bridge", chrome: "bare", component: VoiceBridge }],
+    banners: [
+      { id: "bridge", chrome: "bare", component: VoiceBridge },
+      { id: "pending-transcript", chrome: "bare", component: PendingVoiceTranscript },
+    ],
   });
   // Native fallback toggle: always registered, but Widget.scala hides it
   // (matching this title) while the injected widget is anchored, so it only
