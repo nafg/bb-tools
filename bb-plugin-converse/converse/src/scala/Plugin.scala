@@ -1,7 +1,7 @@
 package converse
 
 import bbplugin.*
-import conversecore.ContinuationWaiters
+import conversecore.{ContinuationWaiters, ThreadVoiceAssignments}
 
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
@@ -18,6 +18,33 @@ private def str(value: js.Dynamic): String =
   * browser-compressed speech, far below transcribeVoice's 25 MiB cap.
   */
 private val MaxAudioBase64Chars = 7 * 1024 * 1024
+
+private val PocketEnglishVoices = Vector(
+  "alba",
+  "anna",
+  "azelma",
+  "bill_boerst",
+  "caro_davy",
+  "charles",
+  "cosette",
+  "eponine",
+  "eve",
+  "fantine",
+  "george",
+  "jane",
+  "javert",
+  "jean",
+  "marius",
+  "mary",
+  "michael",
+  "paul",
+  "peter_yearsley",
+  "stuart_bell",
+  "vera"
+)
+
+private val ThreadVoicesEnabledKey = "voices.byThreadEnabled"
+private val EnabledPocketVoicesKey = "voices.pocket.enabled"
 
 private final case class ActiveSession(sessionId: String, threadId: String)
 
@@ -78,6 +105,16 @@ private def jsonResponse(status: Int, message: String): js.Dynamic =
 @JSExportTopLevel("default")
 def plugin(bb: BbApi): Unit =
   val state = new State
+  val db    = bb.storage.database()
+  bb.storage.migrate(
+    db,
+    js.Array(
+      """CREATE TABLE IF NOT EXISTS thread_voice_assignments (
+        |  thread_id TEXT PRIMARY KEY,
+        |  voice TEXT NOT NULL
+        |)""".stripMargin
+    )
+  )
 
   val settings = bb.settings.define(
     js.Dynamic.literal(
@@ -195,6 +232,56 @@ def plugin(bb: BbApi): Unit =
       )
     )
   )
+
+  def storedThreadVoice(threadId: String): Option[String] =
+    db.prepare("SELECT voice FROM thread_voice_assignments WHERE thread_id = ?")
+      .get(threadId)
+      .toOption
+      .map(row => str(row.voice))
+      .filter(_.nonEmpty)
+
+  def enabledPocketVoices(): Future[Vector[String]] =
+    bb.storage.kv.get(EnabledPocketVoicesKey).toFuture.map { stored =>
+      stored.asInstanceOf[js.UndefOr[js.Array[String]]]
+        .map(_.toVector.filter(PocketEnglishVoices.contains).distinct)
+        .getOrElse(PocketEnglishVoices)
+    }
+
+  def threadVoicesEnabled(): Future[Boolean] =
+    bb.storage.kv.get(ThreadVoicesEnabledKey).toFuture.map(
+      _.asInstanceOf[js.UndefOr[Boolean]].getOrElse(false)
+    )
+
+  def voiceSettingsResponse(): Future[js.Dynamic] =
+    for
+      enabled       <- threadVoicesEnabled()
+      enabledVoices <- enabledPocketVoices()
+    yield js.Dynamic.literal(
+      "enabled" -> enabled,
+      "provider" -> "pocket-tts",
+      "voices" -> PocketEnglishVoices.map { voice =>
+        js.Dynamic.literal("id" -> voice, "enabled" -> enabledVoices.contains(voice))
+      }.toJSArray
+    )
+
+  def assignThreadVoice(threadId: String, enabledVoices: Vector[String]): Option[String] =
+    storedThreadVoice(threadId).filter(enabledVoices.contains).orElse {
+      val counts = db.prepare("SELECT voice, COUNT(*) AS count FROM thread_voice_assignments GROUP BY voice")
+        .all()
+        .toVector
+        .map(row => str(row.voice) -> str(row.count).toIntOption.getOrElse(0))
+        .toMap
+      ThreadVoiceAssignments.chooseVoice(threadId, enabledVoices, counts).map { voice =>
+        val _ = db.prepare(
+          "INSERT INTO thread_voice_assignments (thread_id, voice) VALUES (?, ?) " +
+            "ON CONFLICT(thread_id) DO UPDATE SET voice = excluded.voice"
+        ).run(threadId, voice)
+        voice
+      }
+    }
+
+  def publishVoiceChanged(threadId: String = ""): Unit =
+    bb.realtime.publish("converse-voices", js.Dynamic.literal("threadId" -> threadId))
 
   bb.agents.registerTool(
     js.Dynamic.literal(
@@ -505,6 +592,17 @@ def plugin(bb: BbApi): Unit =
           "audioBase64" -> MaxAudioBase64Chars
         ),
         "output" -> Schema.passthrough
+      ),
+      "voiceSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "updateVoiceSettings" -> js.Dynamic.literal(
+        "input" -> Schema.passthrough,
+        "output" -> Schema.passthrough
+      ),
+      "threadVoice" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "setThreadVoice" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "resolveThreadVoice" -> js.Dynamic.literal(
+        "input" -> Schema.passthrough,
+        "output" -> Schema.passthrough
       )
     ),
     js.Dynamic.literal(
@@ -596,6 +694,68 @@ def plugin(bb: BbApi): Unit =
           transcribeAudio(str(input.mimeType), str(input.audioBase64), retryUnavailable = false)
             .map(text => js.Dynamic.literal("text" -> text))
             .toJSPromise
+      },
+      "voiceSettings" -> js.Any.fromFunction1 { (_: js.Dynamic) =>
+        voiceSettingsResponse().toJSPromise
+      },
+      "updateVoiceSettings" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val enabled = input.enabled.asInstanceOf[js.UndefOr[Boolean]].getOrElse(false)
+        val requested = input.voices.asInstanceOf[js.UndefOr[js.Array[String]]]
+          .map(_.toVector.filter(PocketEnglishVoices.contains).distinct)
+          .getOrElse(Vector.empty)
+        (for
+          _ <- bb.storage.kv.set(ThreadVoicesEnabledKey, enabled).toFuture
+          _ <- bb.storage.kv.set(EnabledPocketVoicesKey, requested.toJSArray).toFuture
+        yield
+          val placeholders = PocketEnglishVoices.filterNot(requested.contains)
+          placeholders.foreach { voice =>
+            val _ = db.prepare("DELETE FROM thread_voice_assignments WHERE voice = ?").run(voice)
+          }
+          publishVoiceChanged()
+          js.Dynamic.literal("ok" -> true)).toJSPromise
+      },
+      "threadVoice" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val threadId = str(input.threadId)
+        if threadId.isEmpty then rejected("threadId is required")
+        else
+          voiceSettingsResponse().map { voiceSettings =>
+            js.Dynamic.literal(
+              "enabled" -> voiceSettings.enabled,
+              "voice"   -> storedThreadVoice(threadId).orNull,
+              "voices"  -> voiceSettings.voices
+            )
+          }.toJSPromise
+      },
+      "setThreadVoice" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val threadId = str(input.threadId)
+        val voice    = str(input.voice)
+        if threadId.isEmpty then rejected("threadId is required")
+        else if voice.nonEmpty && !PocketEnglishVoices.contains(voice) then rejected("unknown Pocket TTS voice")
+        else
+          if voice.isEmpty then
+            val _ = db.prepare("DELETE FROM thread_voice_assignments WHERE thread_id = ?").run(threadId)
+          else
+            val _ = db.prepare(
+              "INSERT INTO thread_voice_assignments (thread_id, voice) VALUES (?, ?) " +
+                "ON CONFLICT(thread_id) DO UPDATE SET voice = excluded.voice"
+            ).run(threadId, voice)
+          publishVoiceChanged(threadId)
+          js.Dynamic.literal("ok" -> true)
+      },
+      "resolveThreadVoice" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val threadId = str(input.threadId)
+        if threadId.isEmpty then rejected("threadId is required")
+        else
+          (for
+            currentSettings <- settings.get().toFuture
+            enabled         <- threadVoicesEnabled()
+            voices          <- enabledPocketVoices()
+          yield
+            val voice =
+              if enabled && str(currentSettings.ttsProvider) == "pocket-tts" then assignThreadVoice(threadId, voices)
+              else None
+            voice.foreach(_ => publishVoiceChanged(threadId))
+            js.Dynamic.literal("voice" -> voice.orNull)).toJSPromise
       }
     )
   )
@@ -649,7 +809,8 @@ def plugin(bb: BbApi): Unit =
                     touchPocketUse()
                     val form = js.Dynamic.newInstance(js.Dynamic.global.FormData)()
                     val _    = form.set("text", text)
-                    val voice = str(s.pocketVoice)
+                    val requestedVoice = str(body.voice)
+                    val voice = if PocketEnglishVoices.contains(requestedVoice) then requestedVoice else str(s.pocketVoice)
                     if voice.nonEmpty then { val _ = form.set("voice_url", voice) }
                     (url, js.Dynamic.literal("method" -> "POST", "body" -> form))
                   })

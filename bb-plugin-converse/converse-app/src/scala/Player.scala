@@ -14,7 +14,10 @@ import scala.util.{Failure, Success}
   * replay replaces that queue. Session-agnostic: callers drive their own state
   * from the returned future and `onChange` notifications.
   */
-final class Player(onChange: () => Unit):
+final class Player(
+    rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynamic]],
+    onChange: () => Unit
+):
   private final case class QueuedSpeech(text: String, sourceThread: String, settled: Promise[Boolean])
 
   private val TtsPath = "/api/v1/plugins/converse/http/tts"
@@ -26,6 +29,7 @@ final class Player(onChange: () => Unit):
   private var audioContext: AudioContext = null
   private var speakingActive: Boolean    = false
   private var currentThread: String      = null
+  private var currentVoice: String       = null
   private var generation: Int            = 0
   private var currentAudio: js.Dynamic   = null
   private var abortCtl: js.Dynamic       = null
@@ -43,6 +47,11 @@ final class Player(onChange: () => Unit):
 
   /** The thread whose text is playing, or null when nothing is. */
   def speakingThread: String = currentThread
+
+  /** The concrete persisted voice used by the current response, or null when
+    * browser speech/default provider playback is active.
+    */
+  def speakingVoice: String = currentVoice
 
   /** Adds speech to the tab-wide FIFO queue. The future resolves when this
     * particular response finishes, or false if stop()/play() clears it.
@@ -68,13 +77,24 @@ final class Player(onChange: () => Unit):
       val gen = generation
       speakingActive = true
       currentThread = item.sourceThread
+      currentVoice = null
       currentSettled = item.settled
       onChange()
-      val done = if ttsMode == "server" then speakServer(gen, chunks) else speakBrowser(gen, chunks)
+      val done =
+        if ttsMode == "server" then
+          resolveThreadVoice(item.sourceThread).flatMap { voice =>
+            if generation != gen then Future.unit
+            else
+              currentVoice = voice
+              onChange()
+              speakServer(gen, chunks, voice)
+          }
+        else speakBrowser(gen, chunks)
       done.onComplete {
         case Success(_) if generation == gen =>
           speakingActive = false
           currentThread = null
+          currentVoice = null
           if currentSettled eq item.settled then currentSettled = null
           if queuedSpeech.nonEmpty then startNextQueuedSpeech() else onChange()
           val _ = item.settled.trySuccess(true)
@@ -82,6 +102,7 @@ final class Player(onChange: () => Unit):
           debug(s"speech failed: ${e.getMessage}")
           speakingActive = false
           currentThread = null
+          currentVoice = null
           if currentSettled eq item.settled then currentSettled = null
           if queuedSpeech.nonEmpty then startNextQueuedSpeech() else onChange()
           val _ = item.settled.tryFailure(e)
@@ -98,6 +119,7 @@ final class Player(onChange: () => Unit):
     val wasActive = speakingActive
     speakingActive = false
     currentThread = null
+    currentVoice = null
     if abortCtl != null then { val _ = abortCtl.abort(); abortCtl = null }
     if !js.isUndefined(js.Dynamic.global.speechSynthesis) then { val _ = js.Dynamic.global.speechSynthesis.cancel() }
     if currentAudio != null then
@@ -129,14 +151,25 @@ final class Player(onChange: () => Unit):
       }
     }
 
-  private def fetchTts(text: String, signal: js.Any): Future[js.Dynamic] =
+  private def resolveThreadVoice(threadId: String): Future[String] =
+    rpcCall("resolveThreadVoice", js.Dynamic.literal("threadId" -> threadId))
+      .toFuture
+      .map(result => result.voice.asInstanceOf[js.UndefOr[String]].getOrElse(null))
+      .recover { case e =>
+        debug(s"voice assignment failed: ${e.getMessage}")
+        null
+      }
+
+  private def fetchTts(text: String, voice: String, signal: js.Any): Future[js.Dynamic] =
+    val body = js.Dynamic.literal("text" -> text)
+    if voice != null then body.updateDynamic("voice")(voice)
     js.Dynamic.global
       .fetch(
         TtsPath,
         js.Dynamic.literal(
           "method"  -> "POST",
           "headers" -> js.Dynamic.literal("content-type" -> "application/json"),
-          "body"    -> js.JSON.stringify(js.Dynamic.literal("text" -> text)),
+          "body"    -> js.JSON.stringify(body),
           "signal"  -> signal
         )
       )
@@ -182,7 +215,7 @@ final class Player(onChange: () => Unit):
         .recover { case e => debug(s"playback failed: ${e.getMessage}") }
 
   /** Sequential playback with a one-chunk synthesis prefetch. */
-  private def speakServer(gen: Int, chunks: List[SpeechChunk]): Future[Unit] =
+  private def speakServer(gen: Int, chunks: List[SpeechChunk], voice: String): Future[Unit] =
     val ctl = js.Dynamic.newInstance(js.Dynamic.global.AbortController)()
     abortCtl = ctl
     val all = chunks.toVector
@@ -191,12 +224,12 @@ final class Player(onChange: () => Unit):
         if generation != gen then Future.unit
         else
           val next =
-            if i + 1 < all.length then fetchTts(all(i + 1).text, ctl.signal) else null
+            if i + 1 < all.length then fetchTts(all(i + 1).text, voice, ctl.signal) else null
           playBlob(gen, blob)
             .flatMap(_ => delay(all(i).pauseSeconds))
             .flatMap { _ =>
               if next == null || generation != gen then Future.unit else go(i + 1, next)
             }
       }
-    val result = if all.isEmpty then Future.unit else go(0, fetchTts(all(0).text, ctl.signal))
+    val result = if all.isEmpty then Future.unit else go(0, fetchTts(all(0).text, voice, ctl.signal))
     result.andThen { case _ => if abortCtl eq ctl then abortCtl = null }

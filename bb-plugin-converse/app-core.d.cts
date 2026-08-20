@@ -21,6 +21,8 @@ export interface ConverseSnapshot {
   targetThreadDisplayName: string | null;
   /** Human-readable name of the thread whose reply is being spoken aloud. */
   speakingThreadDisplayName: string | null;
+  /** Per-thread voice selected for the reply currently being spoken. */
+  speakingVoice: string | null;
   error: string | null;
   /** The last utterance that was transcribed and sent. */
   heard: string | null;

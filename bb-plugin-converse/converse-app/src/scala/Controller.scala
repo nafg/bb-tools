@@ -70,7 +70,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   private var startOptions: js.Dynamic = js.Dynamic.literal()
 
   // Playback is tab-wide rather than part of the voice-session state machine.
-  private val player = new Player(() => refreshSnapshot())
+  private val player = new Player(rpcCall, () => refreshSnapshot())
 
   // React 18 external-store contract: a stable snapshot object per change.
   private var listeners: List[js.Function0[Unit]] = Nil
@@ -93,6 +93,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       "speakingThread"            -> player.speakingThread,
       "targetThreadDisplayName"   -> threadDisplayName(displayThread),
       "speakingThreadDisplayName" -> threadDisplayName(player.speakingThread),
+      "speakingVoice"             -> player.speakingVoice,
       "error"                     -> errorNote,
       "heard"                     -> heardText,
       "interim"                   -> interimText,
