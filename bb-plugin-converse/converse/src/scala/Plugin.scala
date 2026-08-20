@@ -45,6 +45,9 @@ private val PocketEnglishVoices = Vector(
 
 private val ThreadVoicesEnabledKey = "voices.byThreadEnabled"
 private val EnabledPocketVoicesKey = "voices.pocket.enabled"
+private val TtsConfigMigrationKey  = "tts.config.migrated.v1"
+
+private def ttsConfigKey(provider: String): String = s"tts.config.$provider"
 
 private final case class ActiveSession(sessionId: String, threadId: String)
 
@@ -232,6 +235,37 @@ def plugin(bb: BbApi): Unit =
       )
     )
   )
+
+  /** One-time bridge from the original flat BB settings into provider-owned
+    * data. Pocket is intentionally always managed now, so its obsolete
+    * external URL and lifecycle overrides are not copied.
+    */
+  val _ =
+    bb.storage.kv.get(TtsConfigMigrationKey).toFuture.flatMap { marker =>
+      if marker.asInstanceOf[js.UndefOr[Boolean]].contains(true) then Future.unit
+      else
+        settings.get().toFuture.flatMap { old =>
+          val pocket = js.Dynamic.literal("defaultVoice" -> str(old.pocketVoice))
+          val kokoro = js.Dynamic.literal(
+            "url"          -> str(old.kokoroUrl),
+            "defaultVoice" -> str(old.kokoroVoice),
+            "voices"       -> js.Array(str(old.kokoroVoice)).filter(_.nonEmpty)
+          )
+          val openAiCompatible = js.Dynamic.literal(
+            "url"          -> str(old.ttsCustomUrl),
+            "model"        -> str(old.ttsCustomModel),
+            "defaultVoice" -> str(old.ttsCustomVoice),
+            "apiKey"       -> str(old.ttsCustomApiKey),
+            "voices"       -> js.Array(str(old.ttsCustomVoice)).filter(_.nonEmpty)
+          )
+          for
+            _ <- bb.storage.kv.set(ttsConfigKey("pocket-tts"), pocket).toFuture
+            _ <- bb.storage.kv.set(ttsConfigKey("kokoro"), kokoro).toFuture
+            _ <- bb.storage.kv.set(ttsConfigKey("openai-compatible"), openAiCompatible).toFuture
+            _ <- bb.storage.kv.set(TtsConfigMigrationKey, true).toFuture
+          yield bb.log.info("migrated TTS provider configuration into Converse data")
+        }
+    }
 
   def storedThreadVoice(threadId: String): Option[String] =
     db.prepare("SELECT voice FROM thread_voice_assignments WHERE thread_id = ?")
