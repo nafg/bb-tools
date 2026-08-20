@@ -1,6 +1,6 @@
 // Frontend entry. Persistent voice controls live in application chrome while
 // the pending transcript appears beside the composer receiving that utterance.
-import { useEffect, useSyncExternalStore } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import {
   definePluginApp,
   experimental_useSidebarThreads,
@@ -98,7 +98,177 @@ function PendingVoiceTranscript() {
   );
 }
 
+type VoiceChoice = { id: string; enabled: boolean };
+type VoiceSettingsState = {
+  enabled: boolean;
+  provider: string;
+  voices: VoiceChoice[];
+};
+
+async function playVoicePreview(voice: string): Promise<void> {
+  const AudioContextClass = window.AudioContext;
+  const context = new AudioContextClass();
+  await context.resume();
+  const response = await fetch("/api/v1/plugins/converse/http/tts", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ text: `This thread uses the ${voice.replaceAll("_", " ")} voice.`, voice }),
+  });
+  if (!response.ok) throw new Error(`Voice preview failed (${response.status})`);
+  const decoded = await context.decodeAudioData(await response.arrayBuffer());
+  const source = context.createBufferSource();
+  source.buffer = decoded;
+  source.connect(context.destination);
+  source.onended = () => void context.close();
+  source.start();
+}
+
+function VoiceSettingsSection() {
+  const settings = useSettings();
+  const [state, setState] = useState<VoiceSettingsState | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const isPocket = settings.values?.ttsProvider === "pocket-tts";
+
+  const load = () =>
+    rpcCall("voiceSettings", {})
+      .then((result) => setState(result as VoiceSettingsState))
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+
+  useEffect(() => {
+    void load();
+  }, []);
+  useRealtime("converse-voices", () => void load());
+
+  const save = async (next: VoiceSettingsState) => {
+    setState(next);
+    setSaving(true);
+    setError(null);
+    try {
+      await rpcCall("updateVoiceSettings", {
+        enabled: next.enabled,
+        voices: next.voices.filter((voice) => voice.enabled).map((voice) => voice.id),
+      });
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+      await load();
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (!state) return <div className="text-xs text-muted-foreground">Loading voices…</div>;
+
+  return (
+    <div className="space-y-3">
+      <label className="flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={state.enabled}
+          disabled={saving}
+          onChange={(event) => void save({ ...state, enabled: event.target.checked })}
+        />
+        Different voices by thread
+      </label>
+      {!isPocket && (
+        <p className="text-xs text-muted-foreground">
+          Voice assignment applies when Pocket TTS is the selected text-to-speech provider.
+        </p>
+      )}
+      <div className="grid gap-1 sm:grid-cols-2">
+        {state.voices.map((voice) => (
+          <div key={voice.id} className="flex items-center justify-between gap-2 rounded border px-2 py-1">
+            <label className="flex min-w-0 items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={voice.enabled}
+                disabled={saving}
+                onChange={(event) =>
+                  void save({
+                    ...state,
+                    voices: state.voices.map((item) =>
+                      item.id === voice.id ? { ...item, enabled: event.target.checked } : item,
+                    ),
+                  })
+                }
+              />
+              <span className="truncate">{voice.id.replaceAll("_", " ")}</span>
+            </label>
+            <button
+              type="button"
+              className="rounded px-2 py-1 text-xs hover:bg-muted disabled:opacity-50"
+              disabled={!isPocket}
+              onClick={() => void playVoicePreview(voice.id).catch((cause) => setError(String(cause)))}
+            >
+              Preview
+            </button>
+          </div>
+        ))}
+      </div>
+      {error && <p className="text-xs text-destructive">{error}</p>}
+    </div>
+  );
+}
+
+type ThreadVoiceState = { enabled: boolean; voice: string | null; voices: VoiceChoice[] };
+
+function ThreadVoicePicker({ threadId }: { threadId: string }) {
+  const [state, setState] = useState<ThreadVoiceState | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const load = () =>
+    rpcCall("threadVoice", { threadId }).then((result) => setState(result as ThreadVoiceState));
+  useEffect(() => {
+    void load();
+  }, [threadId]);
+  useRealtime("converse-voices", (payload) => {
+    const changed = payload as { threadId?: string };
+    if (!changed.threadId || changed.threadId === threadId) void load();
+  });
+
+  if (!state) return null;
+  const enabledVoices = state.voices.filter((voice) => voice.enabled);
+  return (
+    <select
+      aria-label="Voice for this thread"
+      title={state.enabled ? "Voice for this thread" : "Voice for this thread (different voices are off)"}
+      className="h-7 max-w-32 rounded border bg-background px-1 text-xs text-foreground"
+      value={state.voice ?? ""}
+      disabled={saving}
+      onChange={async (event) => {
+        const voice = event.target.value;
+        setState({ ...state, voice: voice || null });
+        setSaving(true);
+        try {
+          await rpcCall("setThreadVoice", { threadId, voice });
+        } finally {
+          setSaving(false);
+          await load();
+        }
+      }}
+    >
+      <option value="">Not assigned</option>
+      {enabledVoices.map((voice) => (
+        <option key={voice.id} value={voice.id}>
+          {voice.id.replaceAll("_", " ")}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 export default definePluginApp((app) => {
+  app.slots.settingsSection({
+    id: "thread-voices",
+    title: "Thread voices",
+    description: "Choose which Pocket TTS voices Converse may assign, and listen before enabling them.",
+    component: VoiceSettingsSection,
+  });
+  app.slots.experimental_threadHeaderAction({
+    id: "thread-voice",
+    title: "Thread voice",
+    component: ThreadVoicePicker,
+  });
   app.contentScripts.register({
     id: "voice-widget",
     mount({ experimental_setThreadRowStatus }) {
