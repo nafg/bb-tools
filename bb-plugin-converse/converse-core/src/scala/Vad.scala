@@ -3,7 +3,8 @@ package conversecore
 /** Frame-based energy VAD, a port of claude-converse's EnergyVad semantics onto
   * normalized browser audio (RMS of Float32 samples in [0, 1]) instead of raw
   * 16-bit PCM. Frames are ~30ms of audio; defaults mirror Converse's tuning
-  * (threshold 300/32768 ≈ 0.009, rounded to 0.01).
+  * (threshold 300/32768 ≈ 0.009; Converse defaults slightly higher to reject
+  * ambient noise).
   *
   * Differences from the original, driven by MediaRecorder capture:
   *   - There is no PCM pre-buffer. Instead a Candidate phase starts at the
@@ -16,10 +17,10 @@ package conversecore
   *     making the check vacuous at default settings).
   */
 final case class VadConfig(
-    threshold: Double = 0.01,
+    threshold: Double = 0.015,
     speechStartFrames: Int = 3,
     chunkSilenceFrames: Int = 20,
-    utteranceEndFrames: Int = 60,
+    utteranceEndFrames: Int = 100,
     minUtteranceFrames: Int = 10,
     bargeInEnergyMultiplier: Double = 2.0,
     bargeInFrames: Int = 6,

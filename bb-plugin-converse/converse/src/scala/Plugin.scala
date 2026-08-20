@@ -179,7 +179,12 @@ def plugin(bb: BbApi): Unit =
       "vadThreshold" -> js.Dynamic.literal(
         "type"    -> "string",
         "label"   -> "MIC: voice detection threshold (normalized RMS; raise if noise triggers it)",
-        "default" -> "0.01"
+        "default" -> "0.015"
+      ),
+      "endOfSpeechSilenceMs" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "MIC: silence before submitting an utterance (milliseconds)",
+        "default" -> "3000"
       )
     )
   )

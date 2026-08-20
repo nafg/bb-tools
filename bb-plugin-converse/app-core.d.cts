@@ -31,6 +31,7 @@ export interface ConverseSnapshot {
 export interface ConverseStartOptions {
   ttsMode: "browser" | "server";
   vadThreshold: number;
+  endOfSpeechSilenceMs: number;
 }
 
 export interface ConverseController {

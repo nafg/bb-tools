@@ -41,8 +41,10 @@ bb plugin install .    # from this directory
   endpoint — e.g. a local Kokoro at `http://127.0.0.1:8880/v1/audio/speech`
   with model `kokoro`, or OpenAI with an API key).
 - **TTS endpoint / model / voice / API key** — used in `server` mode.
-- **Voice detection threshold** — normalized RMS (default `0.01`); raise it if
+- **Voice detection threshold** — normalized RMS (default `0.015`); raise it if
   background noise triggers recording.
+- **End-of-speech silence** — milliseconds of quiet before an utterance is
+  submitted (default `3000`). Increase it to allow longer thinking pauses.
 
 ## v1 behavior and limits
 

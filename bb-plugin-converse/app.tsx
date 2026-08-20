@@ -46,11 +46,18 @@ function VoiceBridge() {
   useEffect(() => {
     const values = settings.values ?? {};
     const vadThreshold = Number.parseFloat(
-      typeof values.vadThreshold === "string" ? values.vadThreshold : "0.01",
+      typeof values.vadThreshold === "string" ? values.vadThreshold : "0.015",
+    );
+    const endOfSpeechSilenceMs = Number.parseFloat(
+      typeof values.endOfSpeechSilenceMs === "string" ? values.endOfSpeechSilenceMs : "3000",
     );
     ctl.configure({
       ttsMode: values.ttsProvider === "browser" || values.ttsProvider === undefined ? "browser" : "server",
-      vadThreshold: Number.isFinite(vadThreshold) && vadThreshold > 0 ? vadThreshold : 0.01,
+      vadThreshold: Number.isFinite(vadThreshold) && vadThreshold > 0 ? vadThreshold : 0.015,
+      endOfSpeechSilenceMs:
+        Number.isFinite(endOfSpeechSilenceMs) && endOfSpeechSilenceMs >= 30
+          ? endOfSpeechSilenceMs
+          : 3000,
     });
   }, [ctl, settings.values]);
   return null;

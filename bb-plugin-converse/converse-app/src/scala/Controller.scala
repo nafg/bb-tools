@@ -38,7 +38,8 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   private var frameBuffer: Float32Array     = null
   private var frameTimer: SetIntervalHandle = null
   private var vad: EnergyVad                = null
-  private var vadThreshold: Double          = 0.01
+  private var vadThreshold: Double          = 0.015
+  private var endOfSpeechSilenceMs: Double = 3000.0
   private var mimeType: String              = ""
   private var frameCount: Int               = 0
   private var currentLevel: Double          = 0.0
@@ -162,9 +163,16 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     lastEventId = null
     val ttsMode = opts.ttsMode.asInstanceOf[js.UndefOr[String]].getOrElse("browser")
     player.setTtsMode(ttsMode)
-    vadThreshold = opts.vadThreshold.asInstanceOf[js.UndefOr[Double]].filter(t => t > 0).getOrElse(0.01)
+    vadThreshold = opts.vadThreshold.asInstanceOf[js.UndefOr[Double]].filter(t => t > 0).getOrElse(0.015)
+    endOfSpeechSilenceMs = opts.endOfSpeechSilenceMs
+      .asInstanceOf[js.UndefOr[Double]]
+      .filter(ms => ms >= FrameMs)
+      .getOrElse(3000.0)
     setPhase("starting")
-    debug(s"starting session $sess for thread $newThreadId (tts=$ttsMode threshold=$vadThreshold)")
+    debug(
+      s"starting session $sess for thread $newThreadId " +
+        s"(tts=$ttsMode threshold=$vadThreshold endSilenceMs=$endOfSpeechSilenceMs)"
+    )
     val started =
       for
         _      <- rpcCall("startSession", js.Dynamic.literal("sessionId" -> sess, "threadId" -> newThreadId)).toFuture
@@ -209,7 +217,8 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       analyser.fftSize = 2048
       val _ = audioContext.createMediaStreamSource(analysisStream).connect(analyser)
       frameBuffer = new Float32Array(analyser.fftSize)
-      vad = EnergyVad(VadConfig(threshold = vadThreshold))
+      val utteranceEndFrames = math.ceil(endOfSpeechSilenceMs / FrameMs).toInt
+      vad = EnergyVad(VadConfig(threshold = vadThreshold, utteranceEndFrames = utteranceEndFrames))
       mimeType = List("audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus")
         .find(MediaRecorderStatic.isTypeSupported)
         .getOrElse("")

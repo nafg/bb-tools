@@ -3,6 +3,9 @@ package conversecore
 class VadTest extends munit.FunSuite:
   private val config = VadConfig()
 
+  test("default end-of-speech silence allows a three-second thinking pause"):
+    assertEquals(config.utteranceEndFrames, 100)
+
   private def pushFrames(vad: EnergyVad, rms: Double, count: Int): List[VadEvent] =
     (1 to count).toList.flatMap(_ => vad.pushFrame(rms))
 
