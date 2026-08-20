@@ -21,7 +21,9 @@ projects:
     - com.github.japgolly.scalajs-react::core:4.0.0
     folder: ./bb-plugin-agentmail/agentmail-app
   converse:
-    dependsOn: bb-plugin-facades
+    dependsOn:
+    - bb-plugin-facades
+    - converse-core
     extends:
     - template-common
     - template-js

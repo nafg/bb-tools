@@ -45,6 +45,10 @@ bb plugin install .    # from this directory
   background noise triggers recording.
 - **End-of-speech silence** — milliseconds of quiet before an utterance is
   submitted (default `3000`). Increase it to allow longer thinking pauses.
+- **Continuation wait** — maximum time the agent's
+  `converse_wait_for_more_speech` tool blocks for the next utterance (default
+  `8000` milliseconds). Speech received during the wait becomes part of the
+  current turn instead of a steer.
 
 ## v1 behavior and limits
 

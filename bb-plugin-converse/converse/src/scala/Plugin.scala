@@ -1,6 +1,7 @@
 package converse
 
 import bbplugin.*
+import conversecore.ContinuationWaiters
 
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
@@ -26,6 +27,7 @@ private final case class ActiveSession(sessionId: String, threadId: String)
 private final class State:
   var active: Option[ActiveSession]     = None
   val awaiting: mutable.Map[String, String] = mutable.Map.empty // threadId -> sessionId
+  val continuationWaiters = ContinuationWaiters()
   private var eventCounter              = 0
   def nextEventId(): String =
     eventCounter += 1
@@ -185,7 +187,65 @@ def plugin(bb: BbApi): Unit =
         "type"    -> "string",
         "label"   -> "MIC: silence before submitting an utterance (milliseconds)",
         "default" -> "3000"
+      ),
+      "continuationWaitMs" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "AGENT: maximum time to wait for continued speech (milliseconds)",
+        "default" -> "8000"
       )
+    )
+  )
+
+  bb.agents.registerTool(
+    js.Dynamic.literal(
+      "name" -> "converse_wait_for_more_speech",
+      "description" ->
+        ("Wait briefly for the user to continue the current voice-transcribed message. " +
+          "Call this only when whether to act depends on whether more speech immediately follows."),
+      "instructions" ->
+        ("Voice messages are accompanied by an agent-only note identifying them as transcriptions. " +
+          "If the latest voice message appears unfinished or genuinely ambiguous, call " +
+          "converse_wait_for_more_speech before replying or taking action. Do not silently stop and " +
+          "wait without the tool: it has a bounded timeout and tells you whether speech arrived."),
+      "experimental_statusLabels" -> js.Dynamic.literal(
+        "pending"   -> "Listening for continued speech",
+        "completed" -> "Finished listening for continued speech"
+      ),
+      "parameters" -> js.Dynamic.literal(
+        "type"                 -> "object",
+        "properties"           -> js.Dynamic.literal(),
+        "additionalProperties" -> false
+      ),
+      "execute" -> js.Any.fromFunction2 { (_: js.Dynamic, toolContext: js.Dynamic) =>
+        val threadId = str(toolContext.threadId)
+        val result =
+          if !state.awaiting.contains(threadId) then
+            Future.successful(
+              "No active voice turn is awaiting a response. Continue normally without waiting for speech."
+            )
+          else
+            settings.get().toFuture.flatMap { currentSettings =>
+              val waitMs = str(currentSettings.continuationWaitMs).toDoubleOption
+                .filter(ms => ms >= 1000 && ms <= 30000)
+                .getOrElse(8000.0)
+              val waiting = state.continuationWaiters.begin(threadId)
+              val timer = js.Dynamic.global.setTimeout(
+                js.Any.fromFunction0(() => { val _ = state.continuationWaiters.expire(threadId) }),
+                waitMs
+              )
+              waiting.map { continuation =>
+                val _ = js.Dynamic.global.clearTimeout(timer)
+                continuation match
+                  case Some(text) =>
+                    ("The user continued speaking. Treat this as part of the preceding voice message:\n" +
+                      "<voice-continuation>\n" + text + "\n</voice-continuation>")
+                  case None =>
+                    s"No additional speech arrived within ${waitMs.toInt} milliseconds. " +
+                      "Treat the preceding voice message as complete and continue."
+              }
+            }
+        result.toJSPromise
+      }
     )
   )
 
@@ -454,6 +514,7 @@ def plugin(bb: BbApi): Unit =
         }
         state.active = Some(ActiveSession(sessionId, threadId))
         state.awaiting.filterInPlace((_, sess) => sess == sessionId)
+        state.continuationWaiters.expireAll()
         bb.log.info(s"voice session $sessionId started for thread $threadId")
         // Warm the managed TTS service while the user starts talking so the
         // first spoken reply is not delayed by service startup.
@@ -470,6 +531,7 @@ def plugin(bb: BbApi): Unit =
         val sessionId = str(input.sessionId)
         if state.active.exists(_.sessionId == sessionId) then state.active = None
         state.awaiting.filterInPlace((_, sess) => sess != sessionId)
+        state.continuationWaiters.expireAll()
         js.Dynamic.literal("ok" -> true)
       },
       "submitUtterance" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
@@ -482,6 +544,9 @@ def plugin(bb: BbApi): Unit =
             .flatMap { text =>
               bb.log.info(s"transcribed ${text.length} chars")
               if text.isEmpty then Future.successful(js.Dynamic.literal("text" -> "", "sent" -> false))
+              else if state.continuationWaiters.deliver(threadId, text) then
+                bb.log.info(s"delivered ${text.length} chars to continuation waiter")
+                Future.successful(js.Dynamic.literal("text" -> text, "sent" -> true, "continued" -> true))
               else
                 state.awaiting.update(threadId, sessionId)
                 def send(mode: String): Future[js.Dynamic] =
@@ -654,5 +719,6 @@ def plugin(bb: BbApi): Unit =
   bb.onDispose { () =>
     state.active = None
     state.awaiting.clear()
+    state.continuationWaiters.expireAll()
     ()
   }
