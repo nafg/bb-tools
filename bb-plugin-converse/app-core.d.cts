@@ -28,15 +28,15 @@ export interface ConverseSnapshot {
   heard: string | null;
   /** Preview transcription of the utterance still being spoken. */
   interim: string | null;
-  /** Current microphone RMS level (normalized 0..1), 0 when inactive. */
-  level: number;
-  /** The VAD threshold the active session was started with. */
-  threshold: number;
+  /** Silero V5 speech probability for the latest microphone frame. */
+  speechProbability: number;
+  /** The probability at which Silero considers a frame speech. */
+  speechProbabilityThreshold: number;
 }
 
 export interface ConverseStartOptions {
   ttsMode: "browser" | "server";
-  vadThreshold: number;
+  speechProbabilityThreshold: number;
   endOfSpeechSilenceMs: number;
 }
 
@@ -62,4 +62,6 @@ export interface ConverseController {
 
 export function createController(deps: {
   rpcCall: (method: string, input: unknown) => Promise<unknown>;
+  createMicVad: (options: Record<string, unknown>) => Promise<unknown>;
+  encodeWav: (audio: Float32Array) => ArrayBuffer;
 }): ConverseController;

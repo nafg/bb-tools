@@ -3,7 +3,6 @@ package converseapp
 import scala.scalajs.js
 import scala.annotation.unused
 import scala.scalajs.js.annotation.{JSGlobal, JSName}
-import scala.scalajs.js.typedarray.Float32Array
 
 // Handwritten facades for the subset of browser audio APIs this plugin uses,
 // in the same style as bb-plugin-facades.
@@ -22,7 +21,6 @@ trait MediaStreamTrack extends js.Object:
 @JSGlobal
 class AudioContext extends js.Object:
   def createMediaStreamSource(stream: MediaStream): AudioNode = js.native
-  def createAnalyser(): AnalyserNode                          = js.native
   def createDelay(maxDelayTime: Double): DelayNode            = js.native
   def createMediaStreamDestination(): MediaStreamAudioDestinationNode = js.native
   def close(): js.Promise[Unit]                               = js.native
@@ -46,16 +44,10 @@ trait MediaStreamAudioDestinationNode extends AudioNode:
   val stream: MediaStream = js.native
 
 @js.native
-trait AnalyserNode extends AudioNode:
-  var fftSize: Int                                     = js.native
-  def getFloatTimeDomainData(array: Float32Array): Unit = js.native
-
-@js.native
 @JSGlobal
 class MediaRecorder(@unused stream: MediaStream, @unused options: js.Any) extends js.Object:
   def start(): Unit                                    = js.native
   def stop(): Unit                                     = js.native
-  def requestData(): Unit                              = js.native
   val state: String                                    = js.native
   var ondataavailable: js.Function1[js.Dynamic, Unit]  = js.native
   var onstop: js.Function1[js.Dynamic, Unit]           = js.native

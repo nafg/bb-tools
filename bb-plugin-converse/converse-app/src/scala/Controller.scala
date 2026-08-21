@@ -6,7 +6,7 @@ import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.annotation.JSExportTopLevel
-import scala.scalajs.js.timers.{SetIntervalHandle, SetTimeoutHandle, clearInterval, clearTimeout, setInterval, setTimeout}
+import scala.scalajs.js.timers.{SetTimeoutHandle, clearTimeout, setTimeout}
 import scala.scalajs.js.typedarray.Float32Array
 import scala.util.{Failure, Success}
 
@@ -18,8 +18,11 @@ given ExecutionContext = ExecutionContext.parasitic
   * navigation: any mounted converse component relays realtime signals to this
   * singleton, which filters by session id.
   */
-final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynamic]]):
-  private val FrameMs        = 30.0
+final class Controller(
+    rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynamic]],
+    createMicVad: js.Function1[js.Dynamic, js.Promise[js.Dynamic]],
+    encodeWav: js.Function1[Float32Array, js.Any]
+):
   private val PreRollMs      = 500.0
   private val MaxUtteranceMs = 60_000.0
 
@@ -36,24 +39,15 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   private var analysisStream: MediaStream   = null
   private var recordingStream: MediaStream  = null
   private var audioContext: AudioContext    = null
-  private var analyser: AnalyserNode        = null
-  private var frameBuffer: Float32Array     = null
-  private var frameTimer: SetIntervalHandle = null
-  private var vad: EnergyVad                = null
-  private var vadThreshold: Double          = 0.015
+  private var speechDetector: SpeechDetector = null
+  private var speechProbabilityThreshold: Double = 0.3
   private var endOfSpeechSilenceMs: Double = 3000.0
   private var mimeType: String              = ""
   private var frameCount: Int               = 0
-  private var currentLevel: Double          = 0.0
+  private var currentSpeechProbability: Double = 0.0
 
   // Recording
-  private var recorder: MediaRecorder             = null
-  private var recorderChunks: js.Array[js.Any]    = null
-  private var recorderSubmit: Boolean             = false
-  private var captureFrameCount: Int              = 0
-  private var captureVoicedFrameCount: Int        = 0
-  private var capturePeakRms: Double              = 0.0
-  private var completedCaptureEvidence: js.Dynamic = null
+  private var captureActive: Boolean              = false
   private var maxUtteranceTimer: SetTimeoutHandle = null
   private var previewRecorder: MediaRecorder      = null
   private var previewDiscard: Boolean             = false
@@ -90,7 +84,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     // While an utterance is being captured or transcribed, the banner belongs
     // on the thread it is latched to, not the thread currently in view.
     val displayThread =
-      if utteranceTarget != null && (recorder != null || phase == "transcribing") then utteranceTarget
+      if utteranceTarget != null && (captureActive || phase == "transcribing") then utteranceTarget
       else threadId
     snapshot = js.Dynamic.literal(
       "phase"                     -> phase,
@@ -103,8 +97,8 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       "error"                     -> errorNote,
       "heard"                     -> heardText,
       "interim"                   -> interimText,
-      "level"                     -> currentLevel,
-      "threshold"                 -> vadThreshold
+      "speechProbability"         -> currentSpeechProbability,
+      "speechProbabilityThreshold" -> speechProbabilityThreshold
     )
     listeners.foreach(_())
 
@@ -180,15 +174,19 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     lastEventId = null
     val ttsMode = opts.ttsMode.asInstanceOf[js.UndefOr[String]].getOrElse("browser")
     player.setTtsMode(ttsMode)
-    vadThreshold = opts.vadThreshold.asInstanceOf[js.UndefOr[Double]].filter(t => t > 0).getOrElse(0.015)
+    speechProbabilityThreshold = opts.speechProbabilityThreshold
+      .asInstanceOf[js.UndefOr[Double]]
+      .filter(t => t > 0.05 && t <= 1.0)
+      .getOrElse(0.3)
     endOfSpeechSilenceMs = opts.endOfSpeechSilenceMs
       .asInstanceOf[js.UndefOr[Double]]
-      .filter(ms => ms >= FrameMs)
+      .filter(ms => ms >= 32.0)
       .getOrElse(3000.0)
     setPhase("starting")
     debug(
       s"starting session $sess for thread $newThreadId " +
-        s"(tts=$ttsMode threshold=$vadThreshold endSilenceMs=$endOfSpeechSilenceMs)"
+        s"(tts=$ttsMode speechProbabilityThreshold=$speechProbabilityThreshold " +
+        s"endSilenceMs=$endOfSpeechSilenceMs)"
     )
     val started =
       for
@@ -208,7 +206,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       yield stream
     started.onComplete {
       case _ if sessionId != sess => // superseded while starting
-      case Success(stream)        => beginListening(stream)
+      case Success(stream)        => beginListening(stream, sess)
       case Failure(e)             =>
         debug(s"start failed: ${e.getMessage}")
         errorNote = s"could not start voice: ${e.getMessage}"
@@ -218,7 +216,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
         setPhase("error")
     }
 
-  private def beginListening(stream: MediaStream): Unit =
+  private def beginListening(stream: MediaStream, sess: String): Unit =
     if audioContext == null then stream.getTracks().foreach(_.stop()) // stopped while starting
     else
       micStream = stream
@@ -230,9 +228,6 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
           errorNote = "the browser blocked audio processing (suspended AudioContext)"
           refreshSnapshot()
       }
-      analyser = audioContext.createAnalyser()
-      analyser.fftSize = 2048
-      val _ = audioContext.createMediaStreamSource(analysisStream).connect(analyser)
       recordingStream = PreRollRecordingStream.build(
         preRollMilliseconds = PreRollMs,
         source = audioContext.createMediaStreamSource(micStream),
@@ -243,16 +238,33 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
         connectDelayToDestination = (delay, destination) => { val _ = delay.connect(destination) },
         streamFromDestination = _.stream
       )
-      frameBuffer = new Float32Array(analyser.fftSize)
-      val utteranceEndFrames = math.ceil(endOfSpeechSilenceMs / FrameMs).toInt
-      vad = EnergyVad(VadConfig(threshold = vadThreshold, utteranceEndFrames = utteranceEndFrames))
       mimeType = List("audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus")
         .find(MediaRecorderStatic.isTypeSupported)
         .getOrElse("")
-      debug(s"listening (recorder mime: ${if mimeType.isEmpty then "(browser default)" else mimeType})")
-      frameTimer = setInterval(FrameMs)(onFrame())
-      retarget()
-      setPhase("listening")
+      SpeechDetector.create(
+        stream = analysisStream,
+        audioContext = audioContext,
+        positiveSpeechThreshold = speechProbabilityThreshold,
+        endOfSpeechSilenceMs = endOfSpeechSilenceMs,
+        createMicVad = createMicVad,
+        encodeWav = encodeWav,
+        onFrame = handleSpeechFrame,
+        onEvent = handleSpeechDetectorEvent
+      ).onComplete {
+        case Success(detector) if sessionId == sess =>
+          speechDetector = detector
+          debug(s"listening (preview recorder mime: ${if mimeType.isEmpty then "(browser default)" else mimeType})")
+          retarget()
+          setPhase("listening")
+        case Success(detector) =>
+          detector.destroy().failed.foreach(_ => ())
+        case Failure(e) if sessionId == sess =>
+          debug(s"speech detector failed to start: ${e.getMessage}")
+          errorNote = s"could not start speech detection: ${e.getMessage}"
+          stopInternal(notifyServer = true)
+          setPhase("error")
+        case Failure(_) => ()
+      }
 
   def stop(): Unit =
     debug("stopped by user")
@@ -268,20 +280,20 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       ctx.close().toFuture.failed.foreach(_ => ())
 
   private def stopInternal(notifyServer: Boolean): Unit =
-    if frameTimer != null then { clearInterval(frameTimer); frameTimer = null }
     if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
-    discardRecorder()
+    abandonCapture()
     player.stop()
+    if speechDetector != null then
+      val detector = speechDetector
+      speechDetector = null
+      detector.destroy().failed.foreach(_ => ())
     if recordingStream != null then { recordingStream.getTracks().foreach(_.stop()); recordingStream = null }
     if micStream != null then { micStream.getTracks().foreach(_.stop()); micStream = null }
     if analysisStream != null then { analysisStream.getTracks().foreach(_.stop()); analysisStream = null }
     closeAudioContext()
-    analyser = null
-    frameBuffer = null
-    vad = null
     heardText = null
     interimText = null
-    currentLevel = 0.0
+    currentSpeechProbability = 0.0
     if sessionId != null then
       val sess = sessionId
       sessionId = null
@@ -289,133 +301,102 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       if notifyServer then
         rpcCall("stopSession", js.Dynamic.literal("sessionId" -> sess)).toFuture.failed.foreach(_ => ())
 
-  // ----------------------------------------------------------------- frames
+  // ------------------------------------------------------- speech detection
 
-  private def onFrame(): Unit =
-    if analyser != null && vad != null then
-      analyser.getFloatTimeDomainData(frameBuffer)
-      var sum = 0.0
-      var i   = 0
-      while i < frameBuffer.length do
-        val s = frameBuffer(i).toDouble
-        sum += s * s
-        i += 1
-      val rms = math.sqrt(sum / frameBuffer.length)
-      currentLevel = rms
-      frameCount += 1
-      // ~6Hz level updates for the UI meter without a render per frame.
-      if frameCount % 5 == 0 then refreshSnapshot()
-      vad.pushFrame(rms).foreach(handleVadEvent)
-      if recorder != null then
-        captureFrameCount += 1
-        if rms > vadThreshold then captureVoicedFrameCount += 1
-        capturePeakRms = math.max(capturePeakRms, rms)
-      // Continuous speech never hits a pause, so also cut preview segments on
-      // time; otherwise interim feedback only appears after the first pause.
-      if previewRecorder != null && !previewInFlight && vad.isInSpeech
-        && js.Date.now() >= previewBackoffUntil
-        && js.Date.now() - previewSegmentStart >= 3500
-      then rotatePreviewRecorder()
+  private def handleSpeechFrame(frame: SpeechDetectorFrame): Unit =
+    currentSpeechProbability = frame.speechProbability
+    frameCount += 1
+    // Silero V5 frames are 32ms; update the UI around 6Hz rather than render
+    // for every inference result.
+    if frameCount % 5 == 0 then refreshSnapshot()
+    // Continuous speech never reaches a pause-based preview point.
+    if captureActive && previewRecorder != null && !previewInFlight
+      && js.Date.now() >= previewBackoffUntil
+      && js.Date.now() - previewSegmentStart >= 3500
+    then rotatePreviewRecorder()
 
-  private def handleVadEvent(event: VadEvent): Unit =
-    debug(s"vad: $event (level=${(currentLevel * 1000).round / 1000.0})")
+  private def handleSpeechDetectorEvent(event: SpeechDetectorEvent): Unit =
+    debug(s"speech detector: $event")
     event match
-      case VadEvent.CandidateStart =>
-        // Recording proceeds during playback too: echo cancellation keeps the
-        // TTS out of the mic, and suppressing here silently ate anything said
-        // at normal volume while a reply was speaking.
-        startRecorder()
-      case VadEvent.CandidateAbandoned =>
-        if recorder != null && vad != null && !vad.isInSpeech then discardRecorder()
+      case SpeechDetectorEvent.CandidateStart => beginCapture()
+      case SpeechDetectorEvent.CandidateAbandoned(evidence) =>
+        reportDiscardedCapture(evidence)
+        abandonCapture()
         if phase == "recording" then setPhase("listening")
-      case VadEvent.SpeechStart =>
-        startRecorder()
+      case SpeechDetectorEvent.SpeechStart =>
+        beginCapture()
         utteranceTarget = currentTarget
+        if player.isSpeaking then
+          debug("barge-in: stopping playback")
+          player.stop()
         setPhase("recording")
-      case VadEvent.Partial =>
+      case SpeechDetectorEvent.PreviewPoint =>
         // Previews are best-effort extra transcription load; throttle them so
         // they can never rate-limit the provider out from under final submits.
         val now = js.Date.now()
         if previewRecorder != null && !previewInFlight && now >= previewBackoffUntil
           && now - lastPreviewAt >= 3000
-        then
-          rotatePreviewRecorder()
-      case VadEvent.SpeechEnd(longEnough) =>
-        if recorder != null then finishRecorder(submit = longEnough)
+        then rotatePreviewRecorder()
+      case SpeechDetectorEvent.SpeechEnd(recording, evidence) =>
+        if captureActive then
+          captureActive = false
+          if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
+          stopPreviewRecorder()
+          debug(s"utterance captured (${recording.size.asInstanceOf[Double]} bytes)")
+          submitUtterance(recording, evidenceToJs(evidence))
         else if phase == "recording" then setPhase("listening")
-      case VadEvent.BargeIn =>
-        if player.isSpeaking then
-          debug("barge-in: stopping playback")
-          player.stop()
-          if phase == "speaking" then setPhase(if recorder != null then "recording" else "listening")
 
   // -------------------------------------------------------------- recording
 
-  private def startRecorder(): Unit =
-    if recorder == null && recordingStream != null then
-      val chunks  = js.Array[js.Any]()
-      val options = if mimeType.nonEmpty then js.Dynamic.literal("mimeType" -> mimeType) else js.Dynamic.literal()
-      val r       = new MediaRecorder(recordingStream, options)
-      recorderChunks = chunks
-      recorderSubmit = false
-      captureFrameCount = 0
-      captureVoicedFrameCount = 0
-      capturePeakRms = 0.0
-      completedCaptureEvidence = null
+  private def beginCapture(): Unit =
+    if !captureActive && recordingStream != null then
+      captureActive = true
       utteranceSeq += 1
       interimText = null
       interimAccum = ""
-      r.ondataavailable = { e =>
-        if e.data.size.asInstanceOf[Double] > 0 then { val _ = chunks.push(e.data.asInstanceOf[js.Any]) }
-      }
-      r.onstop = { _ =>
-        if recorder eq r then
-          recorder = null
-          recorderChunks = null
-          if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
-          if recorderSubmit then
-            val blob = js.Dynamic.newInstance(js.Dynamic.global.Blob)(
-              chunks,
-              js.Dynamic.literal("type" -> (if mimeType.nonEmpty then mimeType else "audio/webm"))
-            )
-            debug(s"utterance captured (${blob.size} bytes)")
-            submitUtterance(blob, completedCaptureEvidence)
-          else debug("capture discarded")
-      }
-      r.onerror = { e =>
-        debug(s"recorder error: ${js.JSON.stringify(e.asInstanceOf[js.Any])}")
-        if recorder eq r then { recorder = null; recorderChunks = null }
-      }
-      recorder = r
-      r.start()
       startPreviewRecorder()
-      debug("recorder started")
+      debug("capture started")
       maxUtteranceTimer = setTimeout(MaxUtteranceMs + PreRollMs) {
         maxUtteranceTimer = null
-        // Forced utterance boundary: submit what we have and keep listening.
-        if recorder != null then
-          debug("utterance length cap reached; submitting")
-          if vad != null then vad.reset()
-          finishRecorder(submit = true)
+        if captureActive && speechDetector != null then
+          debug("utterance length cap reached; flushing")
+          speechDetector.flush().failed.foreach { e =>
+            errorNote = s"could not split long utterance: ${e.getMessage}"
+            refreshSnapshot()
+          }
       }
 
-  private def finishRecorder(submit: Boolean): Unit =
+  private def abandonCapture(): Unit =
+    captureActive = false
+    if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
     stopPreviewRecorder()
-    if recorder != null then
-      recorderSubmit = submit
-      completedCaptureEvidence = js.Dynamic.literal(
-        "frames"       -> captureFrameCount,
-        "voicedFrames" -> captureVoicedFrameCount,
-        "peakRms"      -> capturePeakRms,
-        "threshold"    -> vadThreshold
-      )
-      if recorder.state != "inactive" then recorder.stop()
+    debug("capture discarded")
 
-  /** The parallel recorder behind interim previews. The main recorder is
-    * never flushed mid-utterance (Firefox requestData produces chunk
-    * boundaries strict decoders reject); instead this one is stopped at each
-    * preview point — yielding a complete standalone file — and restarted for
-    * the next segment. Interim text is the accumulated segment texts.
+  private def evidenceToJs(evidence: SpeechDetectorEvidence): js.Dynamic =
+    js.Dynamic.literal(
+      "classifier"                 -> "silero-v5",
+      "frameCount"                 -> evidence.frameCount,
+      "speechFrameCount"           -> evidence.speechFrameCount,
+      "peakRms"                    -> evidence.peakRms,
+      "peakSpeechProbability"      -> evidence.peakSpeechProbability,
+      "positiveSpeechThreshold"    -> evidence.positiveSpeechThreshold
+    )
+
+  private def reportDiscardedCapture(evidence: SpeechDetectorEvidence): Unit =
+    val sess = sessionId
+    if sess != null then
+      rpcCall(
+        "reportDiscardedCapture",
+        js.Dynamic.literal(
+          "sessionId" -> sess,
+          "threadId"  -> currentTarget,
+          "evidence"  -> evidenceToJs(evidence)
+        )
+      ).toFuture.failed.foreach(_ => ())
+
+  /** A separate recorder exists only for interim previews. Silero owns final
+    * utterance audio; this recorder is stopped at each preview point to yield
+    * a complete standalone file and then restarted for the next segment.
     */
   private def startPreviewRecorder(): Unit =
     if previewRecorder == null && recordingStream != null then
@@ -437,7 +418,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
             )
             if blob.size.asInstanceOf[Double] > 2000 then previewSegment(seq, blob)
             // Keep capturing the rest of the utterance as the next segment.
-            if recorder != null then startPreviewRecorder()
+            if captureActive then startPreviewRecorder()
         }
         r.onerror = { _ => if previewRecorder eq r then previewRecorder = null }
         r.start()
@@ -466,8 +447,6 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       previewDiscard = true
       if previewRecorder.state != "inactive" then previewRecorder.stop()
       previewRecorder = null
-
-  private def discardRecorder(): Unit = finishRecorder(submit = false)
 
   /** Transcribe one complete preview segment and append it to the interim
     * feedback; never sends to the thread.
@@ -523,31 +502,36 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     val tid  = if utteranceTarget != null then utteranceTarget else threadId
     if sess != null then
       setPhase("transcribing")
-      def send(b64: String): Future[js.Dynamic] =
-        rpcCall(
-          "submitUtterance",
-          js.Dynamic.literal(
-            "sessionId"   -> sess,
-            "threadId"    -> tid,
-            "mimeType"    -> blob.`type`.asInstanceOf[String],
-            "audioBase64" -> b64,
-            "evidence"    -> evidence
-          )
-        ).toFuture
       val submitted =
         for
-          b64    <- blobToBase64(blob)
-          result <- send(b64).recoverWith {
-                      // A plugin reload wipes the backend's session registry;
-                      // re-register this session and retry once.
-                      case e if e.getMessage != null && e.getMessage.contains("no longer active") =>
-                        debug("backend forgot the session; re-registering")
-                        rpcCall("startSession", js.Dynamic.literal("sessionId" -> sess, "threadId" -> tid)).toFuture
-                          .flatMap(_ => send(b64))
-                    }
+          b64 <- blobToBase64(blob)
+          result <- {
+            def send(): Future[js.Dynamic] =
+              rpcCall(
+                "submitUtterance",
+                js.Dynamic.literal(
+                  "sessionId"   -> sess,
+                  "threadId"    -> tid,
+                  "mimeType"    -> blob.`type`.asInstanceOf[String],
+                  "audioBase64" -> b64,
+                  "evidence"    -> evidence
+                )
+              ).toFuture
+            send().recoverWith {
+              // A plugin reload wipes the backend's session registry;
+              // re-register this session and retry once.
+              case e if e.getMessage != null && e.getMessage.contains("no longer active") =>
+                debug("backend forgot the session; re-registering")
+                rpcCall("startSession", js.Dynamic.literal("sessionId" -> sess, "threadId" -> tid)).toFuture
+                  .flatMap(_ => send())
+            }
+          }
         yield result
       submitted.onComplete {
         case _ if sessionId != sess => ()
+        case Success(result) if result == null =>
+          interimText = null
+          if phase == "transcribing" then setPhase("listening")
         case Success(result) =>
           if result.sent.asInstanceOf[Boolean] then
             heardText = result.text.asInstanceOf[String]
@@ -629,7 +613,11 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
 
 @JSExportTopLevel("createController")
 def createController(deps: js.Dynamic): js.Dynamic =
-  val ctl = new Controller(deps.rpcCall.asInstanceOf[js.Function2[String, js.Any, js.Promise[js.Dynamic]]])
+  val ctl = new Controller(
+    deps.rpcCall.asInstanceOf[js.Function2[String, js.Any, js.Promise[js.Dynamic]]],
+    deps.createMicVad.asInstanceOf[js.Function1[js.Dynamic, js.Promise[js.Dynamic]]],
+    deps.encodeWav.asInstanceOf[js.Function1[Float32Array, js.Any]]
+  )
   js.Dynamic.literal(
     "start"       -> js.Any.fromFunction2((threadId: String, opts: js.Dynamic) => ctl.start(threadId, opts)),
     "startViewed" -> js.Any.fromFunction0(() => ctl.startViewed()),

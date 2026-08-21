@@ -119,12 +119,13 @@ object Widget:
 
       meter.style.display = if active then "inline-block" else "none"
       if active then
-        val level     = snap.level.asInstanceOf[Double]
-        val threshold = snap.threshold.asInstanceOf[Double]
-        val pct       = math.min(100.0, level / (threshold * 8) * 100.0)
+        val speechProbability = snap.speechProbability.asInstanceOf[Double]
+        val threshold = snap.speechProbabilityThreshold.asInstanceOf[Double]
+        val pct       = math.min(100.0, speechProbability * 100.0)
         meterFill.style.width = s"$pct%"
         meterFill.style.background =
-          if level > threshold then "var(--destructive, #ef4444)" else "var(--success, #22c55e)"
+          if speechProbability >= threshold then "var(--destructive, #ef4444)"
+          else "var(--success, #22c55e)"
 
       speechTarget.style.display = if active && target != null then "block" else "none"
       if target != null then

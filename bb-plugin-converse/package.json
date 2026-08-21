@@ -7,6 +7,7 @@
   },
   "scripts": {
     "build": "bleep --directory .. link converse && cp ../.bleep/builds/normal/.bloop/converse/link-output/debug/js/main.js server.js && bleep --directory .. link converse-app && cp ../.bleep/builds/normal/.bloop/converse-app/link-output/debug/js/main.js app-core.cjs",
+    "test": "bleep --directory .. test converse-core-test",
     "reload": "npm run build && bb plugin build . && bb plugin reload converse"
   },
   "bb": {
@@ -24,5 +25,9 @@
     "react": "^19.2.8",
     "sonner": "^2.0.8",
     "typescript": "^7.0.2"
+  },
+  "dependencies": {
+    "@ricky0123/vad-web": "0.0.30",
+    "onnxruntime-web": "1.27.0"
   }
 }

@@ -174,10 +174,10 @@ def plugin(bb: BbApi): Unit =
         "label"   -> "STT: language hint (ISO code like en; empty = auto-detect)",
         "default" -> "en"
       ),
-      "vadThreshold" -> js.Dynamic.literal(
+      "speechProbabilityThreshold" -> js.Dynamic.literal(
         "type"    -> "string",
-        "label"   -> "MIC: voice detection threshold (normalized RMS; raise if noise triggers it)",
-        "default" -> "0.015"
+        "label"   -> "MIC: minimum speech probability (0–1; raise if noise triggers it)",
+        "default" -> "0.3"
       ),
       "endOfSpeechSilenceMs" -> js.Dynamic.literal(
         "type"    -> "string",
@@ -393,6 +393,7 @@ def plugin(bb: BbApi): Unit =
       if mimeType.startsWith("audio/webm") then "webm"
       else if mimeType.startsWith("audio/mp4") then "mp4"
       else if mimeType.startsWith("audio/ogg") then "ogg"
+      else if mimeType.startsWith("audio/wav") then "wav"
       else "webm"
     js.Dynamic.newInstance(js.Dynamic.global.File)(
       js.Array(bytes),
@@ -648,6 +649,10 @@ def plugin(bb: BbApi): Unit =
         ),
         "output" -> Schema.passthrough
       ),
+      "reportDiscardedCapture" -> js.Dynamic.literal(
+        "input"  -> Schema.strings("sessionId" -> 100, "threadId" -> 100),
+        "output" -> Schema.passthrough
+      ),
       "voiceSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "updateVoiceSettings" -> js.Dynamic.literal(
         "input" -> Schema.passthrough,
@@ -703,9 +708,11 @@ def plugin(bb: BbApi): Unit =
           val evidence = input.evidence.asInstanceOf[js.UndefOr[js.Dynamic]]
           evidence.foreach { e =>
             bb.log.info(
-              s"utterance acoustic evidence ($diagnosticContext): " +
-                s"frames=${str(e.frames)}, voicedFrames=${str(e.voicedFrames)}, " +
-                s"peakRms=${str(e.peakRms)}, threshold=${str(e.threshold)}"
+              s"speech detector evidence ($diagnosticContext): " +
+                s"classifier=${str(e.classifier)}, frames=${str(e.frameCount)}, " +
+                s"speechFrames=${str(e.speechFrameCount)}, peakRms=${str(e.peakRms)}, " +
+                s"peakSpeechProbability=${str(e.peakSpeechProbability)}, " +
+                s"positiveSpeechThreshold=${str(e.positiveSpeechThreshold)}"
             )
           }
           bb.log.info(
@@ -763,6 +770,20 @@ def plugin(bb: BbApi): Unit =
                   }
             }
             .toJSPromise
+      },
+      "reportDiscardedCapture" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val sessionId = str(input.sessionId)
+        val threadId  = str(input.threadId)
+        val evidence  = input.evidence.asInstanceOf[js.UndefOr[js.Dynamic]]
+        if state.active.exists(_.sessionId == sessionId) then evidence.foreach { e =>
+          bb.log.info(
+            s"speech candidate discarded (thread=$threadId): " +
+              s"classifier=${str(e.classifier)}, frames=${str(e.frameCount)}, " +
+              s"speechFrames=${str(e.speechFrameCount)}, peakRms=${str(e.peakRms)}, " +
+              s"peakSpeechProbability=${str(e.peakSpeechProbability)}"
+          )
+        }
+        js.Dynamic.literal("ok" -> true)
       },
       "previewUtterance" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val sessionId = str(input.sessionId)

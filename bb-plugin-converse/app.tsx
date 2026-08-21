@@ -9,6 +9,7 @@ import {
   useRealtime,
   useSettings,
 } from "@get-bb/plugin-sdk/app";
+import { MicVAD, utils } from "@ricky0123/vad-web";
 import { createController, type ConverseController } from "./app-core.cjs";
 
 // Plain-fetch RPC so the controller exists independently of React.
@@ -28,7 +29,12 @@ async function rpcCall(method: string, input: unknown): Promise<unknown> {
 // One controller per browser tab: it owns the microphone and the widget.
 let controller: ConverseController | null = null;
 function getController(): ConverseController {
-  if (!controller) controller = createController({ rpcCall });
+  if (!controller)
+    controller = createController({
+      rpcCall,
+      createMicVad: (options) => MicVAD.new(options),
+      encodeWav: (audio) => utils.encodeWAV(audio, 1, 16_000, 1, 16),
+    });
   return controller;
 }
 
@@ -54,15 +60,22 @@ function VoiceBridge() {
   }, [ctl, sidebar.threads]);
   useEffect(() => {
     const values = settings.values ?? {};
-    const vadThreshold = Number.parseFloat(
-      typeof values.vadThreshold === "string" ? values.vadThreshold : "0.015",
+    const speechProbabilityThreshold = Number.parseFloat(
+      typeof values.speechProbabilityThreshold === "string"
+        ? values.speechProbabilityThreshold
+        : "0.3",
     );
     const endOfSpeechSilenceMs = Number.parseFloat(
       typeof values.endOfSpeechSilenceMs === "string" ? values.endOfSpeechSilenceMs : "3000",
     );
     ctl.configure({
       ttsMode: values.ttsProvider === "browser" || values.ttsProvider === undefined ? "browser" : "server",
-      vadThreshold: Number.isFinite(vadThreshold) && vadThreshold > 0 ? vadThreshold : 0.015,
+      speechProbabilityThreshold:
+        Number.isFinite(speechProbabilityThreshold) &&
+        speechProbabilityThreshold > 0.05 &&
+        speechProbabilityThreshold <= 1
+          ? speechProbabilityThreshold
+          : 0.3,
       endOfSpeechSilenceMs:
         Number.isFinite(endOfSpeechSilenceMs) && endOfSpeechSilenceMs >= 30
           ? endOfSpeechSilenceMs
