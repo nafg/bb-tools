@@ -481,9 +481,14 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
         for
           b64    <- blobToBase64(blob)
           result <- rpcCall(
-                      "previewUtterance",
-                      js.Dynamic.literal("sessionId" -> sess, "mimeType" -> blob.`type`.asInstanceOf[String], "audioBase64" -> b64)
-                    ).toFuture
+                    "previewUtterance",
+                    js.Dynamic.literal(
+                      "sessionId"           -> sess,
+                      "mimeType"            -> blob.`type`.asInstanceOf[String],
+                      "audioBase64"         -> b64,
+                      "precedingTranscript" -> TranscriptionContext.promptFrom(interimAccum)
+                    )
+                  ).toFuture
         yield result
       previewed.onComplete { outcome =>
         previewInFlight = false

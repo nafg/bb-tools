@@ -378,12 +378,14 @@ def plugin(bb: BbApi): Unit =
       apiKey: String,
       language: String,
       file: js.Dynamic,
+      precedingTranscript: String,
       diagnosticContext: String
   ): Future[String] =
     val form = js.Dynamic.newInstance(js.Dynamic.global.FormData)()
     val _    = form.set("file", file)
     if model.nonEmpty then { val _ = form.set("model", model) }
     if language.nonEmpty then { val _ = form.set("language", language) }
+    if precedingTranscript.nonEmpty then { val _ = form.set("prompt", precedingTranscript) }
     val _    = form.set("response_format", "verbose_json")
     val init = js.Dynamic.literal("method" -> "POST", "body" -> form)
     if apiKey.nonEmpty then
@@ -434,6 +436,7 @@ def plugin(bb: BbApi): Unit =
       mimeType: String,
       audioBase64: String,
       retryUnavailable: Boolean,
+      precedingTranscript: String,
       diagnosticContext: String
   ): Future[String] =
     val file = audioFile(mimeType, audioBase64)
@@ -447,6 +450,7 @@ def plugin(bb: BbApi): Unit =
             str(s.groqApiKey),
             language,
             file,
+            precedingTranscript,
             diagnosticContext
           )
         case "openai-compatible" =>
@@ -459,6 +463,7 @@ def plugin(bb: BbApi): Unit =
               str(s.sttCustomApiKey),
               language,
               file,
+              precedingTranscript,
               diagnosticContext
             )
         case _ =>
@@ -671,6 +676,7 @@ def plugin(bb: BbApi): Unit =
             str(input.mimeType),
             str(input.audioBase64),
             retryUnavailable = true,
+            precedingTranscript = "",
             diagnosticContext = diagnosticContext
           )
             .flatMap { text =>
@@ -728,6 +734,7 @@ def plugin(bb: BbApi): Unit =
             str(input.mimeType),
             str(input.audioBase64),
             retryUnavailable = false,
+            precedingTranscript = str(input.precedingTranscript),
             diagnosticContext = diagnosticContext
           )
             .map(text => js.Dynamic.literal("text" -> text))
