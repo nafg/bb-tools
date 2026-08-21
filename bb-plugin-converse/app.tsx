@@ -98,21 +98,40 @@ function PendingVoiceTranscript() {
   );
 }
 
-type VoiceChoice = { id: string; enabled: boolean };
+type VoiceChoice = { id: string; enabled: boolean; label?: string };
 type VoiceSettingsState = {
   enabled: boolean;
   provider: string;
+  url: string;
+  model: string;
+  defaultVoice: string;
+  apiKeyConfigured: boolean;
   voices: VoiceChoice[];
 };
 
-async function playVoicePreview(voice: string): Promise<void> {
+const TTS_PROVIDERS = [
+  { id: "browser", label: "Browser speech" },
+  { id: "pocket-tts", label: "Pocket TTS" },
+  { id: "kokoro", label: "Kokoro" },
+  { id: "openai-compatible", label: "OpenAI-compatible TTS" },
+] as const;
+
+async function playVoicePreview(provider: string, voice: string): Promise<void> {
+  const previewText = `This thread uses the ${voice.replaceAll("_", " ")} voice.`;
+  if (provider === "browser") {
+    const utterance = new SpeechSynthesisUtterance(previewText);
+    const selected = speechSynthesis.getVoices().find((item) => item.voiceURI === voice || item.name === voice);
+    if (selected) utterance.voice = selected;
+    speechSynthesis.speak(utterance);
+    return;
+  }
   const AudioContextClass = window.AudioContext;
   const context = new AudioContextClass();
   await context.resume();
   const response = await fetch("/api/v1/plugins/converse/http/tts", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ text: `This thread uses the ${voice.replaceAll("_", " ")} voice.`, voice }),
+    body: JSON.stringify({ provider, text: previewText, voice }),
   });
   if (!response.ok) throw new Error(`Voice preview failed (${response.status})`);
   const decoded = await context.decodeAudioData(await response.arrayBuffer());
@@ -123,59 +142,122 @@ async function playVoicePreview(voice: string): Promise<void> {
   source.start();
 }
 
-function VoiceSettingsSection() {
-  const settings = useSettings();
+function TtsProviderCard({
+  provider,
+  label,
+  active,
+}: {
+  provider: string;
+  label: string;
+  active: boolean;
+}) {
   const [state, setState] = useState<VoiceSettingsState | null>(null);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const isPocket = settings.values?.ttsProvider === "pocket-tts";
+  const [apiKey, setApiKey] = useState("");
+  const [newVoice, setNewVoice] = useState("");
+
+  const browserVoices = () =>
+    speechSynthesis.getVoices().map((voice) => ({ id: voice.voiceURI || voice.name, label: voice.name }));
 
   const load = () =>
-    rpcCall("voiceSettings", {})
-      .then((result) => setState(result as VoiceSettingsState))
+    rpcCall("voiceSettings", { provider })
+      .then((result) => {
+        const loaded = result as VoiceSettingsState;
+        if (provider === "browser") {
+          const prior = new Map(loaded.voices.map((voice) => [voice.id, voice.enabled]));
+          loaded.voices = browserVoices().map((voice) => ({ ...voice, enabled: prior.get(voice.id) ?? true }));
+        }
+        setState(loaded);
+        setApiKey("");
+      })
       .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
 
   useEffect(() => {
     void load();
-  }, []);
+    if (provider === "browser") {
+      const onVoicesChanged = () => void load();
+      speechSynthesis.addEventListener("voiceschanged", onVoicesChanged);
+      return () => speechSynthesis.removeEventListener("voiceschanged", onVoicesChanged);
+    }
+  }, [provider]);
   useRealtime("converse-voices", () => void load());
 
-  const save = async (next: VoiceSettingsState) => {
-    setState(next);
+  const save = async () => {
+    if (!state) return;
     setSaving(true);
     setError(null);
     try {
-      await rpcCall("updateVoiceSettings", {
-        enabled: next.enabled,
-        voices: next.voices.filter((voice) => voice.enabled).map((voice) => voice.id),
-      });
+      const input: Record<string, unknown> = {
+        provider,
+        url: state.url,
+        model: state.model,
+        defaultVoice: state.defaultVoice,
+        catalog: state.voices.map((voice) => voice.id),
+        voices: state.voices.filter((voice) => voice.enabled).map((voice) => voice.id),
+      };
+      if (apiKey) input.apiKey = apiKey;
+      await rpcCall("updateVoiceSettings", input);
+      await load();
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
-      await load();
     } finally {
       setSaving(false);
     }
   };
 
-  if (!state) return <div className="text-xs text-muted-foreground">Loading voices…</div>;
-
   return (
-    <div className="space-y-3">
-      <label className="flex items-center gap-2 text-sm">
-        <input
-          type="checkbox"
-          checked={state.enabled}
-          disabled={saving}
-          onChange={(event) => void save({ ...state, enabled: event.target.checked })}
-        />
-        Different voices by thread
-      </label>
-      {!isPocket && (
-        <p className="text-xs text-muted-foreground">
-          Voice assignment applies when Pocket TTS is the selected text-to-speech provider.
-        </p>
+    <details className="rounded border" defaultOpen={active}>
+      <summary className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm font-medium">
+        <span>{label}</span>
+        {active && <span className="rounded bg-primary/10 px-2 py-0.5 text-xs text-primary">Active</span>}
+      </summary>
+      <div className="space-y-4 border-t p-3">
+        {provider === "pocket-tts" && (
+          <p className="text-xs text-muted-foreground">Converse starts and stops Pocket TTS automatically.</p>
+        )}
+        {!state ? (
+          <div className="text-xs text-muted-foreground">Loading voices…</div>
+        ) : (
+          <>
+      {(provider === "kokoro" || provider === "openai-compatible") && (
+        <label className="block space-y-1 text-sm">
+          <span>Endpoint</span>
+          <input className="w-full rounded border bg-background px-2 py-1" value={state.url} onChange={(event) => setState({ ...state, url: event.target.value })} />
+        </label>
       )}
-      <div className="grid gap-1 sm:grid-cols-2">
+      {provider === "openai-compatible" && (
+        <>
+          <label className="block space-y-1 text-sm">
+            <span>Model</span>
+            <input className="w-full rounded border bg-background px-2 py-1" value={state.model} onChange={(event) => setState({ ...state, model: event.target.value })} />
+          </label>
+          <label className="block space-y-1 text-sm">
+            <span>API key {state.apiKeyConfigured && !apiKey ? "(configured)" : ""}</span>
+            <input type="password" className="w-full rounded border bg-background px-2 py-1" value={apiKey} placeholder={state.apiKeyConfigured ? "Leave blank to keep existing key" : "Optional for local services"} onChange={(event) => setApiKey(event.target.value)} />
+          </label>
+        </>
+      )}
+      {provider !== "pocket-tts" && provider !== "browser" && (
+        <div className="flex gap-2">
+          <input className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-sm" value={newVoice} placeholder="Add a provider voice ID" onChange={(event) => setNewVoice(event.target.value)} />
+          <button type="button" className="rounded border px-3 text-sm" onClick={() => {
+            const id = newVoice.trim();
+            if (id && !state.voices.some((voice) => voice.id === id)) setState({ ...state, voices: [...state.voices, { id, enabled: true }] });
+            setNewVoice("");
+          }}>Add voice</button>
+        </div>
+      )}
+      <label className="block space-y-1 text-sm">
+        <span>Default voice</span>
+        <select className="w-full rounded border bg-background px-2 py-1" value={state.defaultVoice} onChange={(event) => setState({ ...state, defaultVoice: event.target.value })}>
+          <option value="">Provider default</option>
+          {state.voices.map((voice) => <option key={voice.id} value={voice.id}>{voice.label ?? voice.id.replaceAll("_", " ")}</option>)}
+        </select>
+      </label>
+      <div className="space-y-1">
+        <div className="text-sm font-medium">Voice pool</div>
+        <div className="grid gap-1 sm:grid-cols-2">
         {state.voices.map((voice) => (
           <div key={voice.id} className="flex items-center justify-between gap-2 rounded border px-2 py-1">
             <label className="flex min-w-0 items-center gap-2 text-sm">
@@ -184,7 +266,7 @@ function VoiceSettingsSection() {
                 checked={voice.enabled}
                 disabled={saving}
                 onChange={(event) =>
-                  void save({
+                  setState({
                     ...state,
                     voices: state.voices.map((item) =>
                       item.id === voice.id ? { ...item, enabled: event.target.checked } : item,
@@ -192,17 +274,86 @@ function VoiceSettingsSection() {
                   })
                 }
               />
-              <span className="truncate">{voice.id.replaceAll("_", " ")}</span>
+              <span className="truncate">{voice.label ?? voice.id.replaceAll("_", " ")}</span>
             </label>
             <button
               type="button"
               className="rounded px-2 py-1 text-xs hover:bg-muted disabled:opacity-50"
-              disabled={!isPocket}
-              onClick={() => void playVoicePreview(voice.id).catch((cause) => setError(String(cause)))}
+              onClick={() => void playVoicePreview(provider, voice.id).catch((cause) => setError(String(cause)))}
             >
               Preview
             </button>
           </div>
+        ))}
+        </div>
+      </div>
+      <button type="button" disabled={saving} className="rounded bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-50" onClick={() => void save()}>
+        {saving ? "Saving…" : `Save ${label}`}
+      </button>
+          </>
+        )}
+        {error && <p className="text-xs text-destructive">{error}</p>}
+      </div>
+    </details>
+  );
+}
+
+function TtsProviderSettingsSection() {
+  const settings = useSettings();
+  const activeProvider =
+    typeof settings.values?.ttsProvider === "string" ? settings.values.ttsProvider : "browser";
+  const [threadVoicesEnabled, setThreadVoicesEnabled] = useState<boolean | null>(null);
+  const [savingThreadVoices, setSavingThreadVoices] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const loadThreadVoiceSettings = () =>
+    rpcCall("threadVoiceSettings", {}).then((result) => {
+      setThreadVoicesEnabled((result as { enabled: boolean }).enabled);
+    });
+
+  useEffect(() => {
+    void loadThreadVoiceSettings().catch((cause) => setError(String(cause)));
+  }, []);
+  useRealtime("converse-voices", () => void loadThreadVoiceSettings());
+
+  const updateThreadVoicesEnabled = async (enabled: boolean) => {
+    setThreadVoicesEnabled(enabled);
+    setSavingThreadVoices(true);
+    setError(null);
+    try {
+      await rpcCall("updateThreadVoiceSettings", { enabled });
+    } catch (cause) {
+      setThreadVoicesEnabled(!enabled);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setSavingThreadVoices(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="space-y-1">
+        <label className="flex items-center gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={threadVoicesEnabled ?? false}
+            disabled={threadVoicesEnabled === null || savingThreadVoices}
+            onChange={(event) => void updateThreadVoicesEnabled(event.target.checked)}
+          />
+          Assign a different voice to each thread
+        </label>
+        <p className="text-xs text-muted-foreground">
+          Each provider draws from its own enabled voice pool below.
+        </p>
+      </div>
+      <div className="space-y-2">
+        {TTS_PROVIDERS.map((provider) => (
+          <TtsProviderCard
+            key={provider.id}
+            provider={provider.id}
+            label={provider.label}
+            active={provider.id === activeProvider}
+          />
         ))}
       </div>
       {error && <p className="text-xs text-destructive">{error}</p>}
@@ -210,7 +361,7 @@ function VoiceSettingsSection() {
   );
 }
 
-type ThreadVoiceState = { enabled: boolean; voice: string | null; voices: VoiceChoice[] };
+type ThreadVoiceState = { enabled: boolean; provider: string; voice: string | null; voices: VoiceChoice[] };
 
 function ThreadVoicePicker({ threadId }: { threadId: string }) {
   const [state, setState] = useState<ThreadVoiceState | null>(null);
@@ -250,7 +401,7 @@ function ThreadVoicePicker({ threadId }: { threadId: string }) {
       <option value="">Not assigned</option>
       {enabledVoices.map((voice) => (
         <option key={voice.id} value={voice.id}>
-          {voice.id.replaceAll("_", " ")}
+          {voice.label ?? voice.id.replaceAll("_", " ")}
         </option>
       ))}
     </select>
@@ -259,10 +410,10 @@ function ThreadVoicePicker({ threadId }: { threadId: string }) {
 
 export default definePluginApp((app) => {
   app.slots.settingsSection({
-    id: "thread-voices",
-    title: "Thread voices",
-    description: "Choose which Pocket TTS voices Converse may assign, and listen before enabling them.",
-    component: VoiceSettingsSection,
+    id: "tts-provider",
+    title: "Text-to-speech providers",
+    description: "Configure every provider, its default voice, and the voices available across threads.",
+    component: TtsProviderSettingsSection,
   });
   app.slots.experimental_threadHeaderAction({
     id: "thread-voice",

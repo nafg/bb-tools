@@ -45,7 +45,10 @@ private val PocketEnglishVoices = Vector(
 
 private val ThreadVoicesEnabledKey = "voices.byThreadEnabled"
 private val EnabledPocketVoicesKey = "voices.pocket.enabled"
-private val TtsConfigMigrationKey  = "tts.config.migrated.v1"
+
+private val ManagedPocketPort         = 8000
+private val ManagedPocketStartCommand = "uvx pocket-tts serve --host localhost --port 8000"
+private val ManagedPocketIdleMinutes  = 15
 
 private def ttsConfigKey(provider: String): String = s"tts.config.$provider"
 
@@ -115,7 +118,15 @@ def plugin(bb: BbApi): Unit =
       """CREATE TABLE IF NOT EXISTS thread_voice_assignments (
         |  thread_id TEXT PRIMARY KEY,
         |  voice TEXT NOT NULL
-        |)""".stripMargin
+        |)""".stripMargin,
+      """CREATE TABLE IF NOT EXISTS thread_provider_voice_assignments (
+        |  provider TEXT NOT NULL,
+        |  thread_id TEXT NOT NULL,
+        |  voice TEXT NOT NULL,
+        |  PRIMARY KEY (provider, thread_id)
+        |)""".stripMargin,
+      """INSERT OR IGNORE INTO thread_provider_voice_assignments (provider, thread_id, voice)
+        |SELECT 'pocket-tts', thread_id, voice FROM thread_voice_assignments""".stripMargin
     )
   )
 
@@ -126,61 +137,6 @@ def plugin(bb: BbApi): Unit =
         "label"   -> "TEXT-TO-SPEECH PROVIDER",
         "options" -> js.Array("browser", "pocket-tts", "kokoro", "openai-compatible"),
         "default" -> "browser"
-      ),
-      "pocketUrl" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "POCKET TTS: external /tts endpoint (empty = managed locally by the plugin)",
-        "default" -> ""
-      ),
-      "pocketVoice" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "POCKET TTS: voice",
-        "default" -> "alba"
-      ),
-      "pocketPort" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "POCKET TTS: local port (managed mode)",
-        "default" -> "8000"
-      ),
-      "pocketStartCommand" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "POCKET TTS: start command (managed mode; empty = do not manage)",
-        "default" -> "uvx pocket-tts serve --host localhost --port 8000"
-      ),
-      "serviceIdleMinutes" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "SERVICES: stop managed services after this many idle minutes",
-        "default" -> "15"
-      ),
-      "kokoroUrl" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "KOKORO: OpenAI-compatible speech endpoint",
-        "default" -> "http://127.0.0.1:8880/v1/audio/speech"
-      ),
-      "kokoroVoice" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "KOKORO: voice",
-        "default" -> "af_heart"
-      ),
-      "ttsCustomUrl" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "CUSTOM TTS: OpenAI-compatible speech endpoint (also covers Speaches, Piper, OpenAI)",
-        "default" -> ""
-      ),
-      "ttsCustomModel" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "CUSTOM TTS: model",
-        "default" -> ""
-      ),
-      "ttsCustomVoice" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "CUSTOM TTS: voice",
-        "default" -> ""
-      ),
-      "ttsCustomApiKey" -> js.Dynamic.literal(
-        "type"   -> "string",
-        "label"  -> "CUSTOM TTS: API key (Bearer; empty for local services)",
-        "secret" -> true
       ),
       "sttProvider" -> js.Dynamic.literal(
         "type"    -> "select",
@@ -236,49 +192,43 @@ def plugin(bb: BbApi): Unit =
     )
   )
 
-  /** One-time bridge from the original flat BB settings into provider-owned
-    * data. Pocket is intentionally always managed now, so its obsolete
-    * external URL and lifecycle overrides are not copied.
-    */
-  val _ =
-    bb.storage.kv.get(TtsConfigMigrationKey).toFuture.flatMap { marker =>
-      if marker.asInstanceOf[js.UndefOr[Boolean]].contains(true) then Future.unit
-      else
-        settings.get().toFuture.flatMap { old =>
-          val pocket = js.Dynamic.literal("defaultVoice" -> str(old.pocketVoice))
-          val kokoro = js.Dynamic.literal(
-            "url"          -> str(old.kokoroUrl),
-            "defaultVoice" -> str(old.kokoroVoice),
-            "voices"       -> js.Array(str(old.kokoroVoice)).filter(_.nonEmpty)
-          )
-          val openAiCompatible = js.Dynamic.literal(
-            "url"          -> str(old.ttsCustomUrl),
-            "model"        -> str(old.ttsCustomModel),
-            "defaultVoice" -> str(old.ttsCustomVoice),
-            "apiKey"       -> str(old.ttsCustomApiKey),
-            "voices"       -> js.Array(str(old.ttsCustomVoice)).filter(_.nonEmpty)
-          )
-          for
-            _ <- bb.storage.kv.set(ttsConfigKey("pocket-tts"), pocket).toFuture
-            _ <- bb.storage.kv.set(ttsConfigKey("kokoro"), kokoro).toFuture
-            _ <- bb.storage.kv.set(ttsConfigKey("openai-compatible"), openAiCompatible).toFuture
-            _ <- bb.storage.kv.set(TtsConfigMigrationKey, true).toFuture
-          yield bb.log.info("migrated TTS provider configuration into Converse data")
-        }
-    }
 
-  def storedThreadVoice(threadId: String): Option[String] =
-    db.prepare("SELECT voice FROM thread_voice_assignments WHERE thread_id = ?")
-      .get(threadId)
-      .toOption
-      .map(row => str(row.voice))
+  def stringArray(value: js.Dynamic): Vector[String] =
+    value.asInstanceOf[js.UndefOr[js.Array[String]]].fold(Vector.empty)(_.toVector)
+      .map(_.trim)
       .filter(_.nonEmpty)
+      .distinct
 
-  def enabledPocketVoices(): Future[Vector[String]] =
-    bb.storage.kv.get(EnabledPocketVoicesKey).toFuture.map { stored =>
+  def defaultTtsConfig(provider: String): js.Dynamic = provider match
+    case "pocket-tts" => js.Dynamic.literal("defaultVoice" -> "alba")
+    case "kokoro" =>
+      js.Dynamic.literal(
+        "url"          -> "http://127.0.0.1:8880/v1/audio/speech",
+        "defaultVoice" -> "af_heart",
+        "voices"       -> js.Array("af_heart")
+      )
+    case "openai-compatible" =>
+      js.Dynamic.literal(
+        "url" -> "", "model" -> "", "defaultVoice" -> "", "apiKey" -> "", "voices" -> js.Array()
+      )
+    case _ => js.Dynamic.literal("defaultVoice" -> "", "voices" -> js.Array())
+
+  def ttsConfig(provider: String): Future[js.Dynamic] =
+    bb.storage.kv.get(ttsConfigKey(provider)).toFuture.map(
+      _.asInstanceOf[js.UndefOr[js.Dynamic]].getOrElse(defaultTtsConfig(provider))
+    )
+
+  def availableVoices(provider: String, config: js.Dynamic): Vector[String] =
+    if provider == "pocket-tts" then PocketEnglishVoices else stringArray(config.voices)
+
+  def enabledVoicesKey(provider: String): String =
+    if provider == "pocket-tts" then EnabledPocketVoicesKey else s"voices.$provider.enabled"
+
+  def enabledVoices(provider: String, catalog: Vector[String]): Future[Vector[String]] =
+    bb.storage.kv.get(enabledVoicesKey(provider)).toFuture.map { stored =>
       stored.asInstanceOf[js.UndefOr[js.Array[String]]]
-        .map(_.toVector.filter(PocketEnglishVoices.contains).distinct)
-        .getOrElse(PocketEnglishVoices)
+        .map(_.toVector.filter(catalog.contains).distinct)
+        .getOrElse(catalog)
     }
 
   def threadVoicesEnabled(): Future[Boolean] =
@@ -286,30 +236,44 @@ def plugin(bb: BbApi): Unit =
       _.asInstanceOf[js.UndefOr[Boolean]].getOrElse(false)
     )
 
-  def voiceSettingsResponse(): Future[js.Dynamic] =
+  def storedThreadVoice(provider: String, threadId: String): Option[String] =
+    db.prepare("SELECT voice FROM thread_provider_voice_assignments WHERE provider = ? AND thread_id = ?")
+      .get(provider, threadId)
+      .toOption
+      .map(row => str(row.voice))
+      .filter(_.nonEmpty)
+
+  def voiceSettingsResponse(provider: String): Future[js.Dynamic] =
     for
-      enabled       <- threadVoicesEnabled()
-      enabledVoices <- enabledPocketVoices()
+      config         <- ttsConfig(provider)
+      enabled        <- threadVoicesEnabled()
+      catalog         = availableVoices(provider, config)
+      enabledCatalog <- enabledVoices(provider, catalog)
     yield js.Dynamic.literal(
-      "enabled" -> enabled,
-      "provider" -> "pocket-tts",
-      "voices" -> PocketEnglishVoices.map { voice =>
-        js.Dynamic.literal("id" -> voice, "enabled" -> enabledVoices.contains(voice))
+      "enabled"          -> enabled,
+      "provider"         -> provider,
+      "url"              -> str(config.url),
+      "model"            -> str(config.model),
+      "defaultVoice"     -> str(config.defaultVoice),
+      "apiKeyConfigured" -> str(config.apiKey).nonEmpty,
+      "voices" -> catalog.map { voice =>
+        js.Dynamic.literal("id" -> voice, "enabled" -> enabledCatalog.contains(voice))
       }.toJSArray
     )
 
-  def assignThreadVoice(threadId: String, enabledVoices: Vector[String]): Option[String] =
-    storedThreadVoice(threadId).filter(enabledVoices.contains).orElse {
-      val counts = db.prepare("SELECT voice, COUNT(*) AS count FROM thread_voice_assignments GROUP BY voice")
-        .all()
+  def assignThreadVoice(provider: String, threadId: String, enabledCatalog: Vector[String]): Option[String] =
+    storedThreadVoice(provider, threadId).filter(enabledCatalog.contains).orElse {
+      val counts = db.prepare(
+        "SELECT voice, COUNT(*) AS count FROM thread_provider_voice_assignments WHERE provider = ? GROUP BY voice"
+      ).all(provider)
         .toVector
         .map(row => str(row.voice) -> str(row.count).toIntOption.getOrElse(0))
         .toMap
-      ThreadVoiceAssignments.chooseVoice(threadId, enabledVoices, counts).map { voice =>
+      ThreadVoiceAssignments.chooseVoice(threadId, enabledCatalog, counts).map { voice =>
         val _ = db.prepare(
-          "INSERT INTO thread_voice_assignments (thread_id, voice) VALUES (?, ?) " +
-            "ON CONFLICT(thread_id) DO UPDATE SET voice = excluded.voice"
-        ).run(threadId, voice)
+          "INSERT INTO thread_provider_voice_assignments (provider, thread_id, voice) VALUES (?, ?, ?) " +
+            "ON CONFLICT(provider, thread_id) DO UPDATE SET voice = excluded.voice"
+        ).run(provider, threadId, voice)
         voice
       }
     }
@@ -506,28 +470,17 @@ def plugin(bb: BbApi): Unit =
 
   var pocketStarting: Future[Either[String, String]] = null
 
-  /** Resolve the Pocket TTS base URL, starting the managed service into a bb
-    * terminal when it is not running. External pocketUrl disables management.
-    */
-  def ensurePocket(s: js.Dynamic): Future[Either[String, String]] =
-    val external = str(s.pocketUrl)
-    if external.nonEmpty then Future.successful(Right(external))
-    else
-      val port = str(s.pocketPort) match
-        case "" => "8000"
-        case p  => p
-      val url = s"http://127.0.0.1:$port/tts"
-      probeService(url).flatMap {
+  /** Resolve Pocket TTS, always managing its local lifecycle. */
+  def ensurePocket(): Future[Either[String, String]] =
+    val url = s"http://127.0.0.1:$ManagedPocketPort/tts"
+    probeService(url).flatMap {
         case true =>
           touchPocketUse()
           Future.successful(Right(url))
         case false =>
-          val command = str(s.pocketStartCommand)
-          if command.isEmpty then
-            Future.successful(Left("Pocket TTS is not running and no start command is configured"))
-          else if pocketStarting != null then pocketStarting
+          if pocketStarting != null then pocketStarting
           else
-            bb.log.info(s"starting managed Pocket TTS: $command")
+            bb.log.info(s"starting managed Pocket TTS: $ManagedPocketStartCommand")
             state.active.foreach { a =>
               publishSignal("status", a.sessionId, a.threadId, "text" -> "Starting Pocket TTS…")
             }
@@ -546,7 +499,7 @@ def plugin(bb: BbApi): Unit =
                           "rows"  -> 30,
                           "scope" -> js.Dynamic.literal("kind" -> "host_path", "hostId" -> hostId, "cwd" -> home),
                           "title" -> "pocket-tts (converse)",
-                          "start" -> js.Dynamic.literal("mode" -> "command", "command" -> command)
+                          "start" -> js.Dynamic.literal("mode" -> "command", "command" -> ManagedPocketStartCommand)
                         )
                       )
                       .toFuture
@@ -574,18 +527,17 @@ def plugin(bb: BbApi): Unit =
             pocketStarting = started
             started.onComplete(_ => pocketStarting = null)
             started
-      }
+    }
 
   bb.background.schedule(
     "service-idle",
     "*/5 * * * *",
     () =>
       (for
-        s          <- settings.get().toFuture
         terminalId <- bb.storage.kv.get("pocket.terminalId").toFuture
         lastUse    <- bb.storage.kv.get("pocket.lastUseAt").toFuture
         _ <- {
-          val idleMinutes = str(s.serviceIdleMinutes).toIntOption.filter(_ > 0).getOrElse(15)
+          val idleMinutes = ManagedPocketIdleMinutes
           val tid         = str(terminalId)
           val last        = lastUse.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
           if tid.nonEmpty && last > 0 && js.Date.now() - last > idleMinutes * 60_000.0 then
@@ -632,6 +584,11 @@ def plugin(bb: BbApi): Unit =
         "input" -> Schema.passthrough,
         "output" -> Schema.passthrough
       ),
+      "threadVoiceSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "updateThreadVoiceSettings" -> js.Dynamic.literal(
+        "input" -> Schema.passthrough,
+        "output" -> Schema.passthrough
+      ),
       "threadVoice" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "setThreadVoice" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "resolveThreadVoice" -> js.Dynamic.literal(
@@ -654,7 +611,7 @@ def plugin(bb: BbApi): Unit =
         // first spoken reply is not delayed by service startup.
         settings.get().toFuture.foreach { s =>
           if str(s.ttsProvider) == "pocket-tts" then
-            ensurePocket(s).foreach {
+            ensurePocket().foreach {
               case Left(message) => bb.log.warn(s"TTS warm-up: $message")
               case Right(_)      => ()
             }
@@ -729,52 +686,97 @@ def plugin(bb: BbApi): Unit =
             .map(text => js.Dynamic.literal("text" -> text))
             .toJSPromise
       },
-      "voiceSettings" -> js.Any.fromFunction1 { (_: js.Dynamic) =>
-        voiceSettingsResponse().toJSPromise
+      "voiceSettings" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val requestedProvider = str(input.provider)
+        val providerF =
+          if requestedProvider.nonEmpty then Future.successful(requestedProvider)
+          else settings.get().toFuture.map(s => str(s.ttsProvider))
+        providerF.flatMap(voiceSettingsResponse).toJSPromise
+      },
+      "threadVoiceSettings" -> js.Any.fromFunction1 { (_: js.Dynamic) =>
+        threadVoicesEnabled().map(enabled => js.Dynamic.literal("enabled" -> enabled)).toJSPromise
+      },
+      "updateThreadVoiceSettings" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val enabled = input.enabled.asInstanceOf[js.UndefOr[Boolean]].getOrElse(false)
+        bb.storage.kv.set(ThreadVoicesEnabledKey, enabled).toFuture.map { _ =>
+          publishVoiceChanged()
+          js.Dynamic.literal("ok" -> true)
+        }.toJSPromise
       },
       "updateVoiceSettings" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
-        val enabled = input.enabled.asInstanceOf[js.UndefOr[Boolean]].getOrElse(false)
-        val requested = input.voices.asInstanceOf[js.UndefOr[js.Array[String]]]
-          .map(_.toVector.filter(PocketEnglishVoices.contains).distinct)
-          .getOrElse(Vector.empty)
-        (for
-          _ <- bb.storage.kv.set(ThreadVoicesEnabledKey, enabled).toFuture
-          _ <- bb.storage.kv.set(EnabledPocketVoicesKey, requested.toJSArray).toFuture
-        yield
-          val placeholders = PocketEnglishVoices.filterNot(requested.contains)
-          placeholders.foreach { voice =>
-            val _ = db.prepare("DELETE FROM thread_voice_assignments WHERE voice = ?").run(voice)
-          }
-          publishVoiceChanged()
-          js.Dynamic.literal("ok" -> true)).toJSPromise
+        val provider = str(input.provider)
+        if !Set("browser", "pocket-tts", "kokoro", "openai-compatible").contains(provider) then
+          rejected("unknown TTS provider")
+        else
+          (for
+            previous <- ttsConfig(provider)
+            enabledUpdate = input.enabled.asInstanceOf[js.UndefOr[Boolean]]
+            requestedCatalog =
+              if provider == "pocket-tts" then PocketEnglishVoices else stringArray(input.catalog)
+            requestedEnabled = stringArray(input.voices).filter(requestedCatalog.contains)
+            apiKey =
+              if js.typeOf(input.apiKey) == "string" then str(input.apiKey) else str(previous.apiKey)
+            config = js.Dynamic.literal(
+              "url"          -> str(input.url),
+              "model"        -> str(input.model),
+              "defaultVoice" -> str(input.defaultVoice),
+              "apiKey"       -> apiKey,
+              "voices"       -> requestedCatalog.toJSArray
+            )
+            _ <- bb.storage.kv.set(ttsConfigKey(provider), config).toFuture
+            _ <- enabledUpdate.fold(Future.successful(()))(enabled =>
+              bb.storage.kv.set(ThreadVoicesEnabledKey, enabled).toFuture.map(_ => ())
+            )
+            _ <- bb.storage.kv.set(enabledVoicesKey(provider), requestedEnabled.toJSArray).toFuture
+          yield
+            val disabled = requestedCatalog.filterNot(requestedEnabled.contains)
+            disabled.foreach { voice =>
+              val _ = db.prepare(
+                "DELETE FROM thread_provider_voice_assignments WHERE provider = ? AND voice = ?"
+              ).run(provider, voice)
+            }
+            publishVoiceChanged()
+            js.Dynamic.literal("ok" -> true)).toJSPromise
       },
       "threadVoice" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val threadId = str(input.threadId)
         if threadId.isEmpty then rejected("threadId is required")
         else
-          voiceSettingsResponse().map { voiceSettings =>
-            js.Dynamic.literal(
-              "enabled" -> voiceSettings.enabled,
-              "voice"   -> storedThreadVoice(threadId).orNull,
-              "voices"  -> voiceSettings.voices
-            )
+          settings.get().toFuture.flatMap { currentSettings =>
+            val provider = str(currentSettings.ttsProvider)
+            voiceSettingsResponse(provider).map { voiceSettings =>
+              js.Dynamic.literal(
+                "enabled"  -> voiceSettings.enabled,
+                "provider" -> provider,
+                "voice"    -> storedThreadVoice(provider, threadId).orNull,
+                "voices"   -> voiceSettings.voices
+              )
+            }
           }.toJSPromise
       },
       "setThreadVoice" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val threadId = str(input.threadId)
         val voice    = str(input.voice)
         if threadId.isEmpty then rejected("threadId is required")
-        else if voice.nonEmpty && !PocketEnglishVoices.contains(voice) then rejected("unknown Pocket TTS voice")
         else
-          if voice.isEmpty then
-            val _ = db.prepare("DELETE FROM thread_voice_assignments WHERE thread_id = ?").run(threadId)
-          else
-            val _ = db.prepare(
-              "INSERT INTO thread_voice_assignments (thread_id, voice) VALUES (?, ?) " +
-                "ON CONFLICT(thread_id) DO UPDATE SET voice = excluded.voice"
-            ).run(threadId, voice)
-          publishVoiceChanged(threadId)
-          js.Dynamic.literal("ok" -> true)
+          settings.get().toFuture.flatMap { currentSettings =>
+            val provider = str(currentSettings.ttsProvider)
+            ttsConfig(provider).map { config =>
+              val catalog = availableVoices(provider, config)
+              if voice.nonEmpty && !catalog.contains(voice) then throw new RuntimeException("unknown voice")
+              if voice.isEmpty then
+                val _ = db.prepare(
+                  "DELETE FROM thread_provider_voice_assignments WHERE provider = ? AND thread_id = ?"
+                ).run(provider, threadId)
+              else
+                val _ = db.prepare(
+                  "INSERT INTO thread_provider_voice_assignments (provider, thread_id, voice) VALUES (?, ?, ?) " +
+                    "ON CONFLICT(provider, thread_id) DO UPDATE SET voice = excluded.voice"
+                ).run(provider, threadId, voice)
+              publishVoiceChanged(threadId)
+              js.Dynamic.literal("ok" -> true)
+            }
+          }.toJSPromise
       },
       "resolveThreadVoice" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val threadId = str(input.threadId)
@@ -782,14 +784,15 @@ def plugin(bb: BbApi): Unit =
         else
           (for
             currentSettings <- settings.get().toFuture
+            provider         = str(currentSettings.ttsProvider)
             enabled         <- threadVoicesEnabled()
-            voices          <- enabledPocketVoices()
+            config          <- ttsConfig(provider)
+            catalog          = availableVoices(provider, config)
+            voices          <- enabledVoices(provider, catalog)
           yield
-            val voice =
-              if enabled && str(currentSettings.ttsProvider) == "pocket-tts" then assignThreadVoice(threadId, voices)
-              else None
+            val voice = if enabled then assignThreadVoice(provider, threadId, voices) else None
             voice.foreach(_ => publishVoiceChanged(threadId))
-            js.Dynamic.literal("voice" -> voice.orNull)).toJSPromise
+            js.Dynamic.literal("provider" -> provider, "voice" -> voice.orNull)).toJSPromise
       }
     )
   )
@@ -831,20 +834,26 @@ def plugin(bb: BbApi): Unit =
         for
           body <- context.req.json().asInstanceOf[js.Promise[js.Dynamic]].toFuture
           s    <- settings.get().toFuture
+          requestedProvider = str(body.provider)
+          provider = if requestedProvider.nonEmpty then requestedProvider else str(s.ttsProvider)
+          config <- ttsConfig(provider)
           response <- {
             val text = str(body.text)
             if text.isEmpty then Future.successful(jsonResponse(400, "text is required"))
             else
               // Each provider owns its settings block; unused blocks persist
               // untouched, so switching providers is never destructive.
-              val requestF: Future[Either[String, (String, js.Dynamic)]] = str(s.ttsProvider) match
+              val catalog        = availableVoices(provider, config)
+              val requestedVoice = str(body.voice)
+              val voice =
+                if requestedVoice.nonEmpty && catalog.contains(requestedVoice) then requestedVoice
+                else str(config.defaultVoice)
+              val requestF: Future[Either[String, (String, js.Dynamic)]] = provider match
                 case "pocket-tts" =>
-                  ensurePocket(s).map(_.map { url =>
+                  ensurePocket().map(_.map { url =>
                     touchPocketUse()
                     val form = js.Dynamic.newInstance(js.Dynamic.global.FormData)()
                     val _    = form.set("text", text)
-                    val requestedVoice = str(body.voice)
-                    val voice = if PocketEnglishVoices.contains(requestedVoice) then requestedVoice else str(s.pocketVoice)
                     if voice.nonEmpty then { val _ = form.set("voice_url", voice) }
                     (url, js.Dynamic.literal("method" -> "POST", "body" -> form))
                   })
@@ -855,11 +864,10 @@ def plugin(bb: BbApi): Unit =
                       "input"           -> text,
                       "response_format" -> "mp3"
                     )
-                    val voice = str(s.kokoroVoice)
                     if voice.nonEmpty then payload.updateDynamic("voice")(voice)
                     Right(
                       (
-                        str(s.kokoroUrl),
+                        str(config.url),
                         js.Dynamic.literal(
                           "method"  -> "POST",
                           "headers" -> js.Dynamic.literal("content-type" -> "application/json"),
@@ -870,16 +878,15 @@ def plugin(bb: BbApi): Unit =
                   }
                 case "openai-compatible" =>
                   Future.successful {
-                    val url = str(s.ttsCustomUrl)
-                    if url.isEmpty then Left("ttsCustomUrl is not configured in the Converse plugin settings")
+                    val url = str(config.url)
+                    if url.isEmpty then Left("the OpenAI-compatible TTS endpoint is not configured")
                     else
                       val headers = js.Dynamic.literal("content-type" -> "application/json")
-                      val apiKey  = str(s.ttsCustomApiKey)
+                      val apiKey  = str(config.apiKey)
                       if apiKey.nonEmpty then headers.updateDynamic("Authorization")(s"Bearer $apiKey")
                       val payload = js.Dynamic.literal("input" -> text, "response_format" -> "mp3")
-                      val model   = str(s.ttsCustomModel)
+                      val model   = str(config.model)
                       if model.nonEmpty then payload.updateDynamic("model")(model)
-                      val voice = str(s.ttsCustomVoice)
                       if voice.nonEmpty then payload.updateDynamic("voice")(voice)
                       Right(
                         (url, js.Dynamic.literal("method" -> "POST", "headers" -> headers, "body" -> js.JSON.stringify(payload)))

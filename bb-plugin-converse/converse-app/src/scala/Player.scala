@@ -80,16 +80,13 @@ final class Player(
       currentVoice = null
       currentSettled = item.settled
       onChange()
-      val done =
-        if ttsMode == "server" then
-          resolveThreadVoice(item.sourceThread).flatMap { voice =>
-            if generation != gen then Future.unit
-            else
-              currentVoice = voice
-              onChange()
-              speakServer(gen, chunks, voice)
-          }
-        else speakBrowser(gen, chunks)
+      val done = resolveThreadVoice(item.sourceThread).flatMap { voice =>
+        if generation != gen then Future.unit
+        else
+          currentVoice = voice
+          onChange()
+          if ttsMode == "server" then speakServer(gen, chunks, voice) else speakBrowser(gen, chunks, voice)
+      }
       done.onComplete {
         case Success(_) if generation == gen =>
           speakingActive = false
@@ -137,13 +134,17 @@ final class Player(
       val _ = setTimeout(seconds * 1000) { val _ = p.success(()) }
       p.future
 
-  private def speakBrowser(gen: Int, chunks: List[SpeechChunk]): Future[Unit] =
+  private def speakBrowser(gen: Int, chunks: List[SpeechChunk], voice: String): Future[Unit] =
     chunks.foldLeft(Future.unit) { (acc, chunk) =>
       acc.flatMap { _ =>
         if generation != gen then Future.unit
         else
           val p         = Promise[Unit]()
           val utterance = js.Dynamic.newInstance(js.Dynamic.global.SpeechSynthesisUtterance)(chunk.text)
+          if voice != null then
+            val voices = js.Dynamic.global.speechSynthesis.getVoices().asInstanceOf[js.Array[js.Dynamic]]
+            voices.find(v => v.voiceURI.asInstanceOf[String] == voice || v.name.asInstanceOf[String] == voice)
+              .foreach(v => utterance.voice = v)
           utterance.onend = js.Any.fromFunction1((_: js.Any) => { val _ = p.success(()) })
           utterance.onerror = js.Any.fromFunction1((_: js.Any) => { val _ = p.success(()) })
           val _ = js.Dynamic.global.speechSynthesis.speak(utterance)
