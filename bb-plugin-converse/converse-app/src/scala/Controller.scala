@@ -50,6 +50,10 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   private var recorder: MediaRecorder             = null
   private var recorderChunks: js.Array[js.Any]    = null
   private var recorderSubmit: Boolean             = false
+  private var captureFrameCount: Int              = 0
+  private var captureVoicedFrameCount: Int        = 0
+  private var capturePeakRms: Double              = 0.0
+  private var completedCaptureEvidence: js.Dynamic = null
   private var maxUtteranceTimer: SetTimeoutHandle = null
   private var previewRecorder: MediaRecorder      = null
   private var previewDiscard: Boolean             = false
@@ -302,6 +306,10 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       // ~6Hz level updates for the UI meter without a render per frame.
       if frameCount % 5 == 0 then refreshSnapshot()
       vad.pushFrame(rms).foreach(handleVadEvent)
+      if recorder != null then
+        captureFrameCount += 1
+        if rms > vadThreshold then captureVoicedFrameCount += 1
+        capturePeakRms = math.max(capturePeakRms, rms)
       // Continuous speech never hits a pause, so also cut preview segments on
       // time; otherwise interim feedback only appears after the first pause.
       if previewRecorder != null && !previewInFlight && vad.isInSpeech
@@ -350,6 +358,10 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       val r       = new MediaRecorder(recordingStream, options)
       recorderChunks = chunks
       recorderSubmit = false
+      captureFrameCount = 0
+      captureVoicedFrameCount = 0
+      capturePeakRms = 0.0
+      completedCaptureEvidence = null
       utteranceSeq += 1
       interimText = null
       interimAccum = ""
@@ -367,7 +379,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
               js.Dynamic.literal("type" -> (if mimeType.nonEmpty then mimeType else "audio/webm"))
             )
             debug(s"utterance captured (${blob.size} bytes)")
-            submitUtterance(blob)
+            submitUtterance(blob, completedCaptureEvidence)
           else debug("capture discarded")
       }
       r.onerror = { e =>
@@ -391,6 +403,12 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     stopPreviewRecorder()
     if recorder != null then
       recorderSubmit = submit
+      completedCaptureEvidence = js.Dynamic.literal(
+        "frames"       -> captureFrameCount,
+        "voicedFrames" -> captureVoicedFrameCount,
+        "peakRms"      -> capturePeakRms,
+        "threshold"    -> vadThreshold
+      )
       if recorder.state != "inactive" then recorder.stop()
 
   /** The parallel recorder behind interim previews. The main recorder is
@@ -495,7 +513,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     val _ = reader.readAsDataURL(blob)
     p.future
 
-  private def submitUtterance(blob: js.Dynamic): Unit =
+  private def submitUtterance(blob: js.Dynamic, evidence: js.Dynamic): Unit =
     val sess = sessionId
     val tid  = if utteranceTarget != null then utteranceTarget else threadId
     if sess != null then
@@ -507,7 +525,8 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
             "sessionId"   -> sess,
             "threadId"    -> tid,
             "mimeType"    -> blob.`type`.asInstanceOf[String],
-            "audioBase64" -> b64
+            "audioBase64" -> b64,
+            "evidence"    -> evidence
           )
         ).toFuture
       val submitted =

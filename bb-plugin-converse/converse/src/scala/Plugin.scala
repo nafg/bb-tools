@@ -640,6 +640,13 @@ def plugin(bb: BbApi): Unit =
         val threadId  = str(input.threadId)
         if !state.active.exists(_.sessionId == sessionId) then rejected("voice session is no longer active")
         else
+          val evidence = input.evidence.asInstanceOf[js.UndefOr[js.Dynamic]]
+          evidence.foreach { e =>
+            bb.log.debug(
+              s"utterance acoustic evidence: frames=${str(e.frames)}, voicedFrames=${str(e.voicedFrames)}, " +
+                s"peakRms=${str(e.peakRms)}, threshold=${str(e.threshold)}"
+            )
+          }
           bb.log.info(s"utterance received: ${str(input.audioBase64).length} b64 chars, ${str(input.mimeType)}")
           transcribeAudio(str(input.mimeType), str(input.audioBase64), retryUnavailable = true)
             .flatMap { text =>
