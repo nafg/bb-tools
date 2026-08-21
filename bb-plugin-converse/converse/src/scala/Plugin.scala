@@ -406,6 +406,16 @@ def plugin(bb: BbApi): Unit =
         // with low average log-probability means the segment is not speech.
         val segments = payload.segments.asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]]
         segments.fold(str(payload.text).trim) { segs =>
+          bb.log.debug(
+            "transcription segment evidence: " + segs.zipWithIndex.map { (seg, index) =>
+              val start    = seg.start.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
+              val end      = seg.end.asInstanceOf[js.UndefOr[Double]].getOrElse(start)
+              val noSpeech = seg.no_speech_prob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
+              val logProb  = seg.avg_logprob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
+              val chars    = str(seg.text).trim.length
+              f"$index%d:${end - start}%.2fs,noSpeech=$noSpeech%.3f,avgLogProb=$logProb%.3f,chars=$chars%d"
+            }.mkString("[", "; ", "]")
+          )
           segs
             .filterNot { seg =>
               val noSpeech = seg.no_speech_prob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
