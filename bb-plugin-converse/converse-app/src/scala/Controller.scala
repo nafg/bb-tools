@@ -20,6 +20,7 @@ given ExecutionContext = ExecutionContext.parasitic
   */
 final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynamic]]):
   private val FrameMs        = 30.0
+  private val PreRollMs      = 500.0
   private val MaxUtteranceMs = 60_000.0
 
   // Session
@@ -33,6 +34,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   // Audio graph
   private var micStream: MediaStream        = null
   private var analysisStream: MediaStream   = null
+  private var recordingStream: MediaStream  = null
   private var audioContext: AudioContext    = null
   private var analyser: AnalyserNode        = null
   private var frameBuffer: Float32Array     = null
@@ -227,6 +229,16 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       analyser = audioContext.createAnalyser()
       analyser.fftSize = 2048
       val _ = audioContext.createMediaStreamSource(analysisStream).connect(analyser)
+      recordingStream = PreRollRecordingStream.build(
+        preRollMilliseconds = PreRollMs,
+        source = audioContext.createMediaStreamSource(micStream),
+        createDelay = seconds => audioContext.createDelay(seconds),
+        setDelaySeconds = (delay, seconds) => delay.delayTime.value = seconds,
+        createDestination = () => audioContext.createMediaStreamDestination(),
+        connectSourceToDelay = (source, delay) => { val _ = source.connect(delay) },
+        connectDelayToDestination = (delay, destination) => { val _ = delay.connect(destination) },
+        streamFromDestination = _.stream
+      )
       frameBuffer = new Float32Array(analyser.fftSize)
       val utteranceEndFrames = math.ceil(endOfSpeechSilenceMs / FrameMs).toInt
       vad = EnergyVad(VadConfig(threshold = vadThreshold, utteranceEndFrames = utteranceEndFrames))
@@ -256,6 +268,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
     discardRecorder()
     player.stop()
+    if recordingStream != null then { recordingStream.getTracks().foreach(_.stop()); recordingStream = null }
     if micStream != null then { micStream.getTracks().foreach(_.stop()); micStream = null }
     if analysisStream != null then { analysisStream.getTracks().foreach(_.stop()); analysisStream = null }
     closeAudioContext()
@@ -331,10 +344,10 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
   // -------------------------------------------------------------- recording
 
   private def startRecorder(): Unit =
-    if recorder == null && micStream != null then
+    if recorder == null && recordingStream != null then
       val chunks  = js.Array[js.Any]()
       val options = if mimeType.nonEmpty then js.Dynamic.literal("mimeType" -> mimeType) else js.Dynamic.literal()
-      val r       = new MediaRecorder(micStream, options)
+      val r       = new MediaRecorder(recordingStream, options)
       recorderChunks = chunks
       recorderSubmit = false
       utteranceSeq += 1
@@ -365,7 +378,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       r.start()
       startPreviewRecorder()
       debug("recorder started")
-      maxUtteranceTimer = setTimeout(MaxUtteranceMs) {
+      maxUtteranceTimer = setTimeout(MaxUtteranceMs + PreRollMs) {
         maxUtteranceTimer = null
         // Forced utterance boundary: submit what we have and keep listening.
         if recorder != null then
@@ -387,11 +400,11 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
     * the next segment. Interim text is the accumulated segment texts.
     */
   private def startPreviewRecorder(): Unit =
-    if previewRecorder == null && micStream != null then
+    if previewRecorder == null && recordingStream != null then
       try
         val chunks  = js.Array[js.Any]()
         val options = if mimeType.nonEmpty then js.Dynamic.literal("mimeType" -> mimeType) else js.Dynamic.literal()
-        val r       = new MediaRecorder(micStream, options)
+        val r       = new MediaRecorder(recordingStream, options)
         previewDiscard = false
         val seq = utteranceSeq
         r.ondataavailable = { e =>

@@ -23,6 +23,8 @@ trait MediaStreamTrack extends js.Object:
 class AudioContext extends js.Object:
   def createMediaStreamSource(stream: MediaStream): AudioNode = js.native
   def createAnalyser(): AnalyserNode                          = js.native
+  def createDelay(maxDelayTime: Double): DelayNode            = js.native
+  def createMediaStreamDestination(): MediaStreamAudioDestinationNode = js.native
   def close(): js.Promise[Unit]                               = js.native
   def resume(): js.Promise[Unit]                              = js.native
   val state: String                                           = js.native
@@ -30,6 +32,18 @@ class AudioContext extends js.Object:
 @js.native
 trait AudioNode extends js.Object:
   def connect(node: AudioNode): AudioNode = js.native
+
+@js.native
+trait AudioParam extends js.Object:
+  var value: Double = js.native
+
+@js.native
+trait DelayNode extends AudioNode:
+  val delayTime: AudioParam = js.native
+
+@js.native
+trait MediaStreamAudioDestinationNode extends AudioNode:
+  val stream: MediaStream = js.native
 
 @js.native
 trait AnalyserNode extends AudioNode:
