@@ -294,7 +294,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
       if previewRecorder != null && !previewInFlight && vad.isInSpeech
         && js.Date.now() >= previewBackoffUntil
         && js.Date.now() - previewSegmentStart >= 3500
-      then previewRecorder.stop()
+      then rotatePreviewRecorder()
 
   private def handleVadEvent(event: VadEvent): Unit =
     debug(s"vad: $event (level=${(currentLevel * 1000).round / 1000.0})")
@@ -318,9 +318,7 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
         if previewRecorder != null && !previewInFlight && now >= previewBackoffUntil
           && now - lastPreviewAt >= 3000
         then
-          // Stopping yields a complete, decodable segment file; onstop
-          // transcribes it and starts the next segment recorder.
-          previewRecorder.stop()
+          rotatePreviewRecorder()
       case VadEvent.SpeechEnd(longEnough) =>
         if recorder != null then finishRecorder(submit = longEnough)
         else if phase == "recording" then setPhase("listening")
@@ -418,6 +416,19 @@ final class Controller(rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynam
         case e: Throwable =>
           debug(s"preview recorder unavailable, disabling previews: ${e.getMessage}")
           previewBackoffUntil = js.Date.now() + 3_600_000
+
+  /** Start the next preview recorder before stopping the current one. Each
+    * stopped recorder still yields a complete standalone file, while the brief
+    * overlap prevents speech from falling between segments.
+    */
+  private def rotatePreviewRecorder(): Unit =
+    if previewRecorder != null then
+      val previous = previewRecorder
+      previewRecorder = null
+      PreviewSegmentHandoff.replaceBeforeStopping(
+        startReplacement = () => startPreviewRecorder(),
+        stopPrevious = () => if previous.state != "inactive" then previous.stop()
+      )
 
   private def stopPreviewRecorder(): Unit =
     if previewRecorder != null then
