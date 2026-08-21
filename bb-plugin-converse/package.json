@@ -6,7 +6,8 @@
     "bbPluginSdk": "^0.4.1"
   },
   "scripts": {
-    "build": "bleep --directory .. link converse && cp ../.bleep/builds/normal/.bloop/converse/link-output/debug/js/main.js server.js && bleep --directory .. link converse-app && cp ../.bleep/builds/normal/.bloop/converse-app/link-output/debug/js/main.js app-core.cjs"
+    "build": "bleep --directory .. link converse && cp ../.bleep/builds/normal/.bloop/converse/link-output/debug/js/main.js server.js && bleep --directory .. link converse-app && cp ../.bleep/builds/normal/.bloop/converse-app/link-output/debug/js/main.js app-core.cjs",
+    "reload": "npm run build && bb plugin build . && bb plugin reload converse"
   },
   "bb": {
     "name": "Converse",
