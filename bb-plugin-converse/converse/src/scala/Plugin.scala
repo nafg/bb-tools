@@ -377,7 +377,8 @@ def plugin(bb: BbApi): Unit =
       model: String,
       apiKey: String,
       language: String,
-      file: js.Dynamic
+      file: js.Dynamic,
+      diagnosticContext: String
   ): Future[String] =
     val form = js.Dynamic.newInstance(js.Dynamic.global.FormData)()
     val _    = form.set("file", file)
@@ -407,7 +408,7 @@ def plugin(bb: BbApi): Unit =
         val segments = payload.segments.asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]]
         segments.fold(str(payload.text).trim) { segs =>
           bb.log.info(
-            "transcription segment evidence: " + segs.zipWithIndex.map { (seg, index) =>
+            s"transcription segment evidence ($diagnosticContext): " + segs.zipWithIndex.map { (seg, index) =>
               val start    = seg.start.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
               val end      = seg.end.asInstanceOf[js.UndefOr[Double]].getOrElse(start)
               val noSpeech = seg.no_speech_prob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
@@ -429,7 +430,12 @@ def plugin(bb: BbApi): Unit =
         }
       }
 
-  def transcribeAudio(mimeType: String, audioBase64: String, retryUnavailable: Boolean): Future[String] =
+  def transcribeAudio(
+      mimeType: String,
+      audioBase64: String,
+      retryUnavailable: Boolean,
+      diagnosticContext: String
+  ): Future[String] =
     val file = audioFile(mimeType, audioBase64)
     settings.get().toFuture.flatMap { s =>
       val language = str(s.sttLanguage)
@@ -440,12 +446,21 @@ def plugin(bb: BbApi): Unit =
             str(s.groqModel),
             str(s.groqApiKey),
             language,
-            file
+            file,
+            diagnosticContext
           )
         case "openai-compatible" =>
           val url = str(s.sttCustomUrl)
           if url.isEmpty then Future.failed(new RuntimeException("sttCustomUrl is not configured"))
-          else transcribeViaEndpoint(url, str(s.sttCustomModel), str(s.sttCustomApiKey), language, file)
+          else
+            transcribeViaEndpoint(
+              url,
+              str(s.sttCustomModel),
+              str(s.sttCustomApiKey),
+              language,
+              file,
+              diagnosticContext
+            )
         case _ =>
           transcribeViaBb(file).recoverWith {
             case e if retryUnavailable && e.getMessage != null && e.getMessage.contains("503") =>
@@ -640,17 +655,26 @@ def plugin(bb: BbApi): Unit =
         val threadId  = str(input.threadId)
         if !state.active.exists(_.sessionId == sessionId) then rejected("voice session is no longer active")
         else
+          val diagnosticContext = s"final thread=$threadId request=${state.nextEventId()}"
           val evidence = input.evidence.asInstanceOf[js.UndefOr[js.Dynamic]]
           evidence.foreach { e =>
             bb.log.info(
-              s"utterance acoustic evidence: frames=${str(e.frames)}, voicedFrames=${str(e.voicedFrames)}, " +
+              s"utterance acoustic evidence ($diagnosticContext): " +
+                s"frames=${str(e.frames)}, voicedFrames=${str(e.voicedFrames)}, " +
                 s"peakRms=${str(e.peakRms)}, threshold=${str(e.threshold)}"
             )
           }
-          bb.log.info(s"utterance received: ${str(input.audioBase64).length} b64 chars, ${str(input.mimeType)}")
-          transcribeAudio(str(input.mimeType), str(input.audioBase64), retryUnavailable = true)
+          bb.log.info(
+            s"utterance received ($diagnosticContext): ${str(input.audioBase64).length} b64 chars, ${str(input.mimeType)}"
+          )
+          transcribeAudio(
+            str(input.mimeType),
+            str(input.audioBase64),
+            retryUnavailable = true,
+            diagnosticContext = diagnosticContext
+          )
             .flatMap { text =>
-              bb.log.info(s"transcribed ${text.length} chars")
+              bb.log.info(s"transcribed ($diagnosticContext) ${text.length} chars")
               if text.isEmpty then Future.successful(js.Dynamic.literal("text" -> "", "sent" -> false))
               else if state.continuationWaiters.deliver(threadId, text) then
                 bb.log.info(s"delivered ${text.length} chars to continuation waiter")
@@ -699,7 +723,13 @@ def plugin(bb: BbApi): Unit =
         val sessionId = str(input.sessionId)
         if !state.active.exists(_.sessionId == sessionId) then rejected("voice session is no longer active")
         else
-          transcribeAudio(str(input.mimeType), str(input.audioBase64), retryUnavailable = false)
+          val diagnosticContext = s"preview thread=${state.active.map(_.threadId).getOrElse("unknown")} request=${state.nextEventId()}"
+          transcribeAudio(
+            str(input.mimeType),
+            str(input.audioBase64),
+            retryUnavailable = false,
+            diagnosticContext = diagnosticContext
+          )
             .map(text => js.Dynamic.literal("text" -> text))
             .toJSPromise
       },
