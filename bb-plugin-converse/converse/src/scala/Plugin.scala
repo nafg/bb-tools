@@ -742,7 +742,7 @@ def plugin(bb: BbApi): Unit =
                         "input" -> js.Array(
                           js.Dynamic.literal(
                             "type"       -> "text",
-                            "text"       -> "[heard]\nTranscribed:",
+                            "text"       -> "[heard]\n",
                             "visibility" -> "agent-only"
                           ),
                           js.Dynamic.literal("type" -> "text", "text" -> text),
