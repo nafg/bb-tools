@@ -281,6 +281,33 @@ def plugin(bb: BbApi): Unit =
   def publishVoiceChanged(threadId: String = ""): Unit =
     bb.realtime.publish("converse-voices", js.Dynamic.literal("threadId" -> threadId))
 
+  def waitForMoreSpeech(threadId: String): Future[String] =
+    if !state.awaiting.contains(threadId) then
+      Future.successful(
+        "No active voice turn is awaiting a response. Continue normally without waiting for speech."
+      )
+    else
+      settings.get().toFuture.flatMap { currentSettings =>
+        val waitMs = str(currentSettings.continuationWaitMs).toDoubleOption
+          .filter(ms => ms >= 1000 && ms <= 30000)
+          .getOrElse(8000.0)
+        val waiting = state.continuationWaiters.begin(threadId)
+        val timer = js.Dynamic.global.setTimeout(
+          js.Any.fromFunction0(() => { val _ = state.continuationWaiters.expire(threadId) }),
+          waitMs
+        )
+        waiting.map { continuation =>
+          val _ = js.Dynamic.global.clearTimeout(timer)
+          continuation match
+            case Some(text) =>
+              ("The user continued speaking. Treat this as part of the preceding voice message:\n" +
+                "<voice-continuation>\n" + text + "\n</voice-continuation>")
+            case None =>
+              s"No additional speech arrived within ${waitMs.toInt} milliseconds. " +
+                "Treat the preceding voice message as complete and continue."
+        }
+      }
+
   bb.agents.registerTool(
     js.Dynamic.literal(
       "name" -> "converse_wait_for_more_speech",
@@ -293,7 +320,9 @@ def plugin(bb: BbApi): Unit =
           "punctuation errors, or spoken phrasing. " +
           "If the latest voice message appears unfinished or genuinely ambiguous, call " +
           "converse_wait_for_more_speech before replying or taking action. Do not silently stop and " +
-          "wait without the tool: it has a bounded timeout and tells you whether speech arrived."),
+          "wait without the tool: it has a bounded timeout and tells you whether speech arrived. " +
+          "If the native tool is not available in this provider instance, run `bb converse wait` " +
+          "instead; it invokes the same bounded waiter."),
       "experimental_statusLabels" -> js.Dynamic.literal(
         "pending"   -> "Listening for continued speech",
         "completed" -> "Finished listening for continued speech"
@@ -305,32 +334,42 @@ def plugin(bb: BbApi): Unit =
       ),
       "execute" -> js.Any.fromFunction2 { (_: js.Dynamic, toolContext: js.Dynamic) =>
         val threadId = str(toolContext.threadId)
-        val result =
-          if !state.awaiting.contains(threadId) then
-            Future.successful(
-              "No active voice turn is awaiting a response. Continue normally without waiting for speech."
-            )
-          else
-            settings.get().toFuture.flatMap { currentSettings =>
-              val waitMs = str(currentSettings.continuationWaitMs).toDoubleOption
-                .filter(ms => ms >= 1000 && ms <= 30000)
-                .getOrElse(8000.0)
-              val waiting = state.continuationWaiters.begin(threadId)
-              val timer = js.Dynamic.global.setTimeout(
-                js.Any.fromFunction0(() => { val _ = state.continuationWaiters.expire(threadId) }),
-                waitMs
+        waitForMoreSpeech(threadId).toJSPromise
+      }
+    )
+  )
+
+  bb.cli.register(
+    js.Dynamic.literal(
+      "name"    -> "converse",
+      "summary" -> "Converse voice-session utilities",
+      "commands" -> js.Array(
+        js.Dynamic.literal(
+          "name"    -> "wait",
+          "summary" -> "Wait briefly for continued speech in the current thread",
+          "usage"   -> "bb converse wait"
+        )
+      ),
+      "run" -> js.Any.fromFunction2 { (argv: js.Array[String], context: js.Dynamic) =>
+        val result = argv.toList match
+          case "wait" :: Nil =>
+            val threadId = str(context.threadId)
+            if threadId.isEmpty then
+              Future.successful(
+                js.Dynamic.literal(
+                  "exitCode" -> 1,
+                  "stderr"   -> "bb converse wait requires a current bb thread"
+                )
               )
-              waiting.map { continuation =>
-                val _ = js.Dynamic.global.clearTimeout(timer)
-                continuation match
-                  case Some(text) =>
-                    ("The user continued speaking. Treat this as part of the preceding voice message:\n" +
-                      "<voice-continuation>\n" + text + "\n</voice-continuation>")
-                  case None =>
-                    s"No additional speech arrived within ${waitMs.toInt} milliseconds. " +
-                      "Treat the preceding voice message as complete and continue."
-              }
-            }
+            else
+              waitForMoreSpeech(threadId).map(message => js.Dynamic.literal("exitCode" -> 0, "stdout" -> message))
+          case _ =>
+            Future.successful(
+              js.Dynamic.literal(
+                "exitCode" -> 1,
+                "stderr"   -> "usage: bb converse wait"
+              )
+            )
         result.toJSPromise
       }
     )
