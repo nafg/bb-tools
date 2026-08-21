@@ -406,7 +406,7 @@ def plugin(bb: BbApi): Unit =
         // with low average log-probability means the segment is not speech.
         val segments = payload.segments.asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]]
         segments.fold(str(payload.text).trim) { segs =>
-          bb.log.debug(
+          bb.log.info(
             "transcription segment evidence: " + segs.zipWithIndex.map { (seg, index) =>
               val start    = seg.start.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
               val end      = seg.end.asInstanceOf[js.UndefOr[Double]].getOrElse(start)
@@ -642,7 +642,7 @@ def plugin(bb: BbApi): Unit =
         else
           val evidence = input.evidence.asInstanceOf[js.UndefOr[js.Dynamic]]
           evidence.foreach { e =>
-            bb.log.debug(
+            bb.log.info(
               s"utterance acoustic evidence: frames=${str(e.frames)}, voicedFrames=${str(e.voicedFrames)}, " +
                 s"peakRms=${str(e.peakRms)}, threshold=${str(e.threshold)}"
             )
