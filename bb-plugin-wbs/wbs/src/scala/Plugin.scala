@@ -10,13 +10,8 @@ import scala.scalajs.js.annotation.JSExportTopLevel
 
 given ExecutionContext = ExecutionContext.parasitic
 
-private def basename(path: String): String = path.split('/').lastOption.getOrElse(path)
-
-private def titleFor(path: String): String =
-  basename(path).stripSuffix(".wbs.yaml").stripSuffix(".wbs.yml")
-
-private def renderFile(source: String, path: String, depth: Option[Int]): Either[String, String] =
-  Wbs.parse(source).map(items => Html.render(items, Html.Options(titleFor(path), depth))).left.map(_.getMessage)
+private def renderFile(source: String, depth: Option[Int]): Either[String, String] =
+  Wbs.parse(source).map(Html.render(_, depth)).left.map(_.getMessage)
 
 private def getThread(bb: BbApi, threadId: String): Future[ThreadInfo] =
   bb.sdk.threads.get(js.Dynamic.literal("threadId" -> threadId)).toFuture.map(_.asInstanceOf[ThreadInfo])
@@ -92,8 +87,8 @@ def plugin(bb: BbApi): Unit =
         val path  = input.path
         val depth = input.depth.toOption.map(_.toInt).filter(_ >= 1)
         readOpenedFile(bb, path, input.source)
-          .map(source => renderFile(source, path, depth).fold(m => Html.errorPage(titleFor(path), m), identity))
-          .recover { case e => Html.errorPage(titleFor(path), e.getMessage) }
+          .map(source => renderFile(source, depth).fold(Html.errorFragment, identity))
+          .recover { case e => Html.errorFragment(e.getMessage) }
           .map(html => js.Dynamic.literal("html" -> html))
           .toJSPromise
       }
@@ -107,7 +102,7 @@ def plugin(bb: BbApi): Unit =
       "commands" -> js.Array(
         js.Dynamic.literal(
           "name"    -> "html",
-          "summary" -> "Print the estimate as a self-contained HTML tree table with totals; --depth collapses deeper items into their parent's total",
+          "summary" -> "Print the estimate as an HTML fragment (inline-styled tree table with totals, plus open questions) suitable for embedding in a document or email; --depth collapses deeper items into their parent's total",
           "usage"   -> "bb wbs html <file.wbs.yaml> [--depth N]"
         )
       ),
@@ -128,7 +123,7 @@ private def run(bb: BbApi, argv: List[String], ctx: CliContext): Future[js.Dynam
           for
             hostId <- invokingHostId(bb, ctx.threadId.toOption)
             source <- readHostFile(bb, hostId, path)
-          yield renderFile(source, path, depth).fold(err, ok)
+          yield renderFile(source, depth).fold(err, ok)
     case other => Future.successful(err(s"unknown command: ${other.mkString(" ")}\nUsage: bb wbs html <file.wbs.yaml> [--depth N]"))
   result.recover { case e => err(e.getMessage) }
 

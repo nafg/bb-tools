@@ -23,6 +23,14 @@ interface WbsRpc extends Readonly<Record<string, PluginRpcMethodContract>> {
   render: PluginRpcMethodContract<Shape<RenderInput>, Shape<{ html: string }>>;
 }
 
+// The server returns an inline-styled fragment (what `bb wbs html` prints);
+// the panel wraps it in a page for the iframe.
+const pageCss =
+  "body{margin:16px;color:#1a1a1a;background:#fff}" +
+  "@media(prefers-color-scheme:dark){body{color:#e6e6e6;background:#151515}td,th{border-color:#444 !important}}";
+const wrap = (fragment: string) =>
+  `<!doctype html><html><head><meta charset="utf-8"><style>${pageCss}</style></head><body>${fragment}</body></html>`;
+
 const depths = ["all", "1", "2", "3", "4"] as const;
 type Depth = (typeof depths)[number];
 
@@ -68,7 +76,7 @@ function WbsViewer({ path, source, Original }: PluginFileOpenerProps) {
       {html === null ? (
         <p style={{ padding: "0.5rem" }}>Loading…</p>
       ) : (
-        <iframe title={path} sandbox="" srcDoc={html} style={{ flex: 1, border: 0, width: "100%" }} />
+        <iframe title={path} sandbox="" srcDoc={wrap(html)} style={{ flex: 1, border: 0, width: "100%" }} />
       )}
     </div>
   );

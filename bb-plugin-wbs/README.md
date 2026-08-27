@@ -6,8 +6,9 @@ tree table with hours rolled up at every level, ranges, conditional items,
 placeholders, and the open questions. A depth selector collapses deeper items
 into their parents' totals.
 
-`bb wbs html <file.wbs.yaml> [--depth N]` prints the same self-contained HTML
-to stdout, for redirecting to a file or feeding into an email.
+`bb wbs html <file.wbs.yaml> [--depth N]` prints the same table as an
+inline-styled HTML fragment (no page wrapper), ready to paste into a proposal
+document or an HTML email.
 
 ## Layout
 

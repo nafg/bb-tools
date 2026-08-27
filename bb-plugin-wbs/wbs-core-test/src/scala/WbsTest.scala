@@ -105,13 +105,15 @@ class WbsTest extends munit.FunSuite:
                          |      F: 4
                          |G: needs scope
                          |""".stripMargin)
-    val full = Html.render(nodes, Html.Options("t", None))
+    val full = Html.render(nodes, None)
+    assert(!full.contains("<html"), "fragment, not a document")
+    assert(full.startsWith("<table"))
     assert(full.contains("A &lt;b&gt;"))
     assert(full.contains(">C<"))
     assert(full.contains("if X"))
-    val shallow = Html.render(nodes, Html.Options("t", Some(1)))
+    val shallow = Html.render(nodes, Some(1))
     assert(!shallow.contains(">B<"))
     assert(shallow.contains(">E<"), "fork does not consume a level")
     assert(!shallow.contains(">F<"))
-    assert(shallow.contains("""<td class="hours">3h</td>"""))
+    assert(shallow.contains(">3h</td>"))
     assert(shallow.contains("Not yet estimated"))
