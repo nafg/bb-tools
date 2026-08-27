@@ -323,9 +323,11 @@ def plugin(bb: BbApi): Unit =
           "wait without the tool: it has a bounded timeout and tells you whether speech arrived. " +
           "If the native tool is not available in this provider instance, run `bb converse wait` " +
           "instead; it invokes the same bounded waiter."),
-      "experimental_statusLabels" -> js.Dynamic.literal(
-        "pending"   -> "Listening for continued speech",
-        "completed" -> "Finished listening for continued speech"
+      "presentation" -> js.Dynamic.literal(
+        "label" -> js.Dynamic.literal(
+          "pending"   -> "Listening for continued speech",
+          "completed" -> "Finished listening for continued speech"
+        )
       ),
       "parameters" -> js.Dynamic.literal(
         "type"                 -> "object",
