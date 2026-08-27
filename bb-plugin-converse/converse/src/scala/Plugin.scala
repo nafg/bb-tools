@@ -742,6 +742,7 @@ def plugin(bb: BbApi): Unit =
         val threadId  = str(input.threadId)
         if !state.active.exists(_.sessionId == sessionId) then rejected("voice session is no longer active")
         else
+          state.active = state.active.map(_.copy(threadId = threadId))
           val diagnosticContext = s"final thread=$threadId request=${state.nextEventId()}"
           val evidence = input.evidence.asInstanceOf[js.UndefOr[js.Dynamic]]
           evidence.foreach { e =>
@@ -832,7 +833,14 @@ def plugin(bb: BbApi): Unit =
         val sessionId = str(input.sessionId)
         if !state.active.exists(_.sessionId == sessionId) then rejected("voice session is no longer active")
         else
-          val diagnosticContext = s"preview thread=${state.active.map(_.threadId).getOrElse("unknown")} request=${state.nextEventId()}"
+          val requestedThreadId = str(input.threadId)
+          val threadId =
+            if requestedThreadId.nonEmpty then requestedThreadId
+            else state.active.map(_.threadId).getOrElse("unknown")
+          state.active = state.active.map { active =>
+            if requestedThreadId.nonEmpty then active.copy(threadId = requestedThreadId) else active
+          }
+          val diagnosticContext = s"preview thread=$threadId request=${state.nextEventId()}"
           transcribeAudio(
             str(input.mimeType),
             str(input.audioBase64),

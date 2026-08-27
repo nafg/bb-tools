@@ -56,7 +56,7 @@ final class Controller(
   private var lastPreviewAt: Double               = 0
   private var previewBackoffUntil: Double         = 0
   private var utteranceSeq: Int                   = 0
-  private var utteranceTarget: String             = null
+  private var utteranceRoute: UtteranceRoute      = null
   private var interimText: String                 = null
   private var interimAccum: String                = ""
 
@@ -84,7 +84,7 @@ final class Controller(
     // While an utterance is being captured or transcribed, the banner belongs
     // on the thread it is latched to, not the thread currently in view.
     val displayThread =
-      if utteranceTarget != null && (captureActive || phase == "transcribing") then utteranceTarget
+      if utteranceRoute != null && (captureActive || phase == "transcribing") then utteranceRoute.threadId
       else threadId
     snapshot = js.Dynamic.literal(
       "phase"                     -> phase,
@@ -171,6 +171,7 @@ final class Controller(
     errorNote = null
     heardText = null
     interimText = null
+    utteranceRoute = null
     lastEventId = null
     val ttsMode = opts.ttsMode.asInstanceOf[js.UndefOr[String]].getOrElse("browser")
     player.setTtsMode(ttsMode)
@@ -293,6 +294,7 @@ final class Controller(
     closeAudioContext()
     heardText = null
     interimText = null
+    utteranceRoute = null
     currentSpeechProbability = 0.0
     if sessionId != null then
       val sess = sessionId
@@ -325,7 +327,6 @@ final class Controller(
         if phase == "recording" then setPhase("listening")
       case SpeechDetectorEvent.SpeechStart =>
         beginCapture()
-        utteranceTarget = currentTarget
         if player.isSpeaking then
           debug("barge-in: stopping playback")
           player.stop()
@@ -350,6 +351,9 @@ final class Controller(
 
   private def beginCapture(): Unit =
     if !captureActive && recordingStream != null then
+      utteranceRoute = UtteranceRoute
+        .latch(Option(currentTarget), Option(threadId))
+        .orNull
       captureActive = true
       utteranceSeq += 1
       interimText = null
@@ -453,6 +457,7 @@ final class Controller(
     */
   private def previewSegment(seq: Int, blob: js.Dynamic): Unit =
     val sess = sessionId
+    val tid  = if utteranceRoute != null then utteranceRoute.threadId else threadId
     if sess != null then
       previewInFlight = true
       lastPreviewAt = js.Date.now()
@@ -463,6 +468,7 @@ final class Controller(
                     "previewUtterance",
                     js.Dynamic.literal(
                       "sessionId"           -> sess,
+                      "threadId"            -> tid,
                       "mimeType"            -> blob.`type`.asInstanceOf[String],
                       "audioBase64"         -> b64,
                       "precedingTranscript" -> TranscriptionContext.promptFrom(interimAccum)
@@ -499,7 +505,7 @@ final class Controller(
 
   private def submitUtterance(blob: js.Dynamic, evidence: js.Dynamic): Unit =
     val sess = sessionId
-    val tid  = if utteranceTarget != null then utteranceTarget else threadId
+    val tid  = if utteranceRoute != null then utteranceRoute.threadId else threadId
     if sess != null then
       setPhase("transcribing")
       val submitted =
