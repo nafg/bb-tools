@@ -14,7 +14,10 @@ cd "$(dirname "$0")/.."
 exec scala-cli test \
   bb-plugin-converse/converse-core/src \
   bb-plugin-converse/converse-core-test/src \
+  bb-plugin-wbs/wbs-core/src \
+  bb-plugin-wbs/wbs-core-test/src \
   --js \
   --scala 3.8.3 \
   --js-version 1.22.0 \
-  --dependency "org.scalameta::munit::1.1.1"
+  --dependency "org.scalameta::munit::1.1.1" \
+  --dependency "io.circe::circe-yaml-scalayaml::0.16.1"

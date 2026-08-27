@@ -135,6 +135,7 @@ trait BbThreadsArea extends js.Object:
   def send(args: js.Any): js.Promise[js.Dynamic]      = js.native
   def spawn(args: js.Any): js.Promise[js.Dynamic]     = js.native
   def timeline(args: js.Any): js.Promise[js.Dynamic]  = js.native
+  def storageLocation(args: js.Any): js.Promise[js.Dynamic] = js.native
   def unarchive(args: js.Any): js.Promise[js.Dynamic] = js.native
 
 @js.native
@@ -149,3 +150,4 @@ trait BbFilesArea extends js.Object:
 @js.native
 trait BbProjectsArea extends js.Object:
   def list(args: js.Any): js.Promise[js.Array[js.Dynamic]] = js.native
+  def fileContent(args: js.Any): js.Promise[js.Dynamic]     = js.native

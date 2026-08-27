@@ -1,0 +1,25 @@
+{
+  "name": "bb-plugin-wbs",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "bbPluginSdk": "^0.4.1" },
+  "scripts": {
+    "build": "bleep --directory .. link wbs && cp ../.bleep/builds/normal/.bloop/wbs/link-output/debug/js/main.js server.js",
+    "test": "bleep --directory .. test wbs-core-test",
+    "reload": "npm run build && bb plugin build . && bb plugin reload wbs"
+  },
+  "bb": {
+    "name": "WBS",
+    "description": "Viewer for *.wbs.yaml work-breakdown estimates: a tree table with totals, plus `bb wbs html` to print the same HTML.",
+    "branding": { "icon": "ListTree" },
+    "server": "./server.js",
+    "app": "./app.tsx",
+    "skills": ["skills"]
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.4.21",
+    "@types/react": "^19.2.18",
+    "react": "^19.2.8",
+    "typescript": "^7.0.2"
+  }
+}

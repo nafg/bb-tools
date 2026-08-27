@@ -54,6 +54,36 @@ projects:
     - template-common
     - template-js
     folder: ./bb-plugin-converse/converse-app
+  wbs-core:
+    cross:
+      jvm3:
+        extends:
+        - template-common
+        - template-jvm
+      js3:
+        extends:
+        - template-common
+        - template-js
+    dependencies:
+    - io.circe::circe-yaml-scalayaml:0.16.1
+    folder: ./bb-plugin-wbs/wbs-core
+  wbs-core-test:
+    dependsOn: wbs-core
+    extends:
+    - template-common
+    - template-jvm
+    isTestProject: true
+    dependencies:
+    - org.scalameta::munit:1.1.1
+    folder: ./bb-plugin-wbs/wbs-core-test
+  wbs:
+    dependsOn:
+    - bb-plugin-facades
+    - wbs-core
+    extends:
+    - template-common
+    - template-js
+    folder: ./bb-plugin-wbs/wbs
 templates:
   template-jvm:
     platform:

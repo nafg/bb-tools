@@ -1,0 +1,18 @@
+Authentication:
+  Login form: 2
+  Password reset: 3.5
+  Session handling: 1.5
+Reporting:
+  Data export:
+    CSV: 1
+    PDF: [3, 6]   # 3 if the existing renderer handles it
+  Dashboard: 6
+Playback:
+  if Twilio URL plays unauthenticated:
+    then:
+      Use Twilio URL directly: 0.5
+    else:
+      Signed-URL route: 3
+      Tests for the signed route: 1
+Analytics: scope not confirmed
+Deployment: 2
