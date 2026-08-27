@@ -19,7 +19,6 @@ object Html:
        |<style>$Css</style>
        |</head>
        |<body>
-       |<h1>${escape(options.title)}</h1>
        |<table class="wbs">
        |<thead><tr><th>Item</th><th class="hours">Estimate</th></tr></thead>
        |<tbody>
@@ -90,7 +89,6 @@ object Html:
 
   private val Css =
     """body{font-family:system-ui,sans-serif;margin:1.5rem;color:#1a1a1a;background:#fff}
-      |h1{font-size:1.4rem;margin:0 0 1rem}
       |table.wbs{border-collapse:collapse;min-width:24rem}
       |.wbs th,.wbs td{padding:.3rem .6rem;border-bottom:1px solid #ddd;text-align:left;vertical-align:top}
       |.wbs th.hours,.wbs td.hours{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
