@@ -134,6 +134,7 @@ trait BbThreadsArea extends js.Object:
   def get(args: js.Any): js.Promise[js.Dynamic]       = js.native
   def send(args: js.Any): js.Promise[js.Dynamic]      = js.native
   def spawn(args: js.Any): js.Promise[js.Dynamic]     = js.native
+  def timeline(args: js.Any): js.Promise[js.Dynamic]  = js.native
   def unarchive(args: js.Any): js.Promise[js.Dynamic] = js.native
 
 @js.native
