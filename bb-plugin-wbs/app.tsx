@@ -31,6 +31,7 @@ function WbsViewer({ path, source, Original }: PluginFileOpenerProps) {
   const rpc = useRpc<WbsRpc>();
   const [depth, setDepth] = useState<Depth>("all");
   const [html, setHtml] = useState<string | null>(null);
+  const [generation, setGeneration] = useState(0);
   useEffect(() => {
     if (!isWbs) return;
     let cancelled = false;
@@ -47,7 +48,7 @@ function WbsViewer({ path, source, Original }: PluginFileOpenerProps) {
     return () => {
       cancelled = true;
     };
-  }, [rpc, path, source, depth, isWbs]);
+  }, [rpc, path, source, depth, isWbs, generation]);
   if (!isWbs) return <Original />;
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%" }}>
@@ -59,7 +60,10 @@ function WbsViewer({ path, source, Original }: PluginFileOpenerProps) {
               {d}
             </option>
           ))}
-        </select>
+        </select>{" "}
+        <button type="button" onClick={() => setGeneration((g) => g + 1)}>
+          Refresh
+        </button>
       </label>
       {html === null ? (
         <p style={{ padding: "0.5rem" }}>Loading…</p>
