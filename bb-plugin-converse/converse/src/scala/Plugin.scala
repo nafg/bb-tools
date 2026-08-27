@@ -1,7 +1,7 @@
 package converse
 
 import bbplugin.*
-import conversecore.{ContinuationWaiters, ThreadVoiceAssignments}
+import conversecore.{AssistantMessage, AssistantReply, ContinuationWaiters, ThreadVoiceAssignments}
 
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
@@ -53,13 +53,14 @@ private val ManagedPocketIdleMinutes  = 15
 private def ttsConfigKey(provider: String): String = s"tts.config.$provider"
 
 private final case class ActiveSession(sessionId: String, threadId: String)
+private final case class AwaitingReply(sessionId: String, previousAssistantMessageId: Option[String])
 
 /** Voice-conversation state for the whole server: at most one active browser
   * session, plus the threads whose next idle transition should be spoken.
   */
 private final class State:
   var active: Option[ActiveSession]     = None
-  val awaiting: mutable.Map[String, String] = mutable.Map.empty // threadId -> sessionId
+  val awaiting: mutable.Map[String, AwaitingReply] = mutable.Map.empty // threadId -> pending voice reply
   val continuationWaiters = ContinuationWaiters()
   private var eventCounter              = 0
   def nextEventId(): String =
@@ -387,6 +388,41 @@ def plugin(bb: BbApi): Unit =
     extra.foreach((name, value) => payload.updateDynamic(name)(value))
     bb.realtime.publish("converse", payload)
 
+  def assistantMessagesFromTimeline(timeline: js.Dynamic): Vector[AssistantMessage] =
+    def array(value: js.Dynamic): Vector[js.Dynamic] =
+      if value == null || js.isUndefined(value) || !js.Array.isArray(value) then Vector.empty
+      else value.asInstanceOf[js.Array[js.Dynamic]].toVector
+
+    def messages(row: js.Dynamic): Vector[AssistantMessage] =
+      val current =
+        if str(row.kind) == "conversation" && str(row.role) == "assistant" then
+          val id = str(row.id)
+          if id.isEmpty then Vector.empty
+          else
+            Vector(
+              AssistantMessage(
+                id,
+                str(row.text),
+                str(row.sourceSeqEnd).toDoubleOption.fold(0L)(_.toLong)
+              )
+            )
+        else Vector.empty
+      current ++ array(row.children).flatMap(messages)
+
+    array(timeline.rows).flatMap(messages)
+
+  def latestAssistantMessage(threadId: String): Future[Option[AssistantMessage]] =
+    bb.sdk.threads
+      .timeline(
+        js.Dynamic.literal(
+          "threadId"         -> threadId,
+          "includeNestedRows" -> "true",
+          "segmentLimit"     -> "50"
+        )
+      )
+      .toFuture
+      .map(timeline => AssistantReply.freshSince(None, assistantMessagesFromTimeline(timeline)))
+
   def audioFile(mimeType: String, audioBase64: String): js.Dynamic =
     val bytes = js.Dynamic.global.Buffer.from(audioBase64, "base64")
     // The transcription provider detects the container from the filename
@@ -680,7 +716,7 @@ def plugin(bb: BbApi): Unit =
           if old.sessionId != sessionId then publishSignal("revoked", old.sessionId, old.threadId)
         }
         state.active = Some(ActiveSession(sessionId, threadId))
-        state.awaiting.filterInPlace((_, sess) => sess == sessionId)
+        state.awaiting.filterInPlace((_, reply) => reply.sessionId == sessionId)
         state.continuationWaiters.expireAll()
         bb.log.info(s"voice session $sessionId started for thread $threadId")
         // Warm the managed TTS service while the user starts talking so the
@@ -697,7 +733,7 @@ def plugin(bb: BbApi): Unit =
       "stopSession" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val sessionId = str(input.sessionId)
         if state.active.exists(_.sessionId == sessionId) then state.active = None
-        state.awaiting.filterInPlace((_, sess) => sess != sessionId)
+        state.awaiting.filterInPlace((_, reply) => reply.sessionId != sessionId)
         state.continuationWaiters.expireAll()
         js.Dynamic.literal("ok" -> true)
       },
@@ -734,7 +770,6 @@ def plugin(bb: BbApi): Unit =
                 bb.log.info(s"delivered ${text.length} chars to continuation waiter")
                 Future.successful(js.Dynamic.literal("text" -> text, "sent" -> true, "continued" -> true))
               else
-                state.awaiting.update(threadId, sessionId)
                 def send(mode: String): Future[js.Dynamic] =
                   bb.sdk.threads
                     .send(
@@ -757,19 +792,25 @@ def plugin(bb: BbApi): Unit =
                       )
                     )
                     .toFuture
-                send("steer-if-active")
-                  .recoverWith {
-                    // steer-if-active 409s ("Thread is not active") when the
-                    // thread is starting or errored; auto resolves those to a
-                    // plain start, so the utterance is not dropped.
-                    case e if e.getMessage != null && e.getMessage.contains("Thread is not active") =>
-                      send("auto")
-                  }
-                  .map(_ => js.Dynamic.literal("text" -> text, "sent" -> true))
-                  .recoverWith { case e =>
-                    val _ = state.awaiting.remove(threadId)
-                    Future.failed(e)
-                  }
+                latestAssistantMessage(threadId).flatMap { previousAssistantMessage =>
+                  state.awaiting.update(
+                    threadId,
+                    AwaitingReply(sessionId, previousAssistantMessage.map(_.id))
+                  )
+                  send("steer-if-active")
+                    .recoverWith {
+                      // steer-if-active 409s ("Thread is not active") when the
+                      // thread is starting or errored; auto resolves those to a
+                      // plain start, so the utterance is not dropped.
+                      case e if e.getMessage != null && e.getMessage.contains("Thread is not active") =>
+                        send("auto")
+                    }
+                    .map(_ => js.Dynamic.literal("text" -> text, "sent" -> true))
+                    .recoverWith { case e =>
+                      val _ = state.awaiting.remove(threadId)
+                      Future.failed(e)
+                    }
+                }
             }
             .toJSPromise
       },
@@ -917,9 +958,30 @@ def plugin(bb: BbApi): Unit =
     "thread.idle",
     { payload =>
       val threadId = str(payload.thread.id)
-      state.awaiting.remove(threadId).foreach { sessionId =>
-        val text = payload.lastAssistantText.asInstanceOf[String | Null]
-        publishSignal("speak", sessionId, threadId, "text" -> (if text == null then "" else text))
+      state.awaiting.remove(threadId).foreach { awaitedReply =>
+        latestAssistantMessage(threadId).onComplete {
+          case scala.util.Success(currentAssistantMessage) =>
+            AssistantReply.freshSince(
+              awaitedReply.previousAssistantMessageId,
+              currentAssistantMessage
+            ) match
+              case Some(reply) => publishSignal("speak", awaitedReply.sessionId, threadId, "text" -> reply.text)
+              case None =>
+                publishSignal(
+                  "agent-failed",
+                  awaitedReply.sessionId,
+                  threadId,
+                  "error" -> "the agent finished without a response"
+                )
+          case scala.util.Failure(error) =>
+            bb.log.error(s"could not read the assistant reply for thread $threadId: ${error.getMessage}")
+            publishSignal(
+              "agent-failed",
+              awaitedReply.sessionId,
+              threadId,
+              "error" -> "could not read the agent response"
+            )
+        }
       }
       ()
     }
@@ -929,11 +991,11 @@ def plugin(bb: BbApi): Unit =
     "thread.failed",
     { payload =>
       val threadId = str(payload.thread.id)
-      state.awaiting.remove(threadId).foreach { sessionId =>
+      state.awaiting.remove(threadId).foreach { awaitedReply =>
         val error = str(payload.error)
         publishSignal(
           "agent-failed",
-          sessionId,
+          awaitedReply.sessionId,
           threadId,
           "error" -> (if error.isEmpty then "the agent failed" else error)
         )
