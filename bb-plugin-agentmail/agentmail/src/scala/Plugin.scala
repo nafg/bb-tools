@@ -600,9 +600,11 @@ object Tools:
             "the draft appears in this thread's Email panel, where only the user can send (or discard) it. " +
             "Returns the draft id; revise the draft with agentmail_update_draft. If the user sends it, a " +
             "message is delivered into this thread, and replies to the email arrive here too."),
-        "experimental_statusLabels" -> js.Dynamic.literal(
-          "pending"   -> "Filing email draft",
-          "completed" -> "Filed email draft"
+        "presentation" -> js.Dynamic.literal(
+          "label" -> js.Dynamic.literal(
+            "pending"   -> "Filing email draft",
+            "completed" -> "Filed email draft"
+          )
         ),
         "parameters" -> js.Dynamic.literal(
           "type" -> "object",
@@ -629,9 +631,11 @@ object Tools:
           ("File a reply draft within an existing AgentMail email thread owned by this bb thread. " +
             "Like agentmail_send, this does NOT send anything — the user reviews and sends the draft " +
             "from the Email panel."),
-        "experimental_statusLabels" -> js.Dynamic.literal(
-          "pending"   -> "Filing email reply draft",
-          "completed" -> "Filed email reply draft"
+        "presentation" -> js.Dynamic.literal(
+          "label" -> js.Dynamic.literal(
+            "pending"   -> "Filing email reply draft",
+            "completed" -> "Filed email reply draft"
+          )
         ),
         "parameters" -> js.Dynamic.literal(
           "type" -> "object",
@@ -657,9 +661,11 @@ object Tools:
             "supplied fields change; a new body replaces any earlier HTML alternative unless fresh html " +
             "is supplied too; attachments are added, not replaced. The draft stays pending until the " +
             "user sends it from the Email panel."),
-        "experimental_statusLabels" -> js.Dynamic.literal(
-          "pending"   -> "Updating email draft",
-          "completed" -> "Updated email draft"
+        "presentation" -> js.Dynamic.literal(
+          "label" -> js.Dynamic.literal(
+            "pending"   -> "Updating email draft",
+            "completed" -> "Updated email draft"
+          )
         ),
         "parameters" -> js.Dynamic.literal(
           "type" -> "object",
