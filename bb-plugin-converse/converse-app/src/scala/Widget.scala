@@ -151,10 +151,11 @@ object Widget:
     val unsubscribe = ctl.subscribe(() => render())
 
     // The sidebar is host-owned React DOM: anchor above its footer list (the
-    // /settings link is the stable landmark) and re-attach whenever a
-    // re-render drops our node. Hidden while the sidebar is collapsed.
+    // Settings link is the stable landmark; its href carries the last visited
+    // settings page, so match by prefix) and re-attach whenever a re-render
+    // drops our node. Hidden while the sidebar is collapsed.
     def attach(): Unit =
-      val link = document.querySelector("a[href='/settings']")
+      val link = document.querySelector("a[data-sidebar='menu-button'][href^='/settings']")
       if link != null then
         val list = link.closest("ul,ol,[role='list']")
         if list != null && list.parentElement != null then
