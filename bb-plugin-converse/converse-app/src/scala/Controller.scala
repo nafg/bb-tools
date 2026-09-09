@@ -56,6 +56,7 @@ final class Controller(
   private var previewInFlight: Boolean            = false
   private var lastPreviewAt: Double               = 0
   private var previewBackoffUntil: Double         = 0
+  private var previewRateLimitPauseMs: Option[Double] = None
   private var utteranceSeq: Int                   = 0
   private var utteranceRoute: UtteranceRoute      = null
   private var interimText: String                 = null
@@ -607,33 +608,53 @@ final class Controller(
       val previewed =
         for
           b64    <- blobToBase64(blob)
-          result <- rpcCall(
-                    "previewUtterance",
-                    js.Dynamic.literal(
-                      "sessionId"           -> sess,
-                      "threadId"            -> tid,
-                      "mimeType"            -> blob.`type`.asInstanceOf[String],
-                      "audioBase64"         -> b64,
-                      "precedingTranscript" -> TranscriptionContext.promptFrom(interimAccum)
-                    )
-                  ).toFuture
+          result <- withSessionReregistered(sess, tid) { () =>
+                      rpcCall(
+                        "previewUtterance",
+                        js.Dynamic.literal(
+                          "sessionId"           -> sess,
+                          "threadId"            -> tid,
+                          "mimeType"            -> blob.`type`.asInstanceOf[String],
+                          "audioBase64"         -> b64,
+                          "precedingTranscript" -> TranscriptionContext.promptFrom(interimAccum)
+                        )
+                      ).toFuture
+                    }
         yield result
       previewed.onComplete { outcome =>
         previewInFlight = false
         outcome match
           case Success(result) if sessionId == sess && utteranceSeq == seq =>
+            previewRateLimitPauseMs = None
             val segment = result.text.asInstanceOf[String]
             interimAccum = (interimAccum + " " + segment).trim
             interimText = interimAccum
             debug(s"interim: $interimText")
             refreshSnapshot()
           case Failure(e) =>
-            // Likely provider rate limiting: stop previewing for a while so
-            // final submissions keep working.
-            previewBackoffUntil = js.Date.now() + 60000
-            debug(s"preview failed (backing off): ${e.getMessage}")
+            PreviewBackoff.pauseAfter(transcriptionFailure(e), previewRateLimitPauseMs) match
+              case Some(pauseMs) =>
+                previewRateLimitPauseMs = Some(pauseMs)
+                previewBackoffUntil = js.Date.now() + pauseMs
+                debug(s"preview rate limited (pausing previews ${pauseMs / 1000}s): ${e.getMessage}")
+              case None =>
+                debug(s"preview failed: ${e.getMessage}")
           case _ => ()
       }
+
+  private def transcriptionFailure(e: Throwable): TranscriptionFailure =
+    TranscriptionFailure.classify(Option(e.getMessage).getOrElse(""))
+
+  /** A plugin reload wipes the backend's session registry; when a call is
+    * rejected for that reason, re-register the session and retry it once.
+    */
+  private def withSessionReregistered(sess: String, tid: String)(call: () => Future[js.Dynamic]): Future[js.Dynamic] =
+    call().recoverWith {
+      case e if transcriptionFailure(e) == TranscriptionFailure.SessionForgotten =>
+        debug("backend forgot the session; re-registering")
+        rpcCall("startSession", js.Dynamic.literal("sessionId" -> sess, "threadId" -> tid)).toFuture
+          .flatMap(_ => call())
+    }
 
   private def blobToBase64(blob: js.Dynamic): Future[String] =
     val p      = Promise[String]()
@@ -667,14 +688,7 @@ final class Controller(
                 case UtteranceRoute.ToThread(id)         => request.updateDynamic("threadId")(id)
                 case UtteranceRoute.NewThread(projectId) => request.updateDynamic("projectId")(projectId)
               rpcCall("submitUtterance", request).toFuture
-            send().recoverWith {
-              // A plugin reload wipes the backend's session registry;
-              // re-register this session and retry once.
-              case e if e.getMessage != null && e.getMessage.contains("no longer active") =>
-                debug("backend forgot the session; re-registering")
-                rpcCall("startSession", js.Dynamic.literal("sessionId" -> sess, "threadId" -> tid)).toFuture
-                  .flatMap(_ => send())
-            }
+            withSessionReregistered(sess, tid)(send)
           }
         yield result
       submitted.onComplete {

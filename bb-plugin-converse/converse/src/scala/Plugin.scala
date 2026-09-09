@@ -1,7 +1,7 @@
 package converse
 
 import bbplugin.*
-import conversecore.{AssistantMessage, AssistantReply, ContinuationWaiters, ThreadVoiceAssignments}
+import conversecore.{AssistantMessage, AssistantReply, ContinuationWaiters, ThreadVoiceAssignments, TranscriptionFailure}
 
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
@@ -564,7 +564,13 @@ def plugin(bb: BbApi): Unit =
           response.text().asInstanceOf[js.Promise[String]].toFuture.flatMap { body =>
             val detail = body.trim.replaceAll("\\s+", " ").take(300)
             bb.log.warn(s"transcription endpoint ${str(response.status)}: $detail")
-            Future.failed(new RuntimeException(s"transcription endpoint returned ${str(response.status)}: $detail"))
+            val status = str(response.status)
+            Future.failed(
+              new RuntimeException(
+                if status == "429" then s"${TranscriptionFailure.RateLimitedMessage}: $detail"
+                else s"transcription endpoint returned $status: $detail"
+              )
+            )
           }
         else response.json().asInstanceOf[js.Promise[js.Dynamic]].toFuture
       }
@@ -835,7 +841,7 @@ def plugin(bb: BbApi): Unit =
         val threadId  = str(input.threadId)
         // A projectId instead of a threadId starts a new thread in that project.
         val projectId = str(input.projectId)
-        if !state.active.exists(_.sessionId == sessionId) then rejected("voice session is no longer active")
+        if !state.active.exists(_.sessionId == sessionId) then rejected(TranscriptionFailure.SessionForgottenMessage)
         else if threadId.isEmpty == projectId.isEmpty then rejected("exactly one of threadId or projectId is required")
         else
           def submissionDone[A](outcome: Future[A]): Future[A] =
@@ -940,7 +946,7 @@ def plugin(bb: BbApi): Unit =
       },
       "previewUtterance" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val sessionId = str(input.sessionId)
-        if !state.active.exists(_.sessionId == sessionId) then rejected("voice session is no longer active")
+        if !state.active.exists(_.sessionId == sessionId) then rejected(TranscriptionFailure.SessionForgottenMessage)
         else
           val requestedThreadId = str(input.threadId)
           val threadId =
