@@ -11,8 +11,9 @@ import scala.util.{Failure, Success}
 /** Owns audio output for the tab: splits text into speech chunks (markdown
   * stripped), synthesizes them via browser speechSynthesis or the server TTS
   * endpoint, and plays them. Agent replies queue across threads; an explicit
-  * replay replaces that queue. Session-agnostic: callers drive their own state
-  * from the returned future and `onChange` notifications.
+  * replay replaces that queue; while held, queued speech waits without
+  * affecting playback already underway. Session-agnostic: callers drive their
+  * own state from the returned future and `onChange` notifications.
   */
 final class Player(
     rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynamic]],
@@ -28,6 +29,7 @@ final class Player(
   // playback is silently skipped (browser speechSynthesis is unaffected).
   private var audioContext: AudioContext = null
   private var speakingActive: Boolean    = false
+  private var held: Boolean              = false
   private var currentThread: String      = null
   private var currentVoice: String       = null
   private var generation: Int            = 0
@@ -44,6 +46,12 @@ final class Player(
   def setAudioContext(ctx: AudioContext): Unit = audioContext = ctx
 
   def isSpeaking: Boolean = speakingActive
+
+  def isHeld: Boolean = held
+
+  def setHeld(value: Boolean): Unit =
+    held = value
+    if !held then startNextQueuedSpeech()
 
   /** The thread whose text is playing, or null when nothing is. */
   def speakingThread: String = currentThread
@@ -70,7 +78,7 @@ final class Player(
     enqueue(text, sourceThread)
 
   private def startNextQueuedSpeech(): Unit =
-    if !speakingActive && queuedSpeech.nonEmpty then
+    if !speakingActive && !held && queuedSpeech.nonEmpty then
       val item   = queuedSpeech.dequeue()
       val chunks = Speech.splitSpeechChunks(item.text)
       generation += 1

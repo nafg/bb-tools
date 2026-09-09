@@ -78,6 +78,7 @@ final class Controller(
 
   // Playback is tab-wide rather than part of the voice-session state machine.
   private val player = new Player(rpcCall, () => refreshSnapshot())
+  private var replyHeld: Boolean = false
 
   // React 18 external-store contract: a stable snapshot object per change.
   private var listeners: List[js.Function0[Unit]] = Nil
@@ -124,6 +125,15 @@ final class Controller(
       debug(s"phase: $phase -> $next")
       phase = next
       refreshSnapshot()
+      syncReplyHold()
+
+  private def syncReplyHold(): Unit =
+    val hold = ReplySpeechHold.holds(captureActive, phase)
+    if hold != player.isHeld then
+      player.setHeld(hold)
+      if !hold && replyHeld then
+        replyHeld = false
+        if player.isSpeaking then setPhase("speaking")
 
   def subscribe(cb: js.Function0[Unit]): js.Function0[Unit] =
     listeners = cb :: listeners
@@ -321,8 +331,9 @@ final class Controller(
 
   private def stopInternal(notifyServer: Boolean): Unit =
     if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
-    abandonCapture()
     player.stop()
+    replyHeld = false
+    abandonCapture()
     if speechDetector != null then
       val detector = speechDetector
       speechDetector = null
@@ -384,6 +395,7 @@ final class Controller(
           stopPreviewRecorder()
           debug(s"utterance captured (${recording.size.asInstanceOf[Double]} bytes)")
           submitUtterance(recording, evidenceToJs(evidence))
+          syncReplyHold()
         else if phase == "recording" then setPhase("listening")
 
   // -------------------------------------------------------------- recording
@@ -397,6 +409,7 @@ final class Controller(
         case Some(route) =>
           utteranceRoute = route
           captureActive = true
+          syncReplyHold()
           noteCapture(active = true)
           utteranceSeq += 1
           interimText = null
@@ -419,6 +432,7 @@ final class Controller(
     if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
     stopPreviewRecorder()
     debug("capture discarded")
+    syncReplyHold()
 
   /** Tell the backend an utterance is being captured for the latched route, so
     * an agent waiting for more speech keeps waiting. A capture that ends in a
@@ -668,6 +682,7 @@ final class Controller(
       // Replay replaces session-driven speech, so release that session from
       // its speaking phase before the Player supersedes the old playback.
       if phase == "speaking" then setPhase("listening")
+      replyHeld = false
       ensureAudioContext()
       player.play(text, sourceThread).map(_ => ())
 
@@ -675,7 +690,10 @@ final class Controller(
     val chunks = Speech.splitSpeechChunks(text)
     if chunks.isEmpty then setPhase("listening")
     else
-      setPhase("speaking")
+      if player.isHeld then
+        debug("reply held until the current utterance is submitted")
+        replyHeld = true
+      else setPhase("speaking")
       player.enqueue(text, sourceThread).onComplete {
         case Success(completed) if completed && !player.isSpeaking =>
           if phase == "speaking" then setPhase("listening")
