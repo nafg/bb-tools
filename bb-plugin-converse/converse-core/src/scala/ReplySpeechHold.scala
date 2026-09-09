@@ -5,5 +5,5 @@ package conversecore
   * speech candidate) and until its transcript has been submitted.
   */
 object ReplySpeechHold:
-  def holds(captureActive: Boolean, phase: String): Boolean =
-    captureActive || phase == "transcribing"
+  def holds(captureActive: Boolean, state: VoiceState): Boolean =
+    captureActive || state == VoiceState.On(SessionPhase.Transcribing)

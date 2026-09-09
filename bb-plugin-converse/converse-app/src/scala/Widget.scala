@@ -1,5 +1,8 @@
 package converseapp
 
+import conversecore.*
+import conversecore.VoiceState.{Off, On}
+
 import scala.scalajs.js
 
 /** The floating chrome-level voice widget: a strip fixed at the bottom of the
@@ -13,31 +16,29 @@ object Widget:
       |<path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/>
       |<path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></svg>""".stripMargin
 
-  private val phaseLabels = Map(
-    "starting"     -> "Starting…",
-    "listening"    -> "Listening",
-    "recording"    -> "Hearing you…",
-    "transcribing" -> "Transcribing…",
-    "waiting"      -> "Thinking…",
-    "speaking"     -> "Speaking",
-    "error"        -> "Voice error"
-  )
+  private val Muted   = "var(--muted-foreground, #888)"
+  private val Success = "var(--success, #22c55e)"
+  private val Alert   = "var(--destructive, #ef4444)"
+  private val Primary = "var(--primary, #6366f1)"
 
-  private val waitingLabels = Map(
-    "tool"            -> "Running a tool…",
-    "generating"      -> "Writing…",
-    "awaiting-speech" -> "Listening for more…"
-  )
+  private def phaseLabel(phase: SessionPhase, activity: Option[AgentActivity]): String = phase match
+    case SessionPhase.Starting     => "Starting…"
+    case SessionPhase.Listening    => "Listening"
+    case SessionPhase.Recording    => "Hearing you…"
+    case SessionPhase.Transcribing => "Transcribing…"
+    case SessionPhase.Speaking     => "Speaking"
+    case SessionPhase.Waiting =>
+      activity match
+        case Some(AgentActivity.Tool)           => "Running a tool…"
+        case Some(AgentActivity.Generating)     => "Writing…"
+        case Some(AgentActivity.AwaitingSpeech) => "Listening for more…"
+        case Some(AgentActivity.Reasoning) | None => "Thinking…"
 
-  private val phaseColors = Map(
-    "starting"     -> "var(--muted-foreground, #888)",
-    "listening"    -> "var(--success, #22c55e)",
-    "recording"    -> "var(--destructive, #ef4444)",
-    "transcribing" -> "var(--primary, #6366f1)",
-    "waiting"      -> "var(--primary, #6366f1)",
-    "speaking"     -> "var(--primary, #6366f1)",
-    "error"        -> "var(--destructive, #ef4444)"
-  )
+  private def phaseColor(phase: SessionPhase): String = phase match
+    case SessionPhase.Starting                                                  => Muted
+    case SessionPhase.Listening                                                 => Success
+    case SessionPhase.Recording                                                 => Alert
+    case SessionPhase.Transcribing | SessionPhase.Waiting | SessionPhase.Speaking => Primary
 
   /** Mounts the widget into the sidebar, above its footer (anchored on the
     * stable /settings link); re-attaches when bb re-renders the sidebar and
@@ -105,19 +106,18 @@ object Widget:
     newThreadTarget.style.cssText = "color:var(--muted-foreground, #888);overflow-wrap:anywhere;"
     val _ = pill.appendChild(newThreadTarget)
 
-    val idleNote = document.createElement("div")
-    idleNote.style.cssText = "color:var(--destructive, #ef4444);overflow-wrap:anywhere;"
-    val _ = pill.appendChild(idleNote)
+    val note = document.createElement("div")
+    note.style.cssText = "color:var(--destructive, #ef4444);overflow-wrap:anywhere;"
+    val _ = pill.appendChild(note)
 
     button.onclick = js.Any.fromFunction1 { (_: js.Any) =>
-      val snap = ctl.getSnapshot()
-      if snap.phase.asInstanceOf[String] != "idle" then ctl.stop() else ctl.startViewed()
+      if ctl.voiceState.isOn then ctl.stop() else ctl.startViewed()
     }
 
     def render(): Unit =
       val snap           = ctl.getSnapshot()
-      val phase          = snap.phase.asInstanceOf[String]
-      val active         = phase != "idle"
+      val state          = ctl.voiceState
+      val active         = state.isOn
       val viewed         = snap.viewed.asInstanceOf[String | Null]
       val target         = snap.threadId.asInstanceOf[String | Null]
       val targetName     = snap.targetThreadDisplayName.asInstanceOf[String | Null]
@@ -125,15 +125,19 @@ object Widget:
       val speakingName   = snap.speakingThreadDisplayName.asInstanceOf[String | Null]
       val composeSurface = snap.composeSurface.asInstanceOf[Boolean]
       val newThreadProjectName = snap.newThreadProjectDisplayName.asInstanceOf[String | Null]
-      val error          = snap.error.asInstanceOf[String | Null]
-      val activity       = snap.activity.asInstanceOf[String | Null]
+      // A message the user should see: a transient notice while on, or why
+      // the last session ended while off.
+      val message: Option[String] = state match
+        case On(_)       => ctl.currentNotice
+        case Off(ending) => ctl.currentNotice.orElse(ending.flatMap(_.message))
 
-      val color = phaseColors.getOrElse(phase, "var(--muted-foreground, #888)")
-      button.style.color = if active then color else "var(--muted-foreground, #888)"
+      val tint = state match
+        case On(phase) => phaseColor(phase)
+        case Off(_)    => Muted
+      button.style.color = tint
       button.setAttribute(
         "title",
-        if error != null then error
-        else if active then "Voice conversation is on — click to stop"
+        if active then "Voice conversation is on — click to stop"
         else if composeSurface then "Start a voice conversation (speaking starts a new thread)"
         else if viewed == null then "Open a thread to start a voice conversation"
         else "Start a voice conversation (utterances go to the thread you are viewing)"
@@ -141,14 +145,13 @@ object Widget:
       button.setAttribute("aria-label", button.getAttribute("title").asInstanceOf[String])
       button.disabled = !active && viewed == null && !composeSurface
 
-      label.style.color = color
-      label.textContent =
-        if !active then "Voice"
-        else if phase == "waiting" && activity != null then waitingLabels.getOrElse(activity, phaseLabels(phase))
-        else phaseLabels.getOrElse(phase, phase)
+      label.style.color = tint
+      label.textContent = state match
+        case On(phase) => phaseLabel(phase, ctl.agentActivity)
+        case Off(_)    => "Voice"
 
-      idleNote.style.display = if !active && error != null then "block" else "none"
-      if !active && error != null then idleNote.textContent = error
+      note.style.display = if message.isDefined then "block" else "none"
+      message.foreach(note.textContent = _)
 
       meter.style.display = if active then "inline-block" else "none"
       if active then

@@ -2,15 +2,12 @@
 // built from the converse-app Bleep project — see package.json "build").
 
 export interface ConverseSnapshot {
-  phase:
-    | "idle"
-    | "starting"
-    | "listening"
-    | "recording"
-    | "transcribing"
-    | "waiting"
-    | "speaking"
-    | "error";
+  /** A voice session is running. */
+  on: boolean;
+  /** What the running session is doing; null while off. */
+  phase: "starting" | "listening" | "recording" | "transcribing" | "waiting" | "speaking" | null;
+  /** Why the last session ended, when the user should know; null while on or after a plain stop. */
+  endedBecause: string | null;
   /** The thread utterances currently route to; null when idle. */
   threadId: string | null;
   /** The thread the app route currently shows. */
@@ -28,7 +25,8 @@ export interface ConverseSnapshot {
   newThreadProjectDisplayName: string | null;
   /** Per-thread voice selected for the reply currently being spoken. */
   speakingVoice: string | null;
-  error: string | null;
+  /** A transient message for the user that is not a session ending. */
+  notice: string | null;
   /** What the agent is doing while the session waits on it; null when unknown. */
   activity: "reasoning" | "tool" | "generating" | "awaiting-speech" | null;
   /** The last utterance that was transcribed and sent. */

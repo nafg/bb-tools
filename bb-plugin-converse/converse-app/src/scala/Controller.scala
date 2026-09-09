@@ -1,6 +1,7 @@
 package converseapp
 
 import conversecore.*
+import conversecore.VoiceState.{Off, On}
 
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.scalajs.js
@@ -28,14 +29,16 @@ final class Controller(
   private val AudioStartGraceMs = 1000.0
 
   // Session
-  private var sessionId: String   = null
-  private var threadId: String    = null
-  private var phase: String       = "idle"
-  private var errorNote: String   = null
-  private var heardText: String   = null
-  private var lastEventId: String = null
-  // What the agent is doing on the thread, per the backend's signals; both
-  // are forgotten when the session stops waiting on it.
+  private var sessionId: String     = null
+  private var threadId: String      = null
+  private var state: VoiceState     = VoiceState.initial
+  // A transient message for the user that is not a session ending: a failed
+  // utterance, a routing problem, an agent error.
+  private var notice: String        = null
+  private var heardText: String     = null
+  private var lastEventId: String   = null
+  // What the backend last said the agent is doing on the thread; forgotten
+  // when the session ends.
   private var turnActivity: Option[AgentActivity] = None
   private var awaitingSpeech: Boolean             = false
 
@@ -98,7 +101,7 @@ final class Controller(
   private def refreshSnapshot(): Unit =
     // While an utterance is being captured or transcribed, the banner belongs
     // on the thread it is latched to, not the thread currently in view.
-    val latched = utteranceRoute != null && (captureActive || phase == "transcribing")
+    val latched = utteranceRoute != null && (captureActive || state == On(SessionPhase.Transcribing))
     val displayThread =
       if latched then utteranceRoute.existingThreadId.orNull
       else threadId
@@ -109,7 +112,9 @@ final class Controller(
           case _                                   => null
       else composeSurface.map(_.projectId.orNull).orNull
     snapshot = js.Dynamic.literal(
-      "phase"                     -> phase,
+      "on"                        -> state.isOn,
+      "phase"                     -> state.runningPhase.map(_.name).orNull,
+      "endedBecause"              -> lastEndingMessage.orNull,
       "threadId"                  -> displayThread,
       "viewed"                    -> viewedThread,
       "composeSurface"            -> composeSurface.isDefined,
@@ -119,7 +124,7 @@ final class Controller(
       "targetThreadDisplayName"   -> threadDisplayName(displayThread),
       "speakingThreadDisplayName" -> threadDisplayName(player.speakingThread),
       "speakingVoice"             -> player.speakingVoice,
-      "error"                     -> errorNote,
+      "notice"                    -> notice,
       "activity"                  -> activity.map(_.signalName).orNull,
       "heard"                     -> heardText,
       "interim"                   -> interimText,
@@ -128,33 +133,48 @@ final class Controller(
     )
     listeners.foreach(_())
 
-  private def setPhase(next: String, stoppedByUser: Boolean = false): Unit =
-    if phase != next then
-      debug(s"phase: $phase -> $next")
-      val previous = phase
-      phase = next
-      if previous == "waiting" then
-        turnActivity = None
-        awaitingSpeech = false
-      cues.onPhase(previous, next, stoppedByUser, activity)
+  def voiceState: VoiceState                     = state
+  def currentNotice: Option[String]              = Option(notice)
+  def agentActivity: Option[AgentActivity]       = activity
+  private def lastEndingMessage: Option[String]  = state match
+    case Off(ending) => ending.flatMap(_.message)
+    case On(_)       => None
+
+  private def setState(next: VoiceState): Unit =
+    if state != next then
+      debug(s"state: $state -> $next")
+      val previous = state
+      state = next
+      cues.onStateChange(previous, next, activity)
       refreshSnapshot()
       syncReplyHold()
+
+  private def enter(phase: SessionPhase): Unit = setState(On(phase))
+
+  private def turnOff(end: VoiceSessionRestore.SessionEnd, detail: String = null): Unit =
+    turnActivity = None
+    awaitingSpeech = false
+    setState(Off(Some(VoiceState.Ending(end, Option(detail)))))
+
+  /** Leaves `from` for Listening, if that is where the session still is. */
+  private def backToListening(from: SessionPhase): Unit =
+    if state == On(from) then enter(SessionPhase.Listening)
 
   private def activity: Option[AgentActivity] =
     if awaitingSpeech then Some(AgentActivity.AwaitingSpeech) else turnActivity
 
   private def activityChanged(): Unit =
     debug(s"activity: ${activity.fold("none")(_.signalName)}")
-    cues.onActivity(phase, activity)
+    cues.onActivity(state, activity)
     refreshSnapshot()
 
   private def syncReplyHold(): Unit =
-    val hold = ReplySpeechHold.holds(captureActive, phase)
+    val hold = ReplySpeechHold.holds(captureActive, state)
     if hold != player.isHeld then
       player.setHeld(hold)
       if !hold && replyHeld then
         replyHeld = false
-        if player.isSpeaking then setPhase("speaking")
+        if player.isSpeaking then enter(SessionPhase.Speaking)
 
   def subscribe(cb: js.Function0[Unit]): js.Function0[Unit] =
     listeners = cb :: listeners
@@ -229,7 +249,7 @@ final class Controller(
   /** Start a session targeting the thread currently in view. */
   def startViewed(): Unit =
     if viewedThread == null && composeSurface.isEmpty then
-      errorNote = "open a thread first"
+      notice = "open a thread first"
       refreshSnapshot()
     else startSession(storedRestoreIntent.map(_.sessionId).getOrElse(freshSessionId()), viewedThread, startOptions)
 
@@ -285,7 +305,7 @@ final class Controller(
     ensureAudioContext()
     sessionId = sess
     threadId = newThreadId
-    errorNote = null
+    notice = null
     heardText = null
     interimText = null
     utteranceRoute = null
@@ -301,7 +321,7 @@ final class Controller(
       .asInstanceOf[js.UndefOr[Double]]
       .filter(ms => ms >= 32.0)
       .getOrElse(3000.0)
-    setPhase("starting")
+    enter(SessionPhase.Starting)
     debug(
       s"starting session $sess for thread $newThreadId " +
         s"(tts=$ttsMode speechProbabilityThreshold=$speechProbabilityThreshold " +
@@ -328,10 +348,9 @@ final class Controller(
       case Success(stream)        => beginListening(stream, sess)
       case Failure(e)             =>
         debug(s"start failed: ${e.getMessage}")
-        errorNote = s"could not start voice: ${e.getMessage}"
         endSession(VoiceSessionRestore.SessionEnd.Failed)
         closeAudioContext()
-        setPhase("error")
+        turnOff(VoiceSessionRestore.SessionEnd.Failed, s"could not start voice: ${e.getMessage}")
     }
 
   private def beginListening(stream: MediaStream, sess: String): Unit =
@@ -376,28 +395,26 @@ final class Controller(
           speechDetector = detector
           debug(s"listening (preview recorder mime: ${if mimeType.isEmpty then "(browser default)" else mimeType})")
           retarget()
-          setPhase("listening")
+          enter(SessionPhase.Listening)
         case Success(detector) =>
           detector.destroy().failed.foreach(_ => ())
         case Failure(e) if sessionId == sess =>
           debug(s"speech detector failed to start: ${e.getMessage}")
-          errorNote = s"could not start speech detection: ${e.getMessage}"
           stopInternal(VoiceSessionRestore.SessionEnd.Failed)
-          setPhase("error")
+          turnOff(VoiceSessionRestore.SessionEnd.Failed, s"could not start speech detection: ${e.getMessage}")
         case Failure(_) => ()
       }
 
   def stop(): Unit =
     debug("stopped by user")
     stopInternal(VoiceSessionRestore.SessionEnd.StoppedByUser)
-    errorNote = null
-    setPhase("idle", stoppedByUser = true)
+    notice = null
+    turnOff(VoiceSessionRestore.SessionEnd.StoppedByUser)
 
   private def pauseUntilUserGesture(): Unit =
     debug("audio context still suspended; pausing until the user clicks")
     stopInternal(VoiceSessionRestore.SessionEnd.PausedUntilUserGesture)
-    errorNote = "the browser paused voice until you click: click the microphone to resume"
-    setPhase("idle")
+    turnOff(VoiceSessionRestore.SessionEnd.PausedUntilUserGesture)
 
   /** End the session because the plugin's frontend is unloading; the next
     * frontend generation resumes it.
@@ -405,8 +422,8 @@ final class Controller(
   def teardown(): Unit =
     debug("frontend unloading; the session resumes on the next mount")
     stopInternal(VoiceSessionRestore.SessionEnd.FrontendUnloaded)
-    errorNote = null
-    setPhase("idle")
+    notice = null
+    turnOff(VoiceSessionRestore.SessionEnd.FrontendUnloaded)
 
   private def closeAudioContext(): Unit =
     if audioContext != null then
@@ -464,13 +481,13 @@ final class Controller(
       case SpeechDetectorEvent.CandidateAbandoned(evidence) =>
         reportDiscardedCapture(evidence)
         abandonCapture()
-        if phase == "recording" then setPhase("listening")
+        backToListening(SessionPhase.Recording)
       case SpeechDetectorEvent.SpeechStart =>
         beginCapture()
         if player.isSpeaking then
           debug("barge-in: stopping playback")
           player.stop()
-        setPhase("recording")
+        enter(SessionPhase.Recording)
       case SpeechDetectorEvent.PreviewPoint =>
         // Previews are best-effort extra transcription load; throttle them so
         // they can never rate-limit the provider out from under final submits.
@@ -486,7 +503,7 @@ final class Controller(
           debug(s"utterance captured (${recording.size.asInstanceOf[Double]} bytes)")
           submitUtterance(recording, evidenceToJs(evidence))
           syncReplyHold()
-        else if phase == "recording" then setPhase("listening")
+        else backToListening(SessionPhase.Recording)
 
   // -------------------------------------------------------------- recording
 
@@ -494,7 +511,7 @@ final class Controller(
     if !captureActive && recordingStream != null then
       UtteranceRoute.latch(composeSurface, Option(currentTarget), Option(threadId)) match
         case None =>
-          errorNote = "pick a project to start a new thread by voice"
+          notice = "pick a project to start a new thread by voice"
           refreshSnapshot()
         case Some(route) =>
           utteranceRoute = route
@@ -511,7 +528,7 @@ final class Controller(
             if captureActive && speechDetector != null then
               debug("utterance length cap reached; flushing")
               speechDetector.flush().failed.foreach { e =>
-                errorNote = s"could not split long utterance: ${e.getMessage}"
+                notice = s"could not split long utterance: ${e.getMessage}"
                 refreshSnapshot()
               }
           }
@@ -692,7 +709,7 @@ final class Controller(
     val route = if utteranceRoute != null then utteranceRoute else UtteranceRoute.ToThread(threadId)
     val tid   = route.existingThreadId.orNull
     if sess != null then
-      setPhase("transcribing")
+      enter(SessionPhase.Transcribing)
       val submitted =
         for
           b64 <- blobToBase64(blob)
@@ -715,13 +732,13 @@ final class Controller(
         case _ if sessionId != sess => ()
         case Success(result) if result == null =>
           interimText = null
-          if phase == "transcribing" then setPhase("listening")
+          backToListening(SessionPhase.Transcribing)
         case Success(result) =>
           if result.sent.asInstanceOf[Boolean] then
             heardText = result.text.asInstanceOf[String]
             interimText = null
             debug(s"heard: $heardText")
-            errorNote = null
+            notice = null
             // A new thread was started for this utterance: it becomes the
             // session's thread and the app opens it.
             result.threadId.asInstanceOf[js.UndefOr[String]].foreach { created =>
@@ -730,17 +747,17 @@ final class Controller(
               viewedThread = created
               openThread(created)
             }
-            setPhase("waiting")
+            enter(SessionPhase.Waiting)
             refreshSnapshot()
           else
             debug("transcription was empty; ignoring")
-            if phase == "transcribing" then setPhase("listening")
+            backToListening(SessionPhase.Transcribing)
         case Failure(e) =>
           debug(s"submit failed: ${e.getMessage}")
           // Covers the whole submit pipeline (reading the recording,
           // transcription, and the thread send), so don't blame transcription.
-          errorNote = s"voice message failed: ${e.getMessage}"
-          if phase == "transcribing" then setPhase("listening") else refreshSnapshot()
+          notice = s"voice message failed: ${e.getMessage}"
+          if state == On(SessionPhase.Transcribing) then enter(SessionPhase.Listening) else refreshSnapshot()
       }
 
   // ---------------------------------------------------------------- signals
@@ -759,15 +776,15 @@ final class Controller(
             debug(s"speak signal (${text.length} chars)")
             if text.trim.nonEmpty then
               speakText(text, p.threadId.asInstanceOf[js.UndefOr[String]].getOrElse(null))
-            else setPhase("listening")
+            else enter(SessionPhase.Listening)
           case "status" =>
             // Transient backend progress (e.g. managed service startup);
             // shown as interim text and naturally replaced by later updates.
             interimText = p.text.asInstanceOf[js.UndefOr[String]].getOrElse("")
             refreshSnapshot()
           case "agent-failed" =>
-            errorNote = p.error.asInstanceOf[js.UndefOr[String]].getOrElse("the agent failed")
-            setPhase("listening")
+            notice = p.error.asInstanceOf[js.UndefOr[String]].getOrElse("the agent failed")
+            enter(SessionPhase.Listening)
           case "activity" =>
             turnActivity = AgentActivity.fromSignalName(p.activity.asInstanceOf[js.UndefOr[String]].getOrElse(""))
             activityChanged()
@@ -782,8 +799,7 @@ final class Controller(
             // Another tab/session took over; tear down without racing it.
             debug("session revoked by another window")
             stopInternal(VoiceSessionRestore.SessionEnd.TakenOverByAnotherWindow)
-            errorNote = "voice was taken over by another window"
-            setPhase("idle")
+            turnOff(VoiceSessionRestore.SessionEnd.TakenOverByAnotherWindow)
           case _ => ()
 
   // --------------------------------------------------------------- playback
@@ -794,26 +810,26 @@ final class Controller(
     else
       // Replay replaces session-driven speech, so release that session from
       // its speaking phase before the Player supersedes the old playback.
-      if phase == "speaking" then setPhase("listening")
+      backToListening(SessionPhase.Speaking)
       replyHeld = false
       ensureAudioContext()
       player.play(text, sourceThread).map(_ => ())
 
   private def speakText(text: String, sourceThread: String): Unit =
     val chunks = Speech.splitSpeechChunks(text)
-    if chunks.isEmpty then setPhase("listening")
+    if chunks.isEmpty then enter(SessionPhase.Listening)
     else
       if player.isHeld then
         debug("reply held until the current utterance is submitted")
         replyHeld = true
-      else setPhase("speaking")
+      else enter(SessionPhase.Speaking)
       player.enqueue(text, sourceThread).onComplete {
         case Success(completed) if completed && !player.isSpeaking =>
-          if phase == "speaking" then setPhase("listening")
+          backToListening(SessionPhase.Speaking)
         case Failure(e) =>
           debug(s"speech failed: ${e.getMessage}")
-          errorNote = s"speech failed: ${e.getMessage}"
-          if player.isSpeaking then refreshSnapshot() else setPhase("listening")
+          notice = s"speech failed: ${e.getMessage}"
+          if player.isSpeaking then refreshSnapshot() else enter(SessionPhase.Listening)
         case _ => ()
       }
 

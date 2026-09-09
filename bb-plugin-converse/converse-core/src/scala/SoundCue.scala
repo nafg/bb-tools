@@ -98,22 +98,27 @@ object SoundCue:
   /** The chime for a phase change, if any. `stoppedByUser` distinguishes a
     * deliberate stop from a session ending on its own.
     */
-  def onTransition(from: String, to: String, stoppedByUser: Boolean): Option[SoundCue] =
-    val wasActive = from != "idle" && from != "error"
+  def onTransition(from: VoiceState, to: VoiceState): Option[SoundCue] =
+    import VoiceState.*
     (from, to) match
-      case ("starting", "listening")    => Some(SessionStarted)
-      case (_, "speaking")              => Some(ReplyStarting)
-      case (_, "idle" | "error") if wasActive =>
-        Some(if stoppedByUser then StoppedByUser else EndedUnexpectedly)
+      case (On(SessionPhase.Starting), On(SessionPhase.Listening)) => Some(SessionStarted)
+      case (On(_), On(SessionPhase.Speaking))                      => Some(ReplyStarting)
+      case (On(_), Off(ending)) =>
+        Some(
+          if ending.exists(_.end == VoiceSessionRestore.SessionEnd.StoppedByUser) then StoppedByUser
+          else EndedUnexpectedly
+        )
       case _ => None
 
   /** The pulse that repeats for as long as the session is in `phase` with the
     * agent in `activity`; none while it is listening for more speech.
     */
-  def repeatingIn(phase: String, activity: Option[AgentActivity]): Option[SoundCue] = (phase, activity) match
-    case ("transcribing", _)                               => Some(Transcribing)
-    case ("waiting", Some(AgentActivity.Tool))             => Some(ToolRunning)
-    case ("waiting", Some(AgentActivity.Generating))       => Some(Generating)
-    case ("waiting", Some(AgentActivity.AwaitingSpeech))   => None
-    case ("waiting", Some(AgentActivity.Reasoning) | None) => Some(Thinking)
-    case _                                                 => None
+  def repeatingIn(state: VoiceState, activity: Option[AgentActivity]): Option[SoundCue] =
+    import VoiceState.On
+    (state, activity) match
+      case (On(SessionPhase.Transcribing), _)                               => Some(Transcribing)
+      case (On(SessionPhase.Waiting), Some(AgentActivity.Tool))             => Some(ToolRunning)
+      case (On(SessionPhase.Waiting), Some(AgentActivity.Generating))       => Some(Generating)
+      case (On(SessionPhase.Waiting), Some(AgentActivity.AwaitingSpeech))   => None
+      case (On(SessionPhase.Waiting), Some(AgentActivity.Reasoning) | None) => Some(Thinking)
+      case _                                                                => None

@@ -137,7 +137,7 @@ function PendingVoiceTranscript() {
   const state = useSyncExternalStore(ctl.subscribe, ctl.getSnapshot);
 
   if (view.scope.kind !== "thread" || state.threadId !== view.scope.threadId) return null;
-  const text = state.error ?? state.interim;
+  const text = state.notice ?? state.interim;
   if (!text) return null;
 
   return (
@@ -145,7 +145,7 @@ function PendingVoiceTranscript() {
       aria-live="polite"
       className={
         "w-full min-w-0 break-words px-2 py-1 text-xs " +
-        (state.error ? "text-destructive" : "italic text-foreground")
+        (state.notice ? "text-destructive" : "italic text-foreground")
       }
     >
       {text}
@@ -172,15 +172,15 @@ function NewThreadVoiceBanner() {
   const guidance =
     projectId === null
       ? "Voice: pick a project, then speaking starts a new thread in it."
-      : state.phase === "idle"
+      : !state.on
         ? `Voice: turn on the microphone and speak to start a new thread in ${projectName}.`
         : `Voice: speaking starts a new thread in ${projectName}.`;
-  const live = state.error ?? state.interim;
+  const live = state.notice ?? state.interim;
   return (
     <div className="w-full min-w-0 space-y-1 px-2 py-1 text-xs">
       <p className="text-muted-foreground">{guidance}</p>
       {live && (
-        <p aria-live="polite" className={"break-words " + (state.error ? "text-destructive" : "italic text-foreground")}>
+        <p aria-live="polite" className={"break-words " + (state.notice ? "text-destructive" : "italic text-foreground")}>
           {live}
         </p>
       )}
@@ -900,7 +900,7 @@ export default definePluginApp((app) => {
         unsubscribe = ctl.subscribe(() => {
           const snap = ctl.getSnapshot();
           const desired = new Map<string, { icon: string; label: string }>();
-          if (snap.phase !== "idle" && snap.threadId)
+          if (snap.on && snap.threadId)
             desired.set(snap.threadId, { icon: "Mic", label: "Voice conversation target" });
           if (snap.speakingThread)
             desired.set(snap.speakingThread, { icon: "AudioLines", label: "Speaking reply aloud" });
@@ -950,7 +950,7 @@ export default definePluginApp((app) => {
     icon: "Mic",
     run: () => {
       const ctl = getController();
-      if (ctl.getSnapshot().phase !== "idle") ctl.stop();
+      if (ctl.getSnapshot().on) ctl.stop();
       else ctl.startViewed();
     },
   });

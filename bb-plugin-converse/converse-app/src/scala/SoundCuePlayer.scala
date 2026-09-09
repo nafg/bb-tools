@@ -72,19 +72,19 @@ final class SoundCuePlayer:
       val _ = master.connect(audioContext.destination)
     val _ = audioContext.resume()
 
-  def onPhase(from: String, to: String, stoppedByUser: Boolean, activity: Option[AgentActivity]): Unit =
+  def onStateChange(from: VoiceState, to: VoiceState, activity: Option[AgentActivity]): Unit =
     val next = SoundCue.repeatingIn(to, activity).orNull
     if next != repeating then stopRepeating()
-    val chimeEndsAt = SoundCue.onTransition(from, to, stoppedByUser).flatMap(play)
+    val chimeEndsAt = SoundCue.onTransition(from, to).flatMap(play)
     // A repeating cue waits for the transition chime so the two never overlap.
     if next != null && next != repeating then startRepeating(next, chimeEndsAt)
 
-  /** The agent's activity changed within `phase`. A pulse replacing another
+  /** The agent's activity changed within `state`. A pulse replacing another
     * keeps its rhythm rather than starting over with the lead-in: the user is
     * already in a working state.
     */
-  def onActivity(phase: String, activity: Option[AgentActivity]): Unit =
-    val next = SoundCue.repeatingIn(phase, activity).orNull
+  def onActivity(state: VoiceState, activity: Option[AgentActivity]): Unit =
+    val next = SoundCue.repeatingIn(state, activity).orNull
     if next != repeating then
       if next == null || repeatingLoop == null then
         stopRepeating()

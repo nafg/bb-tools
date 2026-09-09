@@ -1,47 +1,56 @@
 package conversecore
 
 import SoundCue.*
+import SessionPhase as P
+import VoiceSessionRestore.SessionEnd
+import VoiceState.*
 
 class SoundCueTest extends munit.FunSuite:
+  private def endedBy(end: SessionEnd) = Off(Some(Ending(end, None)))
+
   test("the session start chime plays when listening begins from startup"):
-    assertEquals(SoundCue.onTransition("starting", "listening", stoppedByUser = false), Some(SessionStarted))
+    assertEquals(SoundCue.onTransition(On(P.Starting), On(P.Listening)), Some(SessionStarted))
 
   test("returning to listening after other phases is silent"):
-    for from <- List("recording", "transcribing", "waiting", "speaking") do
-      assertEquals(SoundCue.onTransition(from, "listening", stoppedByUser = false), None, from)
+    for from <- List(P.Recording, P.Transcribing, P.Waiting, P.Speaking) do
+      assertEquals(SoundCue.onTransition(On(from), On(P.Listening)), None, from.toString)
 
   test("the user starting to talk is silent: they already know"):
-    assertEquals(SoundCue.onTransition("listening", "recording", stoppedByUser = false), None)
+    assertEquals(SoundCue.onTransition(On(P.Listening), On(P.Recording)), None)
 
   test("the agent starting work is marked only by the pulse taking over from the taps"):
-    assertEquals(SoundCue.onTransition("transcribing", "waiting", stoppedByUser = false), None)
+    assertEquals(SoundCue.onTransition(On(P.Transcribing), On(P.Waiting)), None)
 
   test("a reply starting chimes"):
-    assertEquals(SoundCue.onTransition("waiting", "speaking", stoppedByUser = false), Some(ReplyStarting))
+    assertEquals(SoundCue.onTransition(On(P.Waiting), On(P.Speaking)), Some(ReplyStarting))
 
-  test("a stop the user asked for is distinct from an unexpected end"):
-    assertEquals(SoundCue.onTransition("listening", "idle", stoppedByUser = true), Some(StoppedByUser))
-    assertEquals(SoundCue.onTransition("listening", "idle", stoppedByUser = false), Some(EndedUnexpectedly))
-    assertEquals(SoundCue.onTransition("starting", "error", stoppedByUser = false), Some(EndedUnexpectedly))
+  test("a stop the user asked for is distinct from every other ending"):
+    assertEquals(SoundCue.onTransition(On(P.Listening), endedBy(SessionEnd.StoppedByUser)), Some(StoppedByUser))
+    for end <- SessionEnd.values.filterNot(_ == SessionEnd.StoppedByUser) do
+      assertEquals(SoundCue.onTransition(On(P.Listening), endedBy(end)), Some(EndedUnexpectedly), end.toString)
 
-  test("ending an already idle session makes no sound"):
-    assertEquals(SoundCue.onTransition("idle", "idle", stoppedByUser = true), None)
-    assertEquals(SoundCue.onTransition("error", "idle", stoppedByUser = false), None)
+  test("a session that fails while starting is an unexpected end"):
+    assertEquals(SoundCue.onTransition(On(P.Starting), endedBy(SessionEnd.Failed)), Some(EndedUnexpectedly))
+
+  test("staying off makes no sound"):
+    assertEquals(SoundCue.onTransition(Off(None), endedBy(SessionEnd.StoppedByUser)), None)
+    assertEquals(SoundCue.onTransition(endedBy(SessionEnd.Failed), Off(None)), None)
 
   test("only transcribing and waiting repeat, whatever the agent is doing"):
     for activity <- None :: AgentActivity.values.toList.map(Some(_)) do
-      assertEquals(SoundCue.repeatingIn("transcribing", activity), Some(Transcribing), activity.toString)
-      for phase <- List("idle", "starting", "listening", "recording", "speaking", "error") do
-        assertEquals(SoundCue.repeatingIn(phase, activity), None, s"$phase $activity")
+      assertEquals(SoundCue.repeatingIn(On(P.Transcribing), activity), Some(Transcribing), activity.toString)
+      for phase <- List(P.Starting, P.Listening, P.Recording, P.Speaking) do
+        assertEquals(SoundCue.repeatingIn(On(phase), activity), None, s"$phase $activity")
+      assertEquals(SoundCue.repeatingIn(Off(None), activity), None, activity.toString)
 
   test("while waiting the pulse follows the agent's activity, defaulting to thinking"):
-    assertEquals(SoundCue.repeatingIn("waiting", None), Some(Thinking))
-    assertEquals(SoundCue.repeatingIn("waiting", Some(AgentActivity.Reasoning)), Some(Thinking))
-    assertEquals(SoundCue.repeatingIn("waiting", Some(AgentActivity.Tool)), Some(ToolRunning))
-    assertEquals(SoundCue.repeatingIn("waiting", Some(AgentActivity.Generating)), Some(Generating))
+    assertEquals(SoundCue.repeatingIn(On(P.Waiting), None), Some(Thinking))
+    assertEquals(SoundCue.repeatingIn(On(P.Waiting), Some(AgentActivity.Reasoning)), Some(Thinking))
+    assertEquals(SoundCue.repeatingIn(On(P.Waiting), Some(AgentActivity.Tool)), Some(ToolRunning))
+    assertEquals(SoundCue.repeatingIn(On(P.Waiting), Some(AgentActivity.Generating)), Some(Generating))
 
   test("listening for more speech silences the pulse"):
-    assertEquals(SoundCue.repeatingIn("waiting", Some(AgentActivity.AwaitingSpeech)), None)
+    assertEquals(SoundCue.repeatingIn(On(P.Waiting), Some(AgentActivity.AwaitingSpeech)), None)
 
   test("the activity pulses are the thinking texture at double rate or brighter"):
     val thinking = Thinking.sound.notes.head
