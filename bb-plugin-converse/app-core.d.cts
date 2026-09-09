@@ -21,6 +21,11 @@ export interface ConverseSnapshot {
   targetThreadDisplayName: string | null;
   /** Human-readable name of the thread whose reply is being spoken aloud. */
   speakingThreadDisplayName: string | null;
+  /** The New thread screen is in view, so speech starts a thread instead. */
+  composeSurface: boolean;
+  /** Project a spoken new thread would be created in; null when none is selected. */
+  newThreadProjectId: string | null;
+  newThreadProjectDisplayName: string | null;
   /** Per-thread voice selected for the reply currently being spoken. */
   speakingVoice: string | null;
   error: string | null;
@@ -54,6 +59,10 @@ export interface ConverseController {
   noteViewed(threadId: string): void;
   /** Supply current sidebar names for identifying routing and playback. */
   setThreadDisplayNames(namesByThreadId: Record<string, string>): void;
+  setProjectDisplayNames(namesByProjectId: Record<string, string>): void;
+  /** Report that the New thread screen is in view with the given project selected. */
+  noteComposeSurface(projectId: string | null): void;
+  leaveComposeSurface(): void;
   /** Supply the host's thread navigation so widget thread references can open them. */
   setNavigateToThread(navigate: (threadId: string) => void): void;
   /** Render the floating chrome widget; returns a disposer. */

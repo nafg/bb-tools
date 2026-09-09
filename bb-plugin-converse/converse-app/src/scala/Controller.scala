@@ -64,6 +64,10 @@ final class Controller(
   // components); utterances are routed here.
   private var viewedThread: String = null
   private var threadDisplayNamesById = js.Dictionary.empty[String]
+  // Set while the New thread screen is in view (reported by its homepage
+  // section); utterances then start a new thread instead of going to a thread.
+  private var composeSurface: Option[UtteranceRoute.ComposeSurface] = None
+  private var projectDisplayNamesById = js.Dictionary.empty[String]
   // Host navigation, captured from a React slot; the plain-DOM widget has no
   // hook access. Null until the first thread surface mounts.
   private var navigateToThread: js.Function1[String, Unit] = null
@@ -86,13 +90,23 @@ final class Controller(
   private def refreshSnapshot(): Unit =
     // While an utterance is being captured or transcribed, the banner belongs
     // on the thread it is latched to, not the thread currently in view.
+    val latched = utteranceRoute != null && (captureActive || phase == "transcribing")
     val displayThread =
-      if utteranceRoute != null && (captureActive || phase == "transcribing") then utteranceRoute.threadId
+      if latched then utteranceRoute.existingThreadId.orNull
       else threadId
+    val newThreadProject =
+      if latched then
+        utteranceRoute match
+          case UtteranceRoute.NewThread(projectId) => projectId
+          case _                                   => null
+      else composeSurface.map(_.projectId.orNull).orNull
     snapshot = js.Dynamic.literal(
       "phase"                     -> phase,
       "threadId"                  -> displayThread,
       "viewed"                    -> viewedThread,
+      "composeSurface"            -> composeSurface.isDefined,
+      "newThreadProjectId"        -> newThreadProject,
+      "newThreadProjectDisplayName" -> projectDisplayName(newThreadProject),
       "speakingThread"            -> player.speakingThread,
       "targetThreadDisplayName"   -> threadDisplayName(displayThread),
       "speakingThreadDisplayName" -> threadDisplayName(player.speakingThread),
@@ -129,8 +143,24 @@ final class Controller(
   private def threadDisplayName(tid: String): String =
     if tid == null then null else threadDisplayNamesById.getOrElse(tid, tid)
 
+  private def projectDisplayName(projectId: String): String =
+    if projectId == null then null else projectDisplayNamesById.getOrElse(projectId, projectId)
+
   def setThreadDisplayNames(namesByThreadId: js.Dictionary[String]): Unit =
     threadDisplayNamesById = namesByThreadId
+    refreshSnapshot()
+
+  def setProjectDisplayNames(namesByProjectId: js.Dictionary[String]): Unit =
+    projectDisplayNamesById = namesByProjectId
+    refreshSnapshot()
+
+  /** The New thread screen is in view; `projectId` is its selected project. */
+  def noteComposeSurface(projectId: String | Null): Unit =
+    composeSurface = Some(UtteranceRoute.ComposeSurface(Option(projectId).filter(_.nonEmpty)))
+    refreshSnapshot()
+
+  def leaveComposeSurface(): Unit =
+    composeSurface = None
     refreshSnapshot()
 
   def setNavigateToThread(navigate: js.Function1[String, Unit]): Unit =
@@ -145,7 +175,7 @@ final class Controller(
 
   /** Start a session targeting the thread currently in view. */
   def startViewed(): Unit =
-    if viewedThread == null then
+    if viewedThread == null && composeSurface.isEmpty then
       errorNote = "open a thread first"
       refreshSnapshot()
     else start(viewedThread, startOptions)
@@ -360,24 +390,27 @@ final class Controller(
 
   private def beginCapture(): Unit =
     if !captureActive && recordingStream != null then
-      utteranceRoute = UtteranceRoute
-        .latch(Option(currentTarget), Option(threadId))
-        .orNull
-      captureActive = true
-      utteranceSeq += 1
-      interimText = null
-      interimAccum = ""
-      startPreviewRecorder()
-      debug("capture started")
-      maxUtteranceTimer = setTimeout(MaxUtteranceMs + PreRollMs) {
-        maxUtteranceTimer = null
-        if captureActive && speechDetector != null then
-          debug("utterance length cap reached; flushing")
-          speechDetector.flush().failed.foreach { e =>
-            errorNote = s"could not split long utterance: ${e.getMessage}"
-            refreshSnapshot()
+      UtteranceRoute.latch(composeSurface, Option(currentTarget), Option(threadId)) match
+        case None =>
+          errorNote = "pick a project to start a new thread by voice"
+          refreshSnapshot()
+        case Some(route) =>
+          utteranceRoute = route
+          captureActive = true
+          utteranceSeq += 1
+          interimText = null
+          interimAccum = ""
+          startPreviewRecorder()
+          debug("capture started")
+          maxUtteranceTimer = setTimeout(MaxUtteranceMs + PreRollMs) {
+            maxUtteranceTimer = null
+            if captureActive && speechDetector != null then
+              debug("utterance length cap reached; flushing")
+              speechDetector.flush().failed.foreach { e =>
+                errorNote = s"could not split long utterance: ${e.getMessage}"
+                refreshSnapshot()
+              }
           }
-      }
 
   private def abandonCapture(): Unit =
     captureActive = false
@@ -466,7 +499,7 @@ final class Controller(
     */
   private def previewSegment(seq: Int, blob: js.Dynamic): Unit =
     val sess = sessionId
-    val tid  = if utteranceRoute != null then utteranceRoute.threadId else threadId
+    val tid  = if utteranceRoute != null then utteranceRoute.existingThreadId.orNull else threadId
     if sess != null then
       previewInFlight = true
       lastPreviewAt = js.Date.now()
@@ -513,8 +546,9 @@ final class Controller(
     p.future
 
   private def submitUtterance(blob: js.Dynamic, evidence: js.Dynamic): Unit =
-    val sess = sessionId
-    val tid  = if utteranceRoute != null then utteranceRoute.threadId else threadId
+    val sess  = sessionId
+    val route = if utteranceRoute != null then utteranceRoute else UtteranceRoute.ToThread(threadId)
+    val tid   = route.existingThreadId.orNull
     if sess != null then
       setPhase("transcribing")
       val submitted =
@@ -522,16 +556,16 @@ final class Controller(
           b64 <- blobToBase64(blob)
           result <- {
             def send(): Future[js.Dynamic] =
-              rpcCall(
-                "submitUtterance",
-                js.Dynamic.literal(
-                  "sessionId"   -> sess,
-                  "threadId"    -> tid,
-                  "mimeType"    -> blob.`type`.asInstanceOf[String],
-                  "audioBase64" -> b64,
-                  "evidence"    -> evidence
-                )
-              ).toFuture
+              val request = js.Dynamic.literal(
+                "sessionId"   -> sess,
+                "mimeType"    -> blob.`type`.asInstanceOf[String],
+                "audioBase64" -> b64,
+                "evidence"    -> evidence
+              )
+              route match
+                case UtteranceRoute.ToThread(id)         => request.updateDynamic("threadId")(id)
+                case UtteranceRoute.NewThread(projectId) => request.updateDynamic("projectId")(projectId)
+              rpcCall("submitUtterance", request).toFuture
             send().recoverWith {
               // A plugin reload wipes the backend's session registry;
               // re-register this session and retry once.
@@ -553,6 +587,14 @@ final class Controller(
             interimText = null
             debug(s"heard: $heardText")
             errorNote = null
+            // A new thread was started for this utterance: it becomes the
+            // session's thread and the app opens it.
+            result.threadId.asInstanceOf[js.UndefOr[String]].foreach { created =>
+              debug(s"new thread $created started by voice")
+              threadId = created
+              viewedThread = created
+              openThread(created)
+            }
             setPhase("waiting")
             refreshSnapshot()
           else
@@ -644,6 +686,11 @@ def createController(deps: js.Dynamic): js.Dynamic =
     "setThreadDisplayNames" -> js.Any.fromFunction1(
       (namesByThreadId: js.Dictionary[String]) => ctl.setThreadDisplayNames(namesByThreadId)
     ),
+    "setProjectDisplayNames" -> js.Any.fromFunction1(
+      (namesByProjectId: js.Dictionary[String]) => ctl.setProjectDisplayNames(namesByProjectId)
+    ),
+    "noteComposeSurface"  -> js.Any.fromFunction1((projectId: String | Null) => ctl.noteComposeSurface(projectId)),
+    "leaveComposeSurface" -> js.Any.fromFunction0(() => ctl.leaveComposeSurface()),
     "setNavigateToThread" -> js.Any.fromFunction1(
       (navigate: js.Function1[String, Unit]) => ctl.setNavigateToThread(navigate)
     ),

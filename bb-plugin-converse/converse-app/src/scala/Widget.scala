@@ -95,6 +95,10 @@ object Widget:
     val (speechTarget, speechTargetLink)     = threadReference("Speech goes to:")
     val (speakingSource, speakingSourceLink) = threadReference("Speaking from:")
 
+    val newThreadTarget = document.createElement("div")
+    newThreadTarget.style.cssText = "color:var(--muted-foreground, #888);overflow-wrap:anywhere;"
+    val _ = pill.appendChild(newThreadTarget)
+
     button.onclick = js.Any.fromFunction1 { (_: js.Any) =>
       val snap = ctl.getSnapshot()
       if snap.phase.asInstanceOf[String] != "idle" then ctl.stop() else ctl.startViewed()
@@ -109,6 +113,8 @@ object Widget:
       val targetName     = snap.targetThreadDisplayName.asInstanceOf[String | Null]
       val speakingThread = snap.speakingThread.asInstanceOf[String | Null]
       val speakingName   = snap.speakingThreadDisplayName.asInstanceOf[String | Null]
+      val composeSurface = snap.composeSurface.asInstanceOf[Boolean]
+      val newThreadProjectName = snap.newThreadProjectDisplayName.asInstanceOf[String | Null]
       val error          = snap.error.asInstanceOf[String | Null]
 
       val color = phaseColors.getOrElse(phase, "var(--muted-foreground, #888)")
@@ -117,11 +123,12 @@ object Widget:
         "title",
         if error != null then error
         else if active then "Voice conversation is on — click to stop"
+        else if composeSurface then "Start a voice conversation (speaking starts a new thread)"
         else if viewed == null then "Open a thread to start a voice conversation"
         else "Start a voice conversation (utterances go to the thread you are viewing)"
       )
       button.setAttribute("aria-label", button.getAttribute("title").asInstanceOf[String])
-      button.disabled = !active && viewed == null
+      button.disabled = !active && viewed == null && !composeSurface
 
       label.style.color = color
       label.textContent = if active then phaseLabels.getOrElse(phase, phase) else "Voice"
@@ -144,8 +151,16 @@ object Widget:
           val _ = link.setAttribute("title", s"Open thread: $shown")
           link.onclick = js.Any.fromFunction1((_: js.Any) => ctl.openThread(tid))
 
-      showReference(speechTarget, speechTargetLink, if active then target else null, targetName)
+      // On the New thread screen speech starts a thread, so the thread
+      // reference gives way to the project it will be created in.
+      val startsNewThread = active && (composeSurface || newThreadProjectName != null)
+      showReference(speechTarget, speechTargetLink, if active && !startsNewThread then target else null, targetName)
       showReference(speakingSource, speakingSourceLink, speakingThread, speakingName)
+      newThreadTarget.style.display = if startsNewThread then "block" else "none"
+      if startsNewThread then
+        newThreadTarget.textContent =
+          if newThreadProjectName == null then "Speech has nowhere to go: pick a project"
+          else s"Speech starts a new thread in: $newThreadProjectName"
 
     render()
     val unsubscribe = ctl.subscribe(() => render())

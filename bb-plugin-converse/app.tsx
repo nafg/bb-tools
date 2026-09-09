@@ -64,6 +64,11 @@ function VoiceBridge() {
     );
   }, [ctl, sidebar.threads]);
   useEffect(() => {
+    ctl.setProjectDisplayNames(
+      Object.fromEntries(sidebar.projects.map((project) => [project.id, project.name])),
+    );
+  }, [ctl, sidebar.projects]);
+  useEffect(() => {
     const values = settings.values ?? {};
     const speechProbabilityThreshold = Number.parseFloat(
       typeof values.speechProbabilityThreshold === "string"
@@ -112,6 +117,43 @@ function PendingVoiceTranscript() {
       }
     >
       {text}
+    </div>
+  );
+}
+
+// On the New thread screen there is no thread to route to. While mounted, it
+// tells the controller to start a new thread in the selected project from the
+// next utterance, and it hosts the live transcript the thread banner would
+// otherwise show. It also receives realtime signals, since the thread-scoped
+// bridge is not mounted here.
+function NewThreadVoiceSection({ projectId }: { projectId: string | null }) {
+  const ctl = getController();
+  const navigate = useBbNavigate();
+  const state = useSyncExternalStore(ctl.subscribe, ctl.getSnapshot);
+  useRealtime("converse", (payload) => ctl.handleSignal(payload));
+  useEffect(() => {
+    ctl.setNavigateToThread(navigate.toThread);
+  }, [ctl, navigate]);
+  useEffect(() => {
+    ctl.noteComposeSurface(projectId);
+    return () => ctl.leaveComposeSurface();
+  }, [ctl, projectId]);
+
+  const guidance =
+    state.phase === "idle"
+      ? "Turn on voice and speak to start a new thread here."
+      : projectId === null
+        ? "Pick a project; speech has nowhere to go until you do."
+        : "Speaking starts a new thread in this project.";
+  const live = state.error ?? state.interim;
+  return (
+    <div className="space-y-1 text-xs">
+      <p className="text-muted-foreground">{guidance}</p>
+      {live && (
+        <p aria-live="polite" className={state.error ? "text-destructive" : "italic text-foreground"}>
+          {live}
+        </p>
+      )}
     </div>
   );
 }
@@ -428,6 +470,11 @@ function ThreadVoicePicker({ threadId }: { threadId: string }) {
 }
 
 export default definePluginApp((app) => {
+  app.slots.homepageSection({
+    id: "new-thread-voice",
+    title: "Voice",
+    component: NewThreadVoiceSection,
+  });
   app.slots.settingsSection({
     id: "tts-provider",
     title: "Text-to-speech providers",

@@ -411,6 +411,16 @@ def plugin(bb: BbApi): Unit =
 
     array(timeline.rows).flatMap(messages)
 
+  /** A spoken utterance as thread input: the transcript between agent-only
+    * markers so the agent knows it was heard, not typed.
+    */
+  def heardInput(text: String): js.Array[js.Dynamic] =
+    js.Array(
+      js.Dynamic.literal("type" -> "text", "text" -> "[heard]\n", "visibility" -> "agent-only"),
+      js.Dynamic.literal("type" -> "text", "text" -> text),
+      js.Dynamic.literal("type" -> "text", "text" -> "[/heard]", "visibility" -> "agent-only")
+    )
+
   def latestAssistantMessage(threadId: String): Future[Option[AssistantMessage]] =
     bb.sdk.threads
       .timeline(
@@ -740,10 +750,15 @@ def plugin(bb: BbApi): Unit =
       "submitUtterance" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val sessionId = str(input.sessionId)
         val threadId  = str(input.threadId)
+        // A projectId instead of a threadId starts a new thread in that project.
+        val projectId = str(input.projectId)
         if !state.active.exists(_.sessionId == sessionId) then rejected("voice session is no longer active")
+        else if threadId.isEmpty && projectId.isEmpty then rejected("threadId or projectId is required")
         else
-          state.active = state.active.map(_.copy(threadId = threadId))
-          val diagnosticContext = s"final thread=$threadId request=${state.nextEventId()}"
+          if threadId.nonEmpty then state.active = state.active.map(_.copy(threadId = threadId))
+          val diagnosticContext =
+            if threadId.nonEmpty then s"final thread=$threadId request=${state.nextEventId()}"
+            else s"final project=$projectId request=${state.nextEventId()}"
           val evidence = input.evidence.asInstanceOf[js.UndefOr[js.Dynamic]]
           evidence.foreach { e =>
             bb.log.info(
@@ -767,6 +782,23 @@ def plugin(bb: BbApi): Unit =
             .flatMap { text =>
               bb.log.info(s"transcribed ($diagnosticContext) ${text.length} chars")
               if text.isEmpty then Future.successful(js.Dynamic.literal("text" -> "", "sent" -> false))
+              else if threadId.isEmpty then
+                bb.sdk.threads
+                  .spawn(
+                    js.Dynamic.literal(
+                      "projectId"   -> projectId,
+                      "environment" -> js.Dynamic.literal("type" -> "project-default"),
+                      "input"       -> heardInput(text)
+                    )
+                  )
+                  .toFuture
+                  .map { thread =>
+                    val newThreadId = str(thread.id)
+                    bb.log.info(s"started thread $newThreadId in project $projectId by voice")
+                    state.active = state.active.map(_.copy(threadId = newThreadId))
+                    state.awaiting.update(newThreadId, AwaitingReply(sessionId, None))
+                    js.Dynamic.literal("text" -> text, "sent" -> true, "threadId" -> newThreadId)
+                  }
               else if state.continuationWaiters.deliver(threadId, text) then
                 bb.log.info(s"delivered ${text.length} chars to continuation waiter")
                 Future.successful(js.Dynamic.literal("text" -> text, "sent" -> true, "continued" -> true))
@@ -774,23 +806,7 @@ def plugin(bb: BbApi): Unit =
                 def send(mode: String): Future[js.Dynamic] =
                   bb.sdk.threads
                     .send(
-                      js.Dynamic.literal(
-                        "threadId" -> threadId,
-                        "mode"     -> mode,
-                        "input" -> js.Array(
-                          js.Dynamic.literal(
-                            "type"       -> "text",
-                            "text"       -> "[heard]\n",
-                            "visibility" -> "agent-only"
-                          ),
-                          js.Dynamic.literal("type" -> "text", "text" -> text),
-                          js.Dynamic.literal(
-                            "type"       -> "text",
-                            "text"       -> "[/heard]",
-                            "visibility" -> "agent-only"
-                          )
-                        )
-                      )
+                      js.Dynamic.literal("threadId" -> threadId, "mode" -> mode, "input" -> heardInput(text))
                     )
                     .toFuture
                 latestAssistantMessage(threadId).flatMap { previousAssistantMessage =>
