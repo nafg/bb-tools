@@ -39,20 +39,15 @@ function getController(): ConverseController {
   return controller;
 }
 
-// Invisible: forwards route, settings, and realtime signals to the controller.
-function VoiceBridge() {
-  const bbContext = useBbContext();
-  const settings = useSettings();
+// What every composer surface hands the controller: host navigation,
+// realtime signals, and sidebar names for the threads and projects it shows.
+function useHostBridge(ctl: ConverseController) {
   const sidebar = experimental_useSidebarThreads();
   const navigate = useBbNavigate();
-  const ctl = getController();
   useRealtime("converse", (payload) => ctl.handleSignal(payload));
   useEffect(() => {
     ctl.setNavigateToThread(navigate.toThread);
   }, [ctl, navigate]);
-  useEffect(() => {
-    if (bbContext.threadId) ctl.noteViewed(bbContext.threadId);
-  }, [ctl, bbContext.threadId]);
   useEffect(() => {
     ctl.setThreadDisplayNames(
       Object.fromEntries(
@@ -68,6 +63,18 @@ function VoiceBridge() {
       Object.fromEntries(sidebar.projects.map((project) => [project.id, project.name])),
     );
   }, [ctl, sidebar.projects]);
+  return sidebar;
+}
+
+// Invisible: forwards route, settings, and realtime signals to the controller.
+function VoiceBridge() {
+  const bbContext = useBbContext();
+  const settings = useSettings();
+  const ctl = getController();
+  useHostBridge(ctl);
+  useEffect(() => {
+    if (bbContext.threadId) ctl.noteViewed(bbContext.threadId);
+  }, [ctl, bbContext.threadId]);
   useEffect(() => {
     const values = settings.values ?? {};
     const speechProbabilityThreshold = Number.parseFloat(
@@ -124,19 +131,13 @@ function PendingVoiceTranscript() {
 // Banner on the New thread composer, where there is no thread to route to.
 // While mounted it tells the controller to start a new thread in the
 // composer's selected project from the next utterance, and it hosts the live
-// transcript the thread banner would otherwise show. It also receives
-// realtime signals, since the thread-scoped bridge is not mounted here.
+// transcript the thread banner would otherwise show.
 function NewThreadVoiceBanner() {
   const view = useComposerView();
   const projectId = view.scope.kind === "new-thread" ? view.scope.projectId : null;
-  const sidebar = experimental_useSidebarThreads();
   const ctl = getController();
-  const navigate = useBbNavigate();
+  const sidebar = useHostBridge(ctl);
   const state = useSyncExternalStore(ctl.subscribe, ctl.getSnapshot);
-  useRealtime("converse", (payload) => ctl.handleSignal(payload));
-  useEffect(() => {
-    ctl.setNavigateToThread(navigate.toThread);
-  }, [ctl, navigate]);
   useEffect(() => {
     ctl.noteComposeSurface(projectId);
     return () => ctl.leaveComposeSurface();

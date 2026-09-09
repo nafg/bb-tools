@@ -81,22 +81,32 @@ private object Schema:
     make(js.Any.fromFunction1(value => js.Dynamic.literal("value" -> value.asInstanceOf[js.Any])))
 
   /** An object with exactly these non-empty string fields (extra fields pass through). */
-  def strings(fields: (String, Int)*): js.Any =
+  def strings(fields: (String, Int)*): js.Any = stringsWithOptional(fields, Nil)
+
+  /** Like `strings`; `optional` fields may also be absent, null, or empty. */
+  def stringsWithOptional(required: Seq[(String, Int)], optional: Seq[(String, Int)]): js.Any =
     make(js.Any.fromFunction1 { value =>
       if value == null || js.typeOf(value) != "object" then invalid("expected an object")
       else
         val d = value.asInstanceOf[js.Dynamic]
-        fields
+        def tooLong(name: String, maxLength: Int): Boolean =
+          val v = d.selectDynamic(name)
+          js.typeOf(v) == "string" && v.asInstanceOf[String].length > maxLength
+        def missing(name: String): Boolean =
+          val v = d.selectDynamic(name)
+          js.typeOf(v) != "string" || v.asInstanceOf[String].isEmpty
+        def wrongType(name: String): Boolean =
+          val v = d.selectDynamic(name)
+          !js.isUndefined(v) && v != null && js.typeOf(v) != "string"
+        required
           .collectFirst {
-            case (name, maxLength)
-                if {
-                  val v = d.selectDynamic(name)
-                  js.typeOf(v) != "string" ||
-                  v.asInstanceOf[String].isEmpty ||
-                  v.asInstanceOf[String].length > maxLength
-                } =>
+            case (name, maxLength) if missing(name) || tooLong(name, maxLength) =>
               invalid(s"$name must be a non-empty string of at most $maxLength characters")
           }
+          .orElse(optional.collectFirst {
+            case (name, maxLength) if wrongType(name) || tooLong(name, maxLength) =>
+              invalid(s"$name must be a string of at most $maxLength characters")
+          })
           .getOrElse(js.Dynamic.literal("value" -> value.asInstanceOf[js.Any]))
     })
 
@@ -672,8 +682,9 @@ def plugin(bb: BbApi): Unit =
 
   bb.rpc.register(
     js.Dynamic.literal(
+      // threadId is empty while the New thread screen is in view.
       "startSession" -> js.Dynamic.literal(
-        "input"  -> Schema.strings("sessionId" -> 100, "threadId" -> 100),
+        "input"  -> Schema.stringsWithOptional(Seq("sessionId" -> 100), Seq("threadId" -> 100)),
         "output" -> Schema.passthrough
       ),
       "stopSession" -> js.Dynamic.literal(
@@ -682,10 +693,9 @@ def plugin(bb: BbApi): Unit =
       ),
       "submitUtterance" -> js.Dynamic.literal(
         // threadId or projectId: exactly one; the handler checks.
-        "input" -> Schema.strings(
-          "sessionId"   -> 100,
-          "mimeType"    -> 100,
-          "audioBase64" -> MaxAudioBase64Chars
+        "input" -> Schema.stringsWithOptional(
+          Seq("sessionId" -> 100, "mimeType" -> 100, "audioBase64" -> MaxAudioBase64Chars),
+          Seq("threadId" -> 100, "projectId" -> 100)
         ),
         "output" -> Schema.passthrough
       ),
@@ -698,7 +708,7 @@ def plugin(bb: BbApi): Unit =
         "output" -> Schema.passthrough
       ),
       "reportDiscardedCapture" -> js.Dynamic.literal(
-        "input"  -> Schema.strings("sessionId" -> 100, "threadId" -> 100),
+        "input"  -> Schema.stringsWithOptional(Seq("sessionId" -> 100), Seq("threadId" -> 100)),
         "output" -> Schema.passthrough
       ),
       "voiceSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
@@ -754,7 +764,6 @@ def plugin(bb: BbApi): Unit =
         val projectId = str(input.projectId)
         if !state.active.exists(_.sessionId == sessionId) then rejected("voice session is no longer active")
         else if threadId.isEmpty == projectId.isEmpty then rejected("exactly one of threadId or projectId is required")
-        else if threadId.length > 100 || projectId.length > 100 then rejected("threadId or projectId is too long")
         else
           if threadId.nonEmpty then state.active = state.active.map(_.copy(threadId = threadId))
           val diagnosticContext =
