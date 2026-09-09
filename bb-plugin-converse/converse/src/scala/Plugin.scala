@@ -681,9 +681,9 @@ def plugin(bb: BbApi): Unit =
         "output" -> Schema.passthrough
       ),
       "submitUtterance" -> js.Dynamic.literal(
+        // threadId or projectId: exactly one; the handler checks.
         "input" -> Schema.strings(
           "sessionId"   -> 100,
-          "threadId"    -> 100,
           "mimeType"    -> 100,
           "audioBase64" -> MaxAudioBase64Chars
         ),
@@ -753,7 +753,8 @@ def plugin(bb: BbApi): Unit =
         // A projectId instead of a threadId starts a new thread in that project.
         val projectId = str(input.projectId)
         if !state.active.exists(_.sessionId == sessionId) then rejected("voice session is no longer active")
-        else if threadId.isEmpty && projectId.isEmpty then rejected("threadId or projectId is required")
+        else if threadId.isEmpty == projectId.isEmpty then rejected("exactly one of threadId or projectId is required")
+        else if threadId.length > 100 || projectId.length > 100 then rejected("threadId or projectId is too long")
         else
           if threadId.nonEmpty then state.active = state.active.map(_.copy(threadId = threadId))
           val diagnosticContext =
