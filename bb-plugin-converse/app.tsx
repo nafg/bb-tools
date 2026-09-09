@@ -174,6 +174,7 @@ function TtsProviderCard({
   const [error, setError] = useState<string | null>(null);
   const [apiKey, setApiKey] = useState("");
   const [newVoice, setNewVoice] = useState("");
+  const [open, setOpen] = useState(active);
 
   const browserVoices = () =>
     speechSynthesis.getVoices().map((voice) => ({ id: voice.voiceURI || voice.name, label: voice.name }));
@@ -225,7 +226,7 @@ function TtsProviderCard({
   };
 
   return (
-    <details className="rounded border" defaultOpen={active}>
+    <details className="rounded border" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
       <summary className="flex cursor-pointer items-center justify-between gap-3 px-3 py-2 text-sm font-medium">
         <span>{label}</span>
         {active && <span className="rounded bg-primary/10 px-2 py-0.5 text-xs text-primary">Active</span>}
