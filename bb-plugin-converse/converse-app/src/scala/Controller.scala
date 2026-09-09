@@ -187,24 +187,28 @@ final class Controller(
   def configure(opts: js.Dynamic): Unit =
     startOptions = opts
     player.setTtsMode(opts.ttsMode.asInstanceOf[js.UndefOr[String]].getOrElse("browser"))
-    val soundCues = opts.soundCues.asInstanceOf[js.UndefOr[js.Dynamic]]
-    soundCues.foreach { sc =>
-      val enabledKeys = sc.enabled.asInstanceOf[js.Array[String]].toSet
-      val repeats     = sc.repeats.asInstanceOf[js.Dictionary[js.Dynamic]]
-      cues.configure(
-        enabledCues = SoundCue.values.filter(cue => enabledKeys.contains(cue.settingKey)).toSet,
-        masterVolume = sc.volume.asInstanceOf[Double],
-        repeatOverrides = SoundCue.values.flatMap { cue =>
-          repeats.get(cue.settingKey).map { r =>
-            cue -> Repeat(r.leadInMs.asInstanceOf[Int], r.intervalMs.asInstanceOf[Int])
-          }
-        }.toMap
-      )
+    opts.soundCues.asInstanceOf[js.UndefOr[js.Dynamic]].foreach { soundCues =>
+      SoundCueSettings.fromUnchecked(SoundCueSettingsJson.read(soundCues)) match
+        case Right(settings) => cues.configure(settings)
+        case Left(message)   => debug(s"sound cue settings rejected: $message")
     }
 
-  /** Plays one cue on demand, ignoring whether it is enabled. */
+  /** Plays one cue's configured sound on demand, ignoring whether it is enabled. */
   def previewCue(settingKey: String): Unit =
     SoundCue.values.find(_.settingKey == settingKey).foreach(cues.preview)
+
+  /** Plays an unsaved cue configuration exactly as a session would; a
+    * repeating cue keeps sounding until `stopAudition`. Returns the reason
+    * the configuration was rejected, or null.
+    */
+  def auditionCue(settingKey: String, config: js.Dynamic): String =
+    SoundCue.values.find(_.settingKey == settingKey).fold(s"unknown cue $settingKey") { cue =>
+      SoundCueSettings.checkCue(cue, SoundCueSettingsJson.readCue(config)) match
+        case Right(setting) => cues.audition(setting); null
+        case Left(message)  => message
+    }
+
+  def stopAudition(): Unit = cues.stopAudition()
 
   /** Start a session targeting the thread currently in view. */
   def startViewed(): Unit =
@@ -800,7 +804,11 @@ def createController(deps: js.Dynamic): js.Dynamic =
     "stop"        -> js.Any.fromFunction0(() => ctl.stop()),
     "teardown"    -> js.Any.fromFunction0(() => ctl.teardown()),
     "previewCue"  -> js.Any.fromFunction1((settingKey: String) => ctl.previewCue(settingKey)),
-    "soundCues"   -> SoundCue.values.map(cue => js.Dynamic.literal("key" -> cue.settingKey, "label" -> cue.label)).toJSArray,
+    "auditionCue" -> js.Any.fromFunction2((settingKey: String, config: js.Dynamic) => ctl.auditionCue(settingKey, config)),
+    "stopAudition" -> js.Any.fromFunction0(() => ctl.stopAudition()),
+    "soundCues" -> SoundCue.values.map { cue =>
+      js.Dynamic.literal("key" -> cue.settingKey, "label" -> cue.label, "repeating" -> cue.defaultRepeat.isDefined)
+    }.toJSArray,
     "resumeInterruptedSession" -> js.Any.fromFunction0(() => ctl.resumeInterruptedSession()),
     "configure"   -> js.Any.fromFunction1((opts: js.Dynamic) => ctl.configure(opts)),
     "replay"      -> js.Any.fromFunction2((text: String, threadId: String) => ctl.replay(text, threadId).toJSPromise),

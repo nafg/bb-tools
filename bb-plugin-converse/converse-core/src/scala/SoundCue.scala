@@ -1,10 +1,11 @@
 package conversecore
 
 /** One synthesized note: a sine at `frequencyHz`, optionally with its second
-  * harmonic and pink noise mixed in at the given relative levels and a
-  * low-pass filter, shaped by a linear attack, a hold, and a linear release
-  * that ends at `durationSec`. `releaseSec` of None means the note decays
-  * from the end of the attack straight to silence.
+  * harmonic and pink noise mixed in at the given relative levels, shaped by a
+  * linear attack, a hold, and a linear release that ends at `durationSec`.
+  * `lowpassHz` filters the noise only, deciding how bright the air sounds.
+  * `releaseSec` of None means the note decays from the end of the attack
+  * straight to silence.
   */
 final case class ToneNote(
     frequencyHz: Double,

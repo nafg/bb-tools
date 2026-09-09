@@ -16,28 +16,44 @@ final class SoundCuePlayer:
   private val SchedulerMs   = 100.0
   private val ReleaseSec    = 0.02
 
-  private var audioContext: AudioContext = null
-  private var master: GainNode           = null
-  private var enabled: Set[SoundCue]     = SoundCue.values.toSet
-  private var volume: Double             = 0.5
-  private var repeats: Map[SoundCue, Repeat] =
-    SoundCue.values.flatMap(cue => cue.defaultRepeat.map(cue -> _)).toMap
+  private var audioContext: AudioContext   = null
+  private var master: GainNode             = null
+  private var settings: SoundCueSettings   = SoundCueSettings.default
 
-  private var repeating: SoundCue               = null
-  private var repeatTimer: SetIntervalHandle    = null
-  private var nextRepeatAt: Double              = 0.0
   private final case class ScheduledNote(sources: List[AudioScheduledSourceNode], envelope: GainNode)
 
-  // Queued notes of the repeating cue only, so they can be cut at a phase change.
-  private val repeatScheduled = mutable.Set.empty[ScheduledNote]
+  /** A sound queued every `intervalSec` from `nextAt` until stopped. */
+  private final class Loop(sound: ToneSound, intervalSec: Double, private var nextAt: Double):
+    // Only what is still queued, so it can be cut at a phase change.
+    private val queued = mutable.Set.empty[ScheduledNote]
+    private val timer: SetIntervalHandle = setInterval(SchedulerMs)(topUp())
+    topUp()
+
+    private def topUp(): Unit =
+      while nextAt < audioContext.currentTime + LookaheadSec do
+        queued ++= schedule(sound, nextAt, queued -= _)
+        nextAt += intervalSec
+
+    def stop(): Unit =
+      clearInterval(timer)
+      val now = audioContext.currentTime
+      queued.foreach { note =>
+        val _ = note.envelope.gain.cancelScheduledValues(now)
+        val _ = note.envelope.gain.setValueAtTime(note.envelope.gain.value, now)
+        val _ = note.envelope.gain.linearRampToValueAtTime(0, now + ReleaseSec)
+        note.sources.foreach(_.stop(now + ReleaseSec))
+      }
+      queued.clear()
+
+  private var repeating: SoundCue    = null
+  private var repeatingLoop: Loop    = null
+  private var auditionLoop: Loop     = null
   private var pinkNoiseBuffer: AudioBuffer = null
 
-  def configure(enabledCues: Set[SoundCue], masterVolume: Double, repeatOverrides: Map[SoundCue, Repeat]): Unit =
-    enabled = enabledCues
-    volume = masterVolume
-    repeats = repeats ++ repeatOverrides
-    if master != null then master.gain.value = volume
-    if repeating != null && !enabled.contains(repeating) then stopRepeating()
+  def configure(next: SoundCueSettings): Unit =
+    settings = next
+    if master != null then master.gain.value = settings.volume
+    if repeating != null && !settings.cues(repeating).enabled then stopRepeating()
 
   /** Must be called inside a user gesture at least once before any cue is
     * wanted; otherwise browsers keep the context suspended and cues are
@@ -47,7 +63,7 @@ final class SoundCuePlayer:
     if audioContext == null then
       audioContext = new AudioContext
       master = audioContext.createGain()
-      master.gain.value = volume
+      master.gain.value = settings.volume
       val _ = master.connect(audioContext.destination)
     val _ = audioContext.resume()
 
@@ -58,48 +74,56 @@ final class SoundCuePlayer:
     // A repeating cue waits for the transition chime so the two never overlap.
     if next != null && next != repeating then startRepeating(next, chimeEndsAt)
 
-  /** Plays a cue regardless of its enabled setting. */
-  def preview(cue: SoundCue): Unit =
+  /** Plays a cue's configured sound once, regardless of its enabled setting. */
+  def preview(cue: SoundCue): Unit = audition(settings.cues(cue).copy(repeat = None))
+
+  /** Plays a setting that need not be saved, regardless of its enabled flag:
+    * once, or for a repeating one at its interval (without its lead-in) until
+    * `stopAudition` or the next audition.
+    */
+  def audition(setting: CueSetting): Unit =
+    stopAudition()
     ensureReady()
-    if audioContext != null then { val _ = schedule(cue.sound, audioContext.currentTime + 0.02) }
+    if audioContext != null then
+      val startAt = audioContext.currentTime + 0.02
+      setting.repeat match
+        case Some(repeat) => auditionLoop = new Loop(setting.sound, repeat.intervalMs / 1000.0, startAt)
+        case None         => val _ = schedule(setting.sound, startAt, _ => ())
+
+  def stopAudition(): Unit =
+    if auditionLoop != null then
+      auditionLoop.stop()
+      auditionLoop = null
 
   /** Returns the audio-clock time the cue ends, or None if it did not play. */
   private def play(cue: SoundCue): Option[Double] =
-    if enabled.contains(cue) && audioContext != null then
+    val setting = settings.cues(cue)
+    if setting.enabled && audioContext != null then
       val startAt = audioContext.currentTime + 0.02
-      val _       = schedule(cue.sound, startAt)
-      Some(startAt + cue.sound.durationSec)
+      val _       = schedule(setting.sound, startAt, _ => ())
+      Some(startAt + setting.sound.durationSec)
     else None
 
   private def startRepeating(cue: SoundCue, notBefore: Option[Double]): Unit =
-    if enabled.contains(cue) && audioContext != null then
+    val setting = settings.cues(cue)
+    if setting.enabled && audioContext != null then
       repeating = cue
-      nextRepeatAt = notBefore.getOrElse(audioContext.currentTime) + repeats(cue).leadInMs / 1000.0
-      topUp()
-      repeatTimer = setInterval(SchedulerMs)(topUp())
-
-  private def topUp(): Unit =
-    val interval = repeats(repeating).intervalMs / 1000.0
-    while nextRepeatAt < audioContext.currentTime + LookaheadSec do
-      repeatScheduled ++= schedule(repeating.sound, nextRepeatAt)
-      nextRepeatAt += interval
+      setting.repeat.foreach { repeat =>
+        repeatingLoop = new Loop(
+          setting.sound,
+          repeat.intervalMs / 1000.0,
+          notBefore.getOrElse(audioContext.currentTime) + repeat.leadInMs / 1000.0
+        )
+      }
 
   private def stopRepeating(): Unit =
-    if repeatTimer != null then { clearInterval(repeatTimer); repeatTimer = null }
-    if repeating != null then
-      repeating = null
-      // Notes already queued would otherwise keep sounding past the phase.
-      val now = audioContext.currentTime
-      repeatScheduled.foreach { note =>
-        val _ = note.envelope.gain.cancelScheduledValues(now)
-        val _ = note.envelope.gain.setValueAtTime(note.envelope.gain.value, now)
-        val _ = note.envelope.gain.linearRampToValueAtTime(0, now + ReleaseSec)
-        note.sources.foreach(_.stop(now + ReleaseSec))
-      }
-      repeatScheduled.clear()
+    repeating = null
+    if repeatingLoop != null then
+      repeatingLoop.stop()
+      repeatingLoop = null
 
   /** Queues the sound's notes back to back from `startAt`; returns the nodes queued. */
-  private def schedule(sound: ToneSound, startAt: Double): List[ScheduledNote] =
+  private def schedule(sound: ToneSound, startAt: Double, onEnded: ScheduledNote => Unit): List[ScheduledNote] =
     var at = startAt
     sound.notes.map { note =>
       val envelope = audioContext.createGain()
@@ -107,15 +131,7 @@ final class SoundCuePlayer:
       val _        = envelope.gain.linearRampToValueAtTime(note.gain, at + note.attackSec)
       val _        = envelope.gain.setValueAtTime(note.gain, at + note.releaseStartSec)
       val _        = envelope.gain.linearRampToValueAtTime(0, at + note.durationSec)
-      val output: AudioNode = note.lowpassHz match
-        case Some(hz) =>
-          val filter = audioContext.createBiquadFilter()
-          filter.`type` = "lowpass"
-          filter.frequency.value = hz
-          val _ = filter.connect(master)
-          filter
-        case None => master
-      val _ = envelope.connect(output)
+      val _ = envelope.connect(master)
 
       def sine(frequencyHz: Double, level: Double): AudioScheduledSourceNode =
         val osc = audioContext.createOscillator()
@@ -129,11 +145,19 @@ final class SoundCuePlayer:
             val noise = audioContext.createBufferSource()
             noise.buffer = pinkNoise()
             noise.loop = true
-            connectAtLevel(noise, note.pinkNoise, envelope)
+            val airInto: AudioNode = note.lowpassHz match
+              case Some(hz) =>
+                val filter = audioContext.createBiquadFilter()
+                filter.`type` = "lowpass"
+                filter.frequency.value = hz
+                val _ = filter.connect(envelope)
+                filter
+              case None => envelope
+            connectAtLevel(noise, note.pinkNoise, airInto)
             noise
           }
       val entry = ScheduledNote(sources, envelope)
-      sources.head.onended = _ => { val _ = repeatScheduled -= entry }
+      sources.head.onended = _ => onEnded(entry)
       sources.foreach { s =>
         s.start(at)
         s.stop(at + note.durationSec)

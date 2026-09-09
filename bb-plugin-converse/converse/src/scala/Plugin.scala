@@ -1,7 +1,16 @@
 package converse
 
 import bbplugin.*
-import conversecore.{AssistantMessage, AssistantReply, ContinuationWaiters, ThreadVoiceAssignments, TranscriptionFailure}
+import conversecore.{
+  AssistantMessage,
+  AssistantReply,
+  ContinuationWaiters,
+  SoundCue,
+  SoundCueSettings,
+  SoundCueSettingsJson,
+  ThreadVoiceAssignments,
+  TranscriptionFailure
+}
 
 import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future}
@@ -46,6 +55,7 @@ private val PocketEnglishVoices = Vector(
 
 private val ThreadVoicesEnabledKey = "voices.byThreadEnabled"
 private val EnabledPocketVoicesKey = "voices.pocket.enabled"
+private val SoundCuesKey           = "soundCues"
 
 private val ManagedPocketPort         = 8000
 private val ManagedPocketStartCommand = "uvx pocket-tts serve --host localhost --port 8000"
@@ -203,61 +213,6 @@ def plugin(bb: BbApi): Unit =
         "type"    -> "string",
         "label"   -> "AGENT: maximum time to wait for continued speech (milliseconds)",
         "default" -> "8000"
-      ),
-      "cueVolume" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "SOUND CUES: volume (0–1)",
-        "default" -> "0.5"
-      ),
-      "cueTranscribingLeadInMs" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "SOUND CUES: silence before the transcribing taps begin (milliseconds)",
-        "default" -> "1000"
-      ),
-      "cueTranscribingIntervalMs" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "SOUND CUES: transcribing tap period (milliseconds)",
-        "default" -> "330"
-      ),
-      "cueThinkingLeadInMs" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "SOUND CUES: silence before the thinking pulse begins (milliseconds)",
-        "default" -> "2857"
-      ),
-      "cueThinkingIntervalMs" -> js.Dynamic.literal(
-        "type"    -> "string",
-        "label"   -> "SOUND CUES: thinking pulse period (milliseconds)",
-        "default" -> "2857"
-      ),
-      "cueSessionStarted" -> js.Dynamic.literal(
-        "type"    -> "boolean",
-        "label"   -> "SOUND CUES: session started",
-        "default" -> true
-      ),
-      "cueReplyStarting" -> js.Dynamic.literal(
-        "type"    -> "boolean",
-        "label"   -> "SOUND CUES: reply starting",
-        "default" -> true
-      ),
-      "cueStoppedByUser" -> js.Dynamic.literal(
-        "type"    -> "boolean",
-        "label"   -> "SOUND CUES: stopped by you",
-        "default" -> true
-      ),
-      "cueEndedUnexpectedly" -> js.Dynamic.literal(
-        "type"    -> "boolean",
-        "label"   -> "SOUND CUES: ended unexpectedly",
-        "default" -> true
-      ),
-      "cueTranscribing" -> js.Dynamic.literal(
-        "type"    -> "boolean",
-        "label"   -> "SOUND CUES: transcribing (repeating tap)",
-        "default" -> true
-      ),
-      "cueThinking" -> js.Dynamic.literal(
-        "type"    -> "boolean",
-        "label"   -> "SOUND CUES: thinking (repeating pulse)",
-        "default" -> true
       )
     )
   )
@@ -350,6 +305,30 @@ def plugin(bb: BbApi): Unit =
 
   def publishVoiceChanged(threadId: String = ""): Unit =
     bb.realtime.publish("converse-voices", js.Dynamic.literal("threadId" -> threadId))
+
+  def soundCueSettings(): Future[SoundCueSettings] =
+    bb.storage.kv.get(SoundCuesKey).toFuture.map { stored =>
+      stored.asInstanceOf[js.UndefOr[js.Dynamic]].toOption.fold(SoundCueSettings.default) { value =>
+        SoundCueSettings.fromUnchecked(SoundCueSettingsJson.read(value)) match
+          case Right(settings) => settings
+          case Left(message) =>
+            bb.log.warn(s"stored sound cue settings ignored: $message")
+            SoundCueSettings.default
+      }
+    }
+
+  def soundCueSettingsResponse(settings: SoundCueSettings): js.Dynamic =
+    val response = SoundCueSettingsJson.write(settings.unchecked)
+    SoundCue.values.foreach { cue =>
+      response.cues.selectDynamic(cue.settingKey).updateDynamic("isDefault")(settings.isDefault(cue))
+    }
+    response
+
+  def storeSoundCueSettings(settings: SoundCueSettings): Future[js.Dynamic] =
+    bb.storage.kv.set(SoundCuesKey, SoundCueSettingsJson.write(settings.unchecked)).toFuture.map { _ =>
+      bb.realtime.publish("converse-sound-cues", js.Dynamic.literal())
+      soundCueSettingsResponse(settings)
+    }
 
   def waitForMoreSpeech(threadId: String): Future[String] =
     if !state.awaiting.contains(threadId) then
@@ -794,6 +773,15 @@ def plugin(bb: BbApi): Unit =
         "output" -> Schema.passthrough
       ),
       "threadVoiceSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "soundCueSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "updateSoundCueSettings" -> js.Dynamic.literal(
+        "input"  -> Schema.passthrough,
+        "output" -> Schema.passthrough
+      ),
+      "resetSoundCue" -> js.Dynamic.literal(
+        "input"  -> Schema.strings("key" -> 100),
+        "output" -> Schema.passthrough
+      ),
       "updateThreadVoiceSettings" -> js.Dynamic.literal(
         "input" -> Schema.passthrough,
         "output" -> Schema.passthrough
@@ -972,6 +960,23 @@ def plugin(bb: BbApi): Unit =
           if requestedProvider.nonEmpty then Future.successful(requestedProvider)
           else settings.get().toFuture.map(s => str(s.ttsProvider))
         providerF.flatMap(voiceSettingsResponse).toJSPromise
+      },
+      "soundCueSettings" -> js.Any.fromFunction1 { (_: js.Dynamic) =>
+        soundCueSettings().map(soundCueSettingsResponse).toJSPromise
+      },
+      "updateSoundCueSettings" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        SoundCueSettings.fromUnchecked(SoundCueSettingsJson.read(input)) match
+          case Left(message)   => rejected(message)
+          case Right(settings) => storeSoundCueSettings(settings).toJSPromise
+      },
+      "resetSoundCue" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val key = str(input.key)
+        SoundCue.values.find(_.settingKey == key) match
+          case None => rejected(s"unknown cue $key")
+          case Some(cue) =>
+            soundCueSettings().flatMap { current =>
+              storeSoundCueSettings(current.copy(cues = current.cues.updated(cue, SoundCueSettings.default.cues(cue))))
+            }.toJSPromise
       },
       "threadVoiceSettings" -> js.Any.fromFunction1 { (_: js.Dynamic) =>
         threadVoicesEnabled().map(enabled => js.Dynamic.literal("enabled" -> enabled)).toJSPromise

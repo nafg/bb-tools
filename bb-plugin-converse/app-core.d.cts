@@ -39,20 +39,45 @@ export interface ConverseSnapshot {
   speechProbabilityThreshold: number;
 }
 
-export interface SoundCueOptions {
-  /** Setting keys of the cues that may sound. */
-  enabled: string[];
+/** One synthesized note as the settings store it. */
+export interface SoundCueNoteConfig {
+  frequencyHz: number;
+  durationSec: number;
+  attackSec: number;
+  gain: number;
+  /** Absent: the note decays from the end of its attack. */
+  releaseSec?: number;
+  harmonic2: number;
+  pinkNoise: number;
+  /** Absent: no low-pass filter. */
+  lowpassHz?: number;
+}
+
+export interface SoundCueRepeatConfig {
+  leadInMs: number;
+  intervalMs: number;
+}
+
+export interface SoundCueConfig {
+  enabled: boolean;
+  notes: SoundCueNoteConfig[];
+  /** Present exactly for repeating cues. */
+  repeat: SoundCueRepeatConfig | null;
+}
+
+/** What the soundCueSettings rpc returns and updateSoundCueSettings accepts. */
+export interface SoundCueSettings {
   /** Master gain, 0–1. */
   volume: number;
-  /** Per repeating cue, by setting key: silence before the first sound, then the period. */
-  repeats: Record<string, { leadInMs: number; intervalMs: number }>;
+  /** By setting key. */
+  cues: Record<string, SoundCueConfig & { isDefault?: boolean }>;
 }
 
 export interface ConverseStartOptions {
   ttsMode: "browser" | "server";
   speechProbabilityThreshold: number;
   endOfSpeechSilenceMs: number;
-  soundCues?: SoundCueOptions;
+  soundCues?: SoundCueSettings;
 }
 
 export interface ConverseController {
@@ -60,10 +85,16 @@ export interface ConverseController {
   /** Start a session targeting the thread currently in view. */
   startViewed(): void;
   stop(): void;
-  /** Play one sound cue on demand, ignoring whether it is enabled. */
+  /** Play one cue's configured sound on demand, ignoring whether it is enabled. */
   previewCue(settingKey: string): void;
+  /**
+   * Play an unsaved cue configuration exactly as a session would; a repeating
+   * cue keeps sounding until stopAudition. Returns why it was rejected, or null.
+   */
+  auditionCue(settingKey: string, config: SoundCueConfig): string | null;
+  stopAudition(): void;
   /** Every sound cue, in display order. */
-  soundCues: { key: string; label: string }[];
+  soundCues: { key: string; label: string; repeating: boolean }[];
   /** End the session because the plugin's frontend is unloading; the next mount resumes it. */
   teardown(): void;
   /** Bring back the session a previous frontend generation was unloaded under. */
