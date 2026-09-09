@@ -28,11 +28,36 @@ class SoundCueTest extends munit.FunSuite:
     assertEquals(SoundCue.onTransition("idle", "idle", stoppedByUser = true), None)
     assertEquals(SoundCue.onTransition("error", "idle", stoppedByUser = false), None)
 
-  test("only transcribing and thinking repeat"):
-    assertEquals(SoundCue.repeatingIn("transcribing"), Some(Transcribing))
-    assertEquals(SoundCue.repeatingIn("waiting"), Some(Thinking))
-    for phase <- List("idle", "starting", "listening", "recording", "speaking", "error") do
-      assertEquals(SoundCue.repeatingIn(phase), None, phase)
+  test("only transcribing and waiting repeat, whatever the agent is doing"):
+    for activity <- None :: AgentActivity.values.toList.map(Some(_)) do
+      assertEquals(SoundCue.repeatingIn("transcribing", activity), Some(Transcribing), activity.toString)
+      for phase <- List("idle", "starting", "listening", "recording", "speaking", "error") do
+        assertEquals(SoundCue.repeatingIn(phase, activity), None, s"$phase $activity")
+
+  test("while waiting the pulse follows the agent's activity, defaulting to thinking"):
+    assertEquals(SoundCue.repeatingIn("waiting", None), Some(Thinking))
+    assertEquals(SoundCue.repeatingIn("waiting", Some(AgentActivity.Reasoning)), Some(Thinking))
+    assertEquals(SoundCue.repeatingIn("waiting", Some(AgentActivity.Tool)), Some(ToolRunning))
+    assertEquals(SoundCue.repeatingIn("waiting", Some(AgentActivity.Generating)), Some(Generating))
+
+  test("listening for more speech silences the pulse"):
+    assertEquals(SoundCue.repeatingIn("waiting", Some(AgentActivity.AwaitingSpeech)), None)
+
+  test("the activity pulses are the thinking texture at double rate or brighter"):
+    val thinking = Thinking.sound.notes.head
+    assertEquals(ToolRunning.sound.notes.head, thinking)
+    assertEquals(ToolRunning.defaultRepeat, Some(Repeat(1428, 1428)))
+    assertEquals(Generating.sound.notes.head, thinking.copy(harmonic2 = 0.3))
+    assertEquals(Generating.defaultRepeat, Thinking.defaultRepeat)
+
+  test("the awaiting-speech rise is two short notes an octave apart in the thinking timbre"):
+    val List(low, high) = AwaitingSpeech.sound.notes
+    assertEquals(low.frequencyHz, 129.0)
+    assertEquals(high.frequencyHz, 258.0)
+    for note <- List(low, high) do
+      assertEquals((note.harmonic2, note.pinkNoise, note.lowpassHz), (0.1, 0.37, Some(2000.0)))
+    assert(AwaitingSpeech.sound.durationSec < 1.0)
+    assertEquals(AwaitingSpeech.defaultRepeat, None)
 
   test("every cue has a sound and a stable settings key"):
     for cue <- SoundCue.values do

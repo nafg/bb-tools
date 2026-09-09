@@ -34,6 +34,10 @@ final class Controller(
   private var errorNote: String   = null
   private var heardText: String   = null
   private var lastEventId: String = null
+  // What the agent is doing on the thread, per the backend's signals; both
+  // are forgotten when the session stops waiting on it.
+  private var turnActivity: Option[AgentActivity] = None
+  private var awaitingSpeech: Boolean             = false
 
   // Audio graph
   private var micStream: MediaStream        = null
@@ -116,6 +120,7 @@ final class Controller(
       "speakingThreadDisplayName" -> threadDisplayName(player.speakingThread),
       "speakingVoice"             -> player.speakingVoice,
       "error"                     -> errorNote,
+      "activity"                  -> activity.map(_.signalName).orNull,
       "heard"                     -> heardText,
       "interim"                   -> interimText,
       "speechProbability"         -> currentSpeechProbability,
@@ -128,9 +133,20 @@ final class Controller(
       debug(s"phase: $phase -> $next")
       val previous = phase
       phase = next
-      cues.onPhase(previous, next, stoppedByUser)
+      if previous == "waiting" then
+        turnActivity = None
+        awaitingSpeech = false
+      cues.onPhase(previous, next, stoppedByUser, activity)
       refreshSnapshot()
       syncReplyHold()
+
+  private def activity: Option[AgentActivity] =
+    if awaitingSpeech then Some(AgentActivity.AwaitingSpeech) else turnActivity
+
+  private def activityChanged(): Unit =
+    debug(s"activity: ${activity.fold("none")(_.signalName)}")
+    cues.onActivity(phase, activity)
+    refreshSnapshot()
 
   private def syncReplyHold(): Unit =
     val hold = ReplySpeechHold.holds(captureActive, phase)
@@ -752,6 +768,16 @@ final class Controller(
           case "agent-failed" =>
             errorNote = p.error.asInstanceOf[js.UndefOr[String]].getOrElse("the agent failed")
             setPhase("listening")
+          case "activity" =>
+            turnActivity = AgentActivity.fromSignalName(p.activity.asInstanceOf[js.UndefOr[String]].getOrElse(""))
+            activityChanged()
+          case "awaiting-speech-begin" =>
+            awaitingSpeech = true
+            activityChanged()
+            val _ = cues.play(SoundCue.AwaitingSpeech)
+          case "awaiting-speech-end" =>
+            awaitingSpeech = false
+            activityChanged()
           case "revoked" =>
             // Another tab/session took over; tear down without racing it.
             debug("session revoked by another window")

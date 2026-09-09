@@ -29,6 +29,8 @@ export interface ConverseSnapshot {
   /** Per-thread voice selected for the reply currently being spoken. */
   speakingVoice: string | null;
   error: string | null;
+  /** What the agent is doing while the session waits on it; null when unknown. */
+  activity: "reasoning" | "tool" | "generating" | "awaiting-speech" | null;
   /** The last utterance that was transcribed and sent. */
   heard: string | null;
   /** Preview transcription of the utterance still being spoken. */

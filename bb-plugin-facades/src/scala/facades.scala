@@ -106,6 +106,8 @@ trait BbHttpArea extends js.Object:
 
 @js.native
 trait BbSdk extends js.Object:
+  /** args: { event: "thread:changed", threadId?, callback } and the like; returns the unsubscribe function. */
+  def subscribe(args: js.Any): js.Function0[Unit] = js.native
   val threads: BbThreadsArea           = js.native
   val environments: BbEnvironmentsArea = js.native
   val files: BbFilesArea               = js.native
@@ -130,7 +132,13 @@ trait BbSystemArea extends js.Object:
   def transcribeVoice(args: js.Any): js.Promise[js.Dynamic] = js.native
 
 @js.native
+trait BbThreadEventsArea extends js.Object:
+  /** args: { threadId, afterSeq?, beforeSeq?, limit?, order?, types? }; resolves the event rows. */
+  def list(args: js.Any): js.Promise[js.Array[js.Dynamic]] = js.native
+
+@js.native
 trait BbThreadsArea extends js.Object:
+  val events: BbThreadEventsArea                      = js.native
   def get(args: js.Any): js.Promise[js.Dynamic]       = js.native
   def send(args: js.Any): js.Promise[js.Dynamic]      = js.native
   def spawn(args: js.Any): js.Promise[js.Dynamic]     = js.native

@@ -460,7 +460,9 @@ const thumbClass = "block h-4 w-4 rounded-full border border-primary/50 bg-backg
 // One or more thumbs on a Radix track in the host's slider style. Radix keeps
 // the thumbs from crossing. Class names are host utilities only: the designer
 // renders in a portal that the plugin's scoped stylesheet does not reach.
-function Thumbs({ label, min, max, step, values, onChange, show, thumbLabels, track }: {
+type TrackFill = "before" | "after" | "none";
+
+function Thumbs({ label, min, max, step, values, onChange, show, thumbLabels, track, fill = "before" }: {
   label: string;
   min: number;
   max: number;
@@ -471,7 +473,10 @@ function Thumbs({ label, min, max, step, values, onChange, show, thumbLabels, tr
   thumbLabels?: string[];
   /** A CSS background for the whole track, replacing the filled range. */
   track?: string;
+  /** Which side of a single thumb is filled: the amount before it, the span after it, or neither for a position. */
+  fill?: TrackFill;
 }) {
+  const background = track ?? (fill === "after" ? afterTrack((values[0] - min) / (max - min)) : undefined);
   return (
     <div className="space-y-1 text-xs">
       <div className="flex justify-between gap-2">
@@ -479,8 +484,8 @@ function Thumbs({ label, min, max, step, values, onChange, show, thumbLabels, tr
         <output className="tabular-nums text-muted-foreground">{show(values)}</output>
       </div>
       <RadixSlider.Root aria-label={label} min={min} max={max} step={step} value={values} onValueChange={onChange} className="relative flex w-full touch-none select-none items-center">
-        <RadixSlider.Track className="relative h-1.5 w-full grow overflow-hidden rounded-full bg-primary/20" style={track ? { backgroundImage: track } : undefined}>
-          {!track && <RadixSlider.Range className="absolute h-full bg-primary" />}
+        <RadixSlider.Track className="relative h-1.5 w-full grow overflow-hidden rounded-full bg-primary/20" style={background ? { backgroundImage: background, backgroundColor: "transparent" } : undefined}>
+          {!background && fill === "before" && <RadixSlider.Range className="absolute h-full bg-primary" />}
         </RadixSlider.Track>
         {values.map((_, i) => (
           <RadixSlider.Thumb key={i} aria-label={thumbLabels?.[i]} title={thumbLabels?.[i]} className={thumbClass} />
@@ -528,12 +533,19 @@ const fromLog = (v: number) => Math.round(Math.pow(10, v));
 const NoFilterHz = 8000;
 const NoteMaxSec = 3;
 
+const quiet = "color-mix(in srgb, var(--primary) 8%, transparent)";
+const loud = "var(--primary)";
+
 // The envelope painted onto the track: rising to the attack end, held to the release start, falling to the end.
 function envelopeTrack(attackEnd: number, releaseStart: number, end: number): string {
   const pct = (t: number) => `${((t / NoteMaxSec) * 100).toFixed(2)}%`;
-  const quiet = "color-mix(in srgb, var(--primary) 20%, transparent)";
-  const loud = "var(--primary)";
   return `linear-gradient(to right, ${quiet} 0%, ${loud} ${pct(attackEnd)}, ${loud} ${pct(releaseStart)}, ${quiet} ${pct(end)}, ${quiet} 100%)`;
+}
+
+// Filled from the thumb to the end: what starts once the thumb is passed.
+function afterTrack(fraction: number): string {
+  const pct = `${(fraction * 100).toFixed(2)}%`;
+  return `linear-gradient(to right, ${quiet} 0%, ${quiet} ${pct}, ${loud} ${pct}, ${loud} 100%)`;
 }
 
 function NoteEditor({ note, onChange }: { note: SoundCueNoteConfig; onChange: (note: SoundCueNoteConfig) => void }) {
@@ -545,12 +557,12 @@ function NoteEditor({ note, onChange }: { note: SoundCueNoteConfig; onChange: (n
     <div className="space-y-2">
       <Group
         legend="Tone"
-        axis={<Slider label="Pitch" min={toLog(60)} max={toLog(2000)} step={0.005} value={toLog(note.frequencyHz)} onChange={(v) => onChange({ ...note, frequencyHz: fromLog(v) })} show={(v) => hz(fromLog(v))} />}
+        axis={<Slider label="Pitch" fill="none" min={toLog(60)} max={toLog(2000)} step={0.005} value={toLog(note.frequencyHz)} onChange={(v) => onChange({ ...note, frequencyHz: fromLog(v) })} show={(v) => hz(fromLog(v))} />}
         level={<Level label="Octave" min={0} max={1} step={0.01} value={note.harmonic2} onChange={(v) => onChange({ ...note, harmonic2: v })} />}
       />
       <Group
         legend="Air"
-        axis={<Slider label="Brightness" min={toLog(100)} max={toLog(NoFilterHz)} step={0.005} value={toLog(cut)} onChange={(v) => onChange({ ...note, lowpassHz: fromLog(v) >= NoFilterHz ? undefined : fromLog(v) })} show={(v) => (fromLog(v) >= NoFilterHz ? "full" : hz(fromLog(v)))} />}
+        axis={<Slider label="Brightness" fill="none" min={toLog(100)} max={toLog(NoFilterHz)} step={0.005} value={toLog(cut)} onChange={(v) => onChange({ ...note, lowpassHz: fromLog(v) >= NoFilterHz ? undefined : fromLog(v) })} show={(v) => (fromLog(v) >= NoFilterHz ? "full" : hz(fromLog(v)))} />}
         level={<Level label="Air" min={0} max={1} step={0.01} value={note.pinkNoise} onChange={(v) => onChange({ ...note, pinkNoise: v })} />}
       />
       <Group
@@ -577,7 +589,7 @@ function NoteEditor({ note, onChange }: { note: SoundCueNoteConfig; onChange: (n
   );
 }
 
-function Slider({ label, min, max, step, value, onChange, show }: {
+function Slider({ label, min, max, step, value, onChange, show, fill }: {
   label: string;
   min: number;
   max: number;
@@ -585,8 +597,9 @@ function Slider({ label, min, max, step, value, onChange, show }: {
   value: number;
   onChange: (value: number) => void;
   show?: (value: number) => string;
+  fill?: TrackFill;
 }) {
-  return <Thumbs label={label} min={min} max={max} step={step} values={[value]} onChange={([v]) => onChange(v)} show={([v]) => (show ? show(v) : v.toFixed(decimalsOf(step)))} />;
+  return <Thumbs label={label} min={min} max={max} step={step} values={[value]} onChange={([v]) => onChange(v)} show={([v]) => (show ? show(v) : v.toFixed(decimalsOf(step)))} fill={fill} />;
 }
 
 const newNote: SoundCueNoteConfig = { frequencyHz: 523, durationSec: 0.2, attackSec: 0.01, gain: 0.35, harmonic2: 0, pinkNoise: 0 };
@@ -688,7 +701,7 @@ function SoundCueDesigner({ cue, config, onSave, onClose }: {
             <fieldset className="rounded border px-2 pb-2">
               <legend className="px-1 text-xs text-muted-foreground">Repeat</legend>
               <div className="grid grid-cols-2 gap-x-4">
-                <Slider label="Lead-in (ms)" min={0} max={10000} step={50} value={draft.repeat.leadInMs} onChange={(value) => setDraft({ ...draft, repeat: { ...draft.repeat!, leadInMs: value } })} />
+                <Slider label="Lead-in (ms)" fill="after" min={0} max={10000} step={50} value={draft.repeat.leadInMs} onChange={(value) => setDraft({ ...draft, repeat: { ...draft.repeat!, leadInMs: value } })} />
                 <Slider label="Interval (ms)" min={100} max={10000} step={10} value={draft.repeat.intervalMs} onChange={(value) => setDraft({ ...draft, repeat: { ...draft.repeat!, intervalMs: value } })} />
               </div>
             </fieldset>

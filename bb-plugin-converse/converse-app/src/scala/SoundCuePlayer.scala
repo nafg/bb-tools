@@ -34,6 +34,11 @@ final class SoundCuePlayer:
         queued ++= schedule(sound, nextAt, queued -= _)
         nextAt += intervalSec
 
+    /** Stops queuing; what is already queued plays out. Returns when the next sound was due. */
+    def handOff(): Double =
+      clearInterval(timer)
+      nextAt
+
     def stop(): Unit =
       clearInterval(timer)
       val now = audioContext.currentTime
@@ -67,12 +72,28 @@ final class SoundCuePlayer:
       val _ = master.connect(audioContext.destination)
     val _ = audioContext.resume()
 
-  def onPhase(from: String, to: String, stoppedByUser: Boolean): Unit =
-    val next = SoundCue.repeatingIn(to).orNull
+  def onPhase(from: String, to: String, stoppedByUser: Boolean, activity: Option[AgentActivity]): Unit =
+    val next = SoundCue.repeatingIn(to, activity).orNull
     if next != repeating then stopRepeating()
     val chimeEndsAt = SoundCue.onTransition(from, to, stoppedByUser).flatMap(play)
     // A repeating cue waits for the transition chime so the two never overlap.
     if next != null && next != repeating then startRepeating(next, chimeEndsAt)
+
+  /** The agent's activity changed within `phase`. A pulse replacing another
+    * keeps its rhythm rather than starting over with the lead-in: the user is
+    * already in a working state.
+    */
+  def onActivity(phase: String, activity: Option[AgentActivity]): Unit =
+    val next = SoundCue.repeatingIn(phase, activity).orNull
+    if next != repeating then
+      if next == null || repeatingLoop == null then
+        stopRepeating()
+        if next != null then startRepeating(next, None)
+      else
+        val dueAt = repeatingLoop.handOff()
+        repeating = null
+        repeatingLoop = null
+        continueRepeating(next, dueAt)
 
   /** Plays a cue's configured sound once, regardless of its enabled setting. */
   def preview(cue: SoundCue): Unit = audition(settings.cues(cue).copy(repeat = None))
@@ -95,8 +116,8 @@ final class SoundCuePlayer:
       auditionLoop.stop()
       auditionLoop = null
 
-  /** Returns the audio-clock time the cue ends, or None if it did not play. */
-  private def play(cue: SoundCue): Option[Double] =
+  /** Plays a cue once now, if enabled. Returns the audio-clock time it ends, or None if it did not play. */
+  def play(cue: SoundCue): Option[Double] =
     val setting = settings.cues(cue)
     if setting.enabled && audioContext != null then
       val startAt = audioContext.currentTime + 0.02
@@ -114,6 +135,21 @@ final class SoundCuePlayer:
           repeat.intervalMs / 1000.0,
           notBefore.getOrElse(audioContext.currentTime) + repeat.leadInMs / 1000.0
         )
+      }
+
+  /** Starts `cue` on the rhythm of the pulse it replaces: its next sound falls
+    * where the previous one was due, or earlier on the same grid when the new
+    * interval is shorter.
+    */
+  private def continueRepeating(cue: SoundCue, dueAt: Double): Unit =
+    val setting = settings.cues(cue)
+    if setting.enabled && audioContext != null then
+      repeating = cue
+      setting.repeat.foreach { repeat =>
+        val intervalSec = repeat.intervalMs / 1000.0
+        var nextAt      = dueAt
+        while nextAt - intervalSec > audioContext.currentTime + LookaheadSec do nextAt -= intervalSec
+        repeatingLoop = new Loop(setting.sound, intervalSec, nextAt)
       }
 
   private def stopRepeating(): Unit =

@@ -9,7 +9,9 @@ import conversecore.{
   SoundCueSettings,
   SoundCueSettingsJson,
   ThreadVoiceAssignments,
-  TranscriptionFailure
+  TranscriptionFailure,
+  TurnActivityTracker,
+  TurnEvent
 }
 
 import scala.collection.mutable
@@ -306,6 +308,105 @@ def plugin(bb: BbApi): Unit =
   def publishVoiceChanged(threadId: String = ""): Unit =
     bb.realtime.publish("converse-voices", js.Dynamic.literal("threadId" -> threadId))
 
+  def publishSignal(signalType: String, sessionId: String, threadId: String, extra: (String, js.Any)*): Unit =
+    val payload = js.Dynamic.literal(
+      "type"      -> signalType,
+      "sessionId" -> sessionId,
+      "threadId"  -> threadId,
+      "eventId"   -> state.nextEventId()
+    )
+    extra.foreach((name, value) => payload.updateDynamic(name)(value))
+    bb.realtime.publish("converse", payload)
+
+  // --------------------------------------------------------- turn activity
+
+  /** Follows the session's thread while the session is active and publishes
+    * an "activity" signal to it whenever the activity its turn events say the
+    * agent is in changes. Only turn and item boundaries are fetched; deltas
+    * are ignored, so a streaming reply costs no requests.
+    */
+  final class TurnActivityWatch(session: ActiveSession):
+    private val BoundaryEventTypes = js.Array("turn/started", "turn/completed", "item/started", "item/completed")
+    private var tracker             = TurnActivityTracker.initial
+    private var lastSeq: Option[String] = None
+    private var fetching            = false
+    private var fetchAgain          = false
+    private var stopped             = false
+    private val unsubscribe = bb.sdk.subscribe(
+      js.Dynamic.literal(
+        "event"    -> "thread:changed",
+        "threadId" -> session.threadId,
+        "callback" -> js.Any.fromFunction1 { (change: js.Dynamic) =>
+          val eventTypes = change.metadata
+            .asInstanceOf[js.UndefOr[js.Dynamic]]
+            .flatMap(metadata => metadata.eventTypes.asInstanceOf[js.UndefOr[js.Array[String]]])
+          if eventTypes.exists(_.exists(BoundaryEventTypes.contains)) then fetch()
+        }
+      )
+    )
+    fetch()
+
+    def stop(): Unit =
+      stopped = true
+      unsubscribe()
+
+    private def turnEvent(row: js.Dynamic): Option[TurnEvent] = str(row.`type`) match
+      case "turn/started"   => Some(TurnEvent.TurnStarted)
+      case "turn/completed" => Some(TurnEvent.TurnCompleted)
+      case "item/started"   => Some(TurnEvent.ItemStarted(str(row.data.item.id), str(row.data.item.`type`)))
+      case "item/completed" => Some(TurnEvent.ItemCompleted(str(row.data.item.id)))
+      case _                => None
+
+    /** One request at a time; a change arriving mid-request queues one more. */
+    private def fetch(): Unit =
+      if fetching then fetchAgain = true
+      else
+        fetching = true
+        val request = js.Dynamic.literal("threadId" -> session.threadId, "types" -> BoundaryEventTypes)
+        // The first request seeds from the newest boundaries, so a session
+        // started mid-turn knows the current activity.
+        lastSeq match
+          case Some(seq) => request.updateDynamic("afterSeq")(seq); request.updateDynamic("order")("asc")
+          case None      => request.updateDynamic("order")("desc"); request.updateDynamic("limit")("100")
+        val seeding = lastSeq.isEmpty
+        bb.sdk.threads.events.list(request).toFuture
+          .map { rows =>
+            if !stopped then
+              val before  = tracker.activity
+              val ordered = if seeding then rows.toList.reverse else rows.toList
+              ordered.foreach { row =>
+                lastSeq = Some(str(row.seq))
+                turnEvent(row).foreach(event => tracker = tracker(event))
+              }
+              // The seed is published even when unchanged: the tab may hold
+              // the activity of the thread this session targeted before.
+              if seeding || tracker.activity != before then
+                publishSignal(
+                  "activity",
+                  session.sessionId,
+                  session.threadId,
+                  "activity" -> tracker.activity.map(_.signalName).orNull
+                )
+          }
+          .recover { case e => bb.log.warn(s"could not read turn events of thread ${session.threadId}: ${e.getMessage}") }
+          .foreach { _ =>
+            fetching = false
+            if fetchAgain && !stopped then
+              fetchAgain = false
+              fetch()
+          }
+
+  var activityWatch: TurnActivityWatch = null
+
+  /** Sets the active session and keeps the activity watch on its thread. */
+  def activate(next: Option[ActiveSession]): Unit =
+    if state.active != next then
+      state.active = next
+      if activityWatch != null then
+        activityWatch.stop()
+        activityWatch = null
+      next.filter(_.threadId.nonEmpty).foreach(session => activityWatch = TurnActivityWatch(session))
+
   def soundCueSettings(): Future[SoundCueSettings] =
     bb.storage.kv.get(SoundCuesKey).toFuture.map { stored =>
       stored.asInstanceOf[js.UndefOr[js.Dynamic]].toOption.fold(SoundCueSettings.default) { value =>
@@ -331,39 +432,42 @@ def plugin(bb: BbApi): Unit =
     }
 
   def waitForMoreSpeech(threadId: String): Future[String] =
-    if !state.awaiting.contains(threadId) then
-      Future.successful(
-        "No active voice turn is awaiting a response. Continue normally without waiting for speech."
-      )
-    else
-      settings.get().toFuture.flatMap { currentSettings =>
-        val waitMs = str(currentSettings.continuationWaitMs).toDoubleOption
-          .filter(ms => ms >= 1000 && ms <= 30000)
-          .getOrElse(8000.0)
-        val waiting = state.continuationWaiters.begin(threadId)
-        // The wait covers speech that has not started yet; speech already
-        // being captured is waited for to completion, however long it runs.
-        var timer: js.Dynamic = null
-        def scheduleExpiry(delayMs: Double): Unit =
-          timer = js.Dynamic.global.setTimeout(
-            js.Any.fromFunction0 { () =>
-              if state.capturingFor.contains(threadId) then scheduleExpiry(1000)
-              else { val _ = state.continuationWaiters.expire(threadId) }
-            },
-            delayMs
-          )
-        scheduleExpiry(waitMs)
-        waiting.map { continuation =>
-          val _ = js.Dynamic.global.clearTimeout(timer)
-          continuation match
-            case Some(text) =>
-              ("The user continued speaking. Treat this as part of the preceding voice message:\n" +
-                "<voice-continuation>\n" + text + "\n</voice-continuation>")
-            case None =>
-              s"No additional speech arrived within ${waitMs.toInt} milliseconds. " +
-                "Treat the preceding voice message as complete and continue."
+    state.awaiting.get(threadId) match
+      case None =>
+        Future.successful(
+          "No active voice turn is awaiting a response. Continue normally without waiting for speech."
+        )
+      case Some(awaitedReply) =>
+        settings.get().toFuture.flatMap { currentSettings =>
+          val waitMs = str(currentSettings.continuationWaitMs).toDoubleOption
+            .filter(ms => ms >= 1000 && ms <= 30000)
+            .getOrElse(8000.0)
+          val waiting = state.continuationWaiters.begin(threadId)
+          publishSignal("awaiting-speech-begin", awaitedReply.sessionId, threadId)
+          // The wait covers speech that has not started yet; speech already
+          // being captured is waited for to completion, however long it runs.
+          var timer: js.Dynamic = null
+          def scheduleExpiry(delayMs: Double): Unit =
+            timer = js.Dynamic.global.setTimeout(
+              js.Any.fromFunction0 { () =>
+                if state.capturingFor.contains(threadId) then scheduleExpiry(1000)
+                else { val _ = state.continuationWaiters.expire(threadId) }
+              },
+              delayMs
+            )
+          scheduleExpiry(waitMs)
+          waiting.map { continuation =>
+            val _ = js.Dynamic.global.clearTimeout(timer)
+            publishSignal("awaiting-speech-end", awaitedReply.sessionId, threadId)
+            continuation match
+              case Some(text) =>
+                ("The user continued speaking. Treat this as part of the preceding voice message:\n" +
+                  "<voice-continuation>\n" + text + "\n</voice-continuation>")
+              case None =>
+                s"No additional speech arrived within ${waitMs.toInt} milliseconds. " +
+                  "Treat the preceding voice message as complete and continue."
+          }
         }
-      }
 
   bb.agents.registerTool(
     js.Dynamic.literal(
@@ -433,16 +537,6 @@ def plugin(bb: BbApi): Unit =
       }
     )
   )
-
-  def publishSignal(signalType: String, sessionId: String, threadId: String, extra: (String, js.Any)*): Unit =
-    val payload = js.Dynamic.literal(
-      "type"      -> signalType,
-      "sessionId" -> sessionId,
-      "threadId"  -> threadId,
-      "eventId"   -> state.nextEventId()
-    )
-    extra.foreach((name, value) => payload.updateDynamic(name)(value))
-    bb.realtime.publish("converse", payload)
 
   def assistantMessagesFromTimeline(timeline: js.Dynamic): Vector[AssistantMessage] =
     def array(value: js.Dynamic): Vector[js.Dynamic] =
@@ -800,7 +894,7 @@ def plugin(bb: BbApi): Unit =
         state.active.foreach { old =>
           if old.sessionId != sessionId then publishSignal("revoked", old.sessionId, old.threadId)
         }
-        state.active = Some(ActiveSession(sessionId, threadId))
+        activate(Some(ActiveSession(sessionId, threadId)))
         state.awaiting.filterInPlace((_, reply) => reply.sessionId == sessionId)
         state.continuationWaiters.expireAll()
         bb.log.info(s"voice session $sessionId started for thread $threadId")
@@ -818,7 +912,7 @@ def plugin(bb: BbApi): Unit =
       "stopSession" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val sessionId = str(input.sessionId)
         if state.active.exists(_.sessionId == sessionId) then
-          state.active = None
+          activate(None)
           state.capturingFor = None
         state.awaiting.filterInPlace((_, reply) => reply.sessionId != sessionId)
         state.continuationWaiters.expireAll()
@@ -834,7 +928,7 @@ def plugin(bb: BbApi): Unit =
         else
           def submissionDone[A](outcome: Future[A]): Future[A] =
             outcome.andThen { case _ => state.capturingFor = None }
-          if threadId.nonEmpty then state.active = state.active.map(_.copy(threadId = threadId))
+          if threadId.nonEmpty then activate(state.active.map(_.copy(threadId = threadId)))
           val diagnosticContext =
             if threadId.nonEmpty then s"final thread=$threadId request=${state.nextEventId()}"
             else s"final project=$projectId request=${state.nextEventId()}"
@@ -874,7 +968,7 @@ def plugin(bb: BbApi): Unit =
                   .map { thread =>
                     val newThreadId = str(thread.id)
                     bb.log.info(s"started thread $newThreadId in project $projectId by voice")
-                    state.active = state.active.map(_.copy(threadId = newThreadId))
+                    activate(state.active.map(_.copy(threadId = newThreadId)))
                     state.awaiting.update(newThreadId, AwaitingReply(sessionId, None))
                     js.Dynamic.literal("text" -> text, "sent" -> true, "threadId" -> newThreadId)
                   }
@@ -940,9 +1034,7 @@ def plugin(bb: BbApi): Unit =
           val threadId =
             if requestedThreadId.nonEmpty then requestedThreadId
             else state.active.map(_.threadId).getOrElse("unknown")
-          state.active = state.active.map { active =>
-            if requestedThreadId.nonEmpty then active.copy(threadId = requestedThreadId) else active
-          }
+          if requestedThreadId.nonEmpty then activate(state.active.map(_.copy(threadId = requestedThreadId)))
           val diagnosticContext = s"preview thread=$threadId request=${state.nextEventId()}"
           transcribeAudio(
             str(input.mimeType),
@@ -1230,7 +1322,7 @@ def plugin(bb: BbApi): Unit =
   )
 
   bb.onDispose { () =>
-    state.active = None
+    activate(None)
     state.awaiting.clear()
     state.continuationWaiters.expireAll()
     ()

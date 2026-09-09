@@ -23,6 +23,12 @@ object Widget:
     "error"        -> "Voice error"
   )
 
+  private val waitingLabels = Map(
+    "tool"            -> "Running a tool…",
+    "generating"      -> "Writing…",
+    "awaiting-speech" -> "Listening for more…"
+  )
+
   private val phaseColors = Map(
     "starting"     -> "var(--muted-foreground, #888)",
     "listening"    -> "var(--success, #22c55e)",
@@ -120,6 +126,7 @@ object Widget:
       val composeSurface = snap.composeSurface.asInstanceOf[Boolean]
       val newThreadProjectName = snap.newThreadProjectDisplayName.asInstanceOf[String | Null]
       val error          = snap.error.asInstanceOf[String | Null]
+      val activity       = snap.activity.asInstanceOf[String | Null]
 
       val color = phaseColors.getOrElse(phase, "var(--muted-foreground, #888)")
       button.style.color = if active then color else "var(--muted-foreground, #888)"
@@ -135,7 +142,10 @@ object Widget:
       button.disabled = !active && viewed == null && !composeSurface
 
       label.style.color = color
-      label.textContent = if active then phaseLabels.getOrElse(phase, phase) else "Voice"
+      label.textContent =
+        if !active then "Voice"
+        else if phase == "waiting" && activity != null then waitingLabels.getOrElse(activity, phaseLabels(phase))
+        else phaseLabels.getOrElse(phase, phase)
 
       idleNote.style.display = if !active && error != null then "block" else "none"
       if !active && error != null then idleNote.textContent = error

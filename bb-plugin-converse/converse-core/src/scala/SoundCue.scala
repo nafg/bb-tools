@@ -69,6 +69,30 @@ enum SoundCue(val settingKey: String, val label: String, val sound: ToneSound, v
     ToneSound(List(ToneNote(129, 0.886, 0.345, 0.02, harmonic2 = 0.1, pinkNoise = 0.37, lowpassHz = Some(2000)))),
     Some(Repeat(leadInMs = 2857, intervalMs = 2857))
   )
+  // Variations of Thinking: the same texture at double rate, and brighter.
+  case ToolRunning extends SoundCue(
+    "cueToolRunning",
+    "Running a tool (repeating pulse)",
+    ToneSound(List(ToneNote(129, 0.886, 0.345, 0.02, harmonic2 = 0.1, pinkNoise = 0.37, lowpassHz = Some(2000)))),
+    Some(Repeat(leadInMs = 1428, intervalMs = 1428))
+  )
+  case Generating extends SoundCue(
+    "cueGenerating",
+    "Writing the reply (repeating pulse)",
+    ToneSound(List(ToneNote(129, 0.886, 0.345, 0.02, harmonic2 = 0.3, pinkNoise = 0.37, lowpassHz = Some(2000)))),
+    Some(Repeat(leadInMs = 2857, intervalMs = 2857))
+  )
+  case AwaitingSpeech extends SoundCue(
+    "cueAwaitingSpeech",
+    "Listening for more speech",
+    ToneSound(
+      List(
+        ToneNote(129, 0.3, 0.1, 0.02, harmonic2 = 0.1, pinkNoise = 0.37, lowpassHz = Some(2000)),
+        ToneNote(258, 0.4, 0.1, 0.02, harmonic2 = 0.1, pinkNoise = 0.37, lowpassHz = Some(2000))
+      )
+    ),
+    None
+  )
 
 object SoundCue:
   /** The chime for a phase change, if any. `stoppedByUser` distinguishes a
@@ -83,8 +107,13 @@ object SoundCue:
         Some(if stoppedByUser then StoppedByUser else EndedUnexpectedly)
       case _ => None
 
-  /** The pulse that repeats for as long as the session is in `phase`. */
-  def repeatingIn(phase: String): Option[SoundCue] = phase match
-    case "transcribing" => Some(Transcribing)
-    case "waiting"      => Some(Thinking)
-    case _              => None
+  /** The pulse that repeats for as long as the session is in `phase` with the
+    * agent in `activity`; none while it is listening for more speech.
+    */
+  def repeatingIn(phase: String, activity: Option[AgentActivity]): Option[SoundCue] = (phase, activity) match
+    case ("transcribing", _)                               => Some(Transcribing)
+    case ("waiting", Some(AgentActivity.Tool))             => Some(ToolRunning)
+    case ("waiting", Some(AgentActivity.Generating))       => Some(Generating)
+    case ("waiting", Some(AgentActivity.AwaitingSpeech))   => None
+    case ("waiting", Some(AgentActivity.Reasoning) | None) => Some(Thinking)
+    case _                                                 => None
