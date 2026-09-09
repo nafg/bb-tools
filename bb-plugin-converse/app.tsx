@@ -537,6 +537,7 @@ export default definePluginApp((app) => {
     mount({ experimental_setThreadRowStatus }) {
       const ctl = getController();
       const unmountWidget = ctl.mountWidget();
+      ctl.resumeInterruptedSession();
       // Badge the routing target's sidebar row while a session is active
       // (feature-detected: older bb clients lack the setter).
       // Two independent badges: a mic on the routing target, and a speaker on

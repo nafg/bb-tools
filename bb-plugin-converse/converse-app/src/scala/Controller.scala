@@ -230,13 +230,35 @@ final class Controller(
     val _ = audioContext.resume()
     cues.ensureReady()
 
+  private val RestoreIntentKey = "converse.voiceSessionRestore"
+
+  private def restoreStorage: js.Dynamic = js.Dynamic.global.window.sessionStorage
+
+  private def rememberForRestore(intent: VoiceSessionRestore.Intent): Unit =
+    val _ = restoreStorage.setItem(RestoreIntentKey, VoiceSessionRestore.encode(intent))
+
+  private def forgetRestore(): Unit =
+    val _ = restoreStorage.removeItem(RestoreIntentKey)
+
+  private def storedRestoreIntent: Option[VoiceSessionRestore.Intent] =
+    Option(restoreStorage.getItem(RestoreIntentKey).asInstanceOf[String]).flatMap(VoiceSessionRestore.decode)
+
   def start(newThreadId: String, opts: js.Dynamic): Unit =
-    stopInternal(notifyServer = true)
+    startSession(js.Dynamic.global.crypto.randomUUID().asInstanceOf[String], newThreadId, opts)
+
+  /** Bring back the session a previous frontend generation was unloaded under. */
+  def resumeInterruptedSession(): Unit =
+    storedRestoreIntent.foreach { intent =>
+      debug(s"resuming session ${intent.sessionId} after the frontend was reloaded")
+      startSession(intent.sessionId, intent.threadId.orNull, js.JSON.parse(intent.startOptionsJson))
+    }
+
+  private def startSession(sess: String, newThreadId: String, opts: js.Dynamic): Unit =
+    stopInternal(VoiceSessionRestore.SessionEnd.Superseded)
     // Created synchronously inside the click's user gesture: an AudioContext
     // created after an await can start (and stay) suspended under autoplay
     // policies, which reads as permanent silence.
     ensureAudioContext()
-    val sess = js.Dynamic.global.crypto.randomUUID().asInstanceOf[String]
     sessionId = sess
     threadId = newThreadId
     errorNote = null
@@ -244,6 +266,7 @@ final class Controller(
     interimText = null
     utteranceRoute = null
     lastEventId = null
+    rememberForRestore(VoiceSessionRestore.Intent(sess, Option(newThreadId), js.JSON.stringify(opts)))
     val ttsMode = opts.ttsMode.asInstanceOf[js.UndefOr[String]].getOrElse("browser")
     player.setTtsMode(ttsMode)
     speechProbabilityThreshold = opts.speechProbabilityThreshold
@@ -282,8 +305,7 @@ final class Controller(
       case Failure(e)             =>
         debug(s"start failed: ${e.getMessage}")
         errorNote = s"could not start voice: ${e.getMessage}"
-        sessionId = null
-        threadId = null
+        endSession(VoiceSessionRestore.SessionEnd.Failed)
         closeAudioContext()
         setPhase("error")
     }
@@ -333,14 +355,23 @@ final class Controller(
         case Failure(e) if sessionId == sess =>
           debug(s"speech detector failed to start: ${e.getMessage}")
           errorNote = s"could not start speech detection: ${e.getMessage}"
-          stopInternal(notifyServer = true)
+          stopInternal(VoiceSessionRestore.SessionEnd.Failed)
           setPhase("error")
         case Failure(_) => ()
       }
 
   def stop(): Unit =
     debug("stopped by user")
-    stopInternal(notifyServer = true)
+    stopInternal(VoiceSessionRestore.SessionEnd.StoppedByUser)
+    errorNote = null
+    setPhase("idle")
+
+  /** End the session because the plugin's frontend is unloading; the next
+    * frontend generation resumes it.
+    */
+  def teardown(): Unit =
+    debug("frontend unloading; the session resumes on the next mount")
+    stopInternal(VoiceSessionRestore.SessionEnd.FrontendUnloaded)
     errorNote = null
     setPhase("idle", stoppedByUser = true)
 
@@ -357,7 +388,7 @@ final class Controller(
       player.setAudioContext(null)
       ctx.close().toFuture.failed.foreach(_ => ())
 
-  private def stopInternal(notifyServer: Boolean): Unit =
+  private def stopInternal(end: VoiceSessionRestore.SessionEnd): Unit =
     if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
     player.stop()
     replyHeld = false
@@ -374,12 +405,16 @@ final class Controller(
     interimText = null
     utteranceRoute = null
     currentSpeechProbability = 0.0
+    endSession(end)
+
+  private def endSession(end: VoiceSessionRestore.SessionEnd): Unit =
     if sessionId != null then
       val sess = sessionId
       sessionId = null
       threadId = null
-      if notifyServer then
+      if end.notifiesServer then
         rpcCall("stopSession", js.Dynamic.literal("sessionId" -> sess)).toFuture.failed.foreach(_ => ())
+      if !end.keepsIntent then forgetRestore()
 
   // ------------------------------------------------------- speech detection
 
@@ -696,7 +731,7 @@ final class Controller(
           case "revoked" =>
             // Another tab/session took over; tear down without racing it.
             debug("session revoked by another window")
-            stopInternal(notifyServer = false)
+            stopInternal(VoiceSessionRestore.SessionEnd.TakenOverByAnotherWindow)
             errorNote = "voice was taken over by another window"
             setPhase("idle")
           case _ => ()
@@ -746,6 +781,7 @@ def createController(deps: js.Dynamic): js.Dynamic =
     "teardown"    -> js.Any.fromFunction0(() => ctl.teardown()),
     "previewCue"  -> js.Any.fromFunction1((settingKey: String) => ctl.previewCue(settingKey)),
     "soundCues"   -> SoundCue.values.map(cue => js.Dynamic.literal("key" -> cue.settingKey, "label" -> cue.label)).toJSArray,
+    "resumeInterruptedSession" -> js.Any.fromFunction0(() => ctl.resumeInterruptedSession()),
     "configure"   -> js.Any.fromFunction1((opts: js.Dynamic) => ctl.configure(opts)),
     "replay"      -> js.Any.fromFunction2((text: String, threadId: String) => ctl.replay(text, threadId).toJSPromise),
     "handleSignal" -> js.Any.fromFunction1((p: js.Any) => ctl.handleSignal(p)),

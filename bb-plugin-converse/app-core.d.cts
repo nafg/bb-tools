@@ -60,12 +60,14 @@ export interface ConverseController {
   /** Start a session targeting the thread currently in view. */
   startViewed(): void;
   stop(): void;
-  /** End the session because the plugin is unloading, not because the user asked. */
-  teardown(): void;
   /** Play one sound cue on demand, ignoring whether it is enabled. */
   previewCue(settingKey: string): void;
   /** Every sound cue, in display order. */
   soundCues: { key: string; label: string }[];
+  /** End the session because the plugin's frontend is unloading; the next mount resumes it. */
+  teardown(): void;
+  /** Bring back the session a previous frontend generation was unloaded under. */
+  resumeInterruptedSession(): void;
   /** Store the effective settings used by startViewed. */
   configure(opts: ConverseStartOptions): void;
   /** Speak text without starting or advancing a voice session. */
