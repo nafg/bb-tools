@@ -121,12 +121,15 @@ function PendingVoiceTranscript() {
   );
 }
 
-// On the New thread screen there is no thread to route to. While mounted, it
-// tells the controller to start a new thread in the selected project from the
-// next utterance, and it hosts the live transcript the thread banner would
-// otherwise show. It also receives realtime signals, since the thread-scoped
-// bridge is not mounted here.
-function NewThreadVoiceSection({ projectId }: { projectId: string | null }) {
+// Banner on the New thread composer, where there is no thread to route to.
+// While mounted it tells the controller to start a new thread in the
+// composer's selected project from the next utterance, and it hosts the live
+// transcript the thread banner would otherwise show. It also receives
+// realtime signals, since the thread-scoped bridge is not mounted here.
+function NewThreadVoiceBanner() {
+  const view = useComposerView();
+  const projectId = view.scope.kind === "new-thread" ? view.scope.projectId : null;
+  const sidebar = experimental_useSidebarThreads();
   const ctl = getController();
   const navigate = useBbNavigate();
   const state = useSyncExternalStore(ctl.subscribe, ctl.getSnapshot);
@@ -139,18 +142,19 @@ function NewThreadVoiceSection({ projectId }: { projectId: string | null }) {
     return () => ctl.leaveComposeSurface();
   }, [ctl, projectId]);
 
+  const projectName = sidebar.projects.find((project) => project.id === projectId)?.name ?? projectId;
   const guidance =
-    state.phase === "idle"
-      ? "Turn on voice and speak to start a new thread here."
-      : projectId === null
-        ? "Pick a project; speech has nowhere to go until you do."
-        : "Speaking starts a new thread in this project.";
+    projectId === null
+      ? "Voice: pick a project, then speaking starts a new thread in it."
+      : state.phase === "idle"
+        ? `Voice: turn on the microphone and speak to start a new thread in ${projectName}.`
+        : `Voice: speaking starts a new thread in ${projectName}.`;
   const live = state.error ?? state.interim;
   return (
-    <div className="space-y-1 text-xs">
+    <div className="w-full min-w-0 space-y-1 px-2 py-1 text-xs">
       <p className="text-muted-foreground">{guidance}</p>
       {live && (
-        <p aria-live="polite" className={state.error ? "text-destructive" : "italic text-foreground"}>
+        <p aria-live="polite" className={"break-words " + (state.error ? "text-destructive" : "italic text-foreground")}>
           {live}
         </p>
       )}
@@ -470,11 +474,6 @@ function ThreadVoicePicker({ threadId }: { threadId: string }) {
 }
 
 export default definePluginApp((app) => {
-  app.slots.homepageSection({
-    id: "new-thread-voice",
-    title: "Voice",
-    component: NewThreadVoiceSection,
-  });
   app.slots.settingsSection({
     id: "tts-provider",
     title: "Text-to-speech providers",
@@ -536,6 +535,11 @@ export default definePluginApp((app) => {
       { id: "bridge", chrome: "bare", component: VoiceBridge },
       { id: "pending-transcript", chrome: "bare", component: PendingVoiceTranscript },
     ],
+  });
+  app.composer.customize({
+    id: "new-thread-voice",
+    scopes: ["new-thread"],
+    banners: [{ id: "new-thread-voice", chrome: "bare", component: NewThreadVoiceBanner }],
   });
   // Native fallback toggle: always registered, but Widget.scala hides it
   // (matching this title) while the injected widget is anchored, so it only
