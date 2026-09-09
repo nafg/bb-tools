@@ -85,8 +85,26 @@ function VoiceBridge() {
     const endOfSpeechSilenceMs = Number.parseFloat(
       typeof values.endOfSpeechSilenceMs === "string" ? values.endOfSpeechSilenceMs : "3000",
     );
+    const numberSetting = (key: string, fallback: number, ok: (n: number) => boolean) => {
+      const parsed = Number.parseFloat(typeof values[key] === "string" ? values[key] : "");
+      return Number.isFinite(parsed) && ok(parsed) ? parsed : fallback;
+    };
     ctl.configure({
       ttsMode: values.ttsProvider === "browser" || values.ttsProvider === undefined ? "browser" : "server",
+      soundCues: {
+        enabled: ctl.soundCues.map((cue) => cue.key).filter((key) => values[key] !== false),
+        volume: numberSetting("cueVolume", 0.5, (n) => n >= 0 && n <= 1),
+        repeats: {
+          cueTranscribing: {
+            leadInMs: numberSetting("cueTranscribingLeadInMs", 1000, (n) => n >= 0),
+            intervalMs: numberSetting("cueTranscribingIntervalMs", 330, (n) => n >= 100),
+          },
+          cueThinking: {
+            leadInMs: numberSetting("cueThinkingLeadInMs", 2857, (n) => n >= 0),
+            intervalMs: numberSetting("cueThinkingIntervalMs", 2857, (n) => n >= 300),
+          },
+        },
+      },
       speechProbabilityThreshold:
         Number.isFinite(speechProbabilityThreshold) &&
         speechProbabilityThreshold > 0.05 &&
@@ -427,6 +445,28 @@ function TtsProviderSettingsSection() {
   );
 }
 
+// Auditions each cue; which cues sound, their volume, and the repeat periods
+// are ordinary plugin settings in the form above this section.
+function SoundCueSettingsSection() {
+  const ctl = getController();
+  return (
+    <div className="grid gap-1 sm:grid-cols-2">
+      {ctl.soundCues.map((cue) => (
+        <div key={cue.key} className="flex items-center justify-between gap-2 rounded border px-2 py-1 text-sm">
+          <span className="truncate">{cue.label}</span>
+          <button
+            type="button"
+            className="rounded px-2 py-1 text-xs hover:bg-muted"
+            onClick={() => ctl.previewCue(cue.key)}
+          >
+            Preview
+          </button>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 type ThreadVoiceState = { enabled: boolean; provider: string; voice: string | null; voices: VoiceChoice[] };
 
 function ThreadVoicePicker({ threadId }: { threadId: string }) {
@@ -481,6 +521,12 @@ export default definePluginApp((app) => {
     description: "Configure every provider, its default voice, and the voices available across threads.",
     component: TtsProviderSettingsSection,
   });
+  app.slots.settingsSection({
+    id: "sound-cues",
+    title: "Sound cues",
+    description: "Tones that mark what the voice session is doing. Enable each one and set the volume in the settings above.",
+    component: SoundCueSettingsSection,
+  });
   app.slots.experimental_threadHeaderAction({
     id: "thread-voice",
     title: "Thread voice",
@@ -524,7 +570,7 @@ export default definePluginApp((app) => {
         if (experimental_setThreadRowStatus)
           for (const id of marked.keys()) experimental_setThreadRowStatus(id, null);
         unmountWidget();
-        controller?.stop();
+        controller?.teardown();
         controller = null;
       };
     },

@@ -203,6 +203,61 @@ def plugin(bb: BbApi): Unit =
         "type"    -> "string",
         "label"   -> "AGENT: maximum time to wait for continued speech (milliseconds)",
         "default" -> "8000"
+      ),
+      "cueVolume" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "SOUND CUES: volume (0–1)",
+        "default" -> "0.5"
+      ),
+      "cueTranscribingLeadInMs" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "SOUND CUES: silence before the transcribing taps begin (milliseconds)",
+        "default" -> "1000"
+      ),
+      "cueTranscribingIntervalMs" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "SOUND CUES: transcribing tap period (milliseconds)",
+        "default" -> "330"
+      ),
+      "cueThinkingLeadInMs" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "SOUND CUES: silence before the thinking pulse begins (milliseconds)",
+        "default" -> "2857"
+      ),
+      "cueThinkingIntervalMs" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "SOUND CUES: thinking pulse period (milliseconds)",
+        "default" -> "2857"
+      ),
+      "cueSessionStarted" -> js.Dynamic.literal(
+        "type"    -> "boolean",
+        "label"   -> "SOUND CUES: session started",
+        "default" -> true
+      ),
+      "cueReplyStarting" -> js.Dynamic.literal(
+        "type"    -> "boolean",
+        "label"   -> "SOUND CUES: reply starting",
+        "default" -> true
+      ),
+      "cueStoppedByUser" -> js.Dynamic.literal(
+        "type"    -> "boolean",
+        "label"   -> "SOUND CUES: stopped by you",
+        "default" -> true
+      ),
+      "cueEndedUnexpectedly" -> js.Dynamic.literal(
+        "type"    -> "boolean",
+        "label"   -> "SOUND CUES: ended unexpectedly",
+        "default" -> true
+      ),
+      "cueTranscribing" -> js.Dynamic.literal(
+        "type"    -> "boolean",
+        "label"   -> "SOUND CUES: transcribing (repeating tap)",
+        "default" -> true
+      ),
+      "cueThinking" -> js.Dynamic.literal(
+        "type"    -> "boolean",
+        "label"   -> "SOUND CUES: thinking (repeating pulse)",
+        "default" -> true
       )
     )
   )

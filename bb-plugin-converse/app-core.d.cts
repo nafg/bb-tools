@@ -39,10 +39,20 @@ export interface ConverseSnapshot {
   speechProbabilityThreshold: number;
 }
 
+export interface SoundCueOptions {
+  /** Setting keys of the cues that may sound. */
+  enabled: string[];
+  /** Master gain, 0–1. */
+  volume: number;
+  /** Per repeating cue, by setting key: silence before the first sound, then the period. */
+  repeats: Record<string, { leadInMs: number; intervalMs: number }>;
+}
+
 export interface ConverseStartOptions {
   ttsMode: "browser" | "server";
   speechProbabilityThreshold: number;
   endOfSpeechSilenceMs: number;
+  soundCues?: SoundCueOptions;
 }
 
 export interface ConverseController {
@@ -50,6 +60,12 @@ export interface ConverseController {
   /** Start a session targeting the thread currently in view. */
   startViewed(): void;
   stop(): void;
+  /** End the session because the plugin is unloading, not because the user asked. */
+  teardown(): void;
+  /** Play one sound cue on demand, ignoring whether it is enabled. */
+  previewCue(settingKey: string): void;
+  /** Every sound cue, in display order. */
+  soundCues: { key: string; label: string }[];
   /** Store the effective settings used by startViewed. */
   configure(opts: ConverseStartOptions): void;
   /** Speak text without starting or advancing a voice session. */

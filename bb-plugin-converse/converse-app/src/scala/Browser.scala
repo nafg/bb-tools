@@ -23,9 +23,17 @@ class AudioContext extends js.Object:
   def createMediaStreamSource(stream: MediaStream): AudioNode = js.native
   def createDelay(maxDelayTime: Double): DelayNode            = js.native
   def createMediaStreamDestination(): MediaStreamAudioDestinationNode = js.native
+  def createOscillator(): OscillatorNode                      = js.native
+  def createGain(): GainNode                                  = js.native
+  def createBiquadFilter(): BiquadFilterNode                  = js.native
+  def createBuffer(channels: Int, length: Int, sampleRate: Double): AudioBuffer = js.native
+  def createBufferSource(): AudioBufferSourceNode             = js.native
+  val sampleRate: Double                                      = js.native
   def close(): js.Promise[Unit]                               = js.native
   def resume(): js.Promise[Unit]                              = js.native
   val state: String                                           = js.native
+  val currentTime: Double                                     = js.native
+  val destination: AudioNode                                  = js.native
 
 @js.native
 trait AudioNode extends js.Object:
@@ -33,7 +41,38 @@ trait AudioNode extends js.Object:
 
 @js.native
 trait AudioParam extends js.Object:
-  var value: Double = js.native
+  var value: Double                                                  = js.native
+  def setValueAtTime(value: Double, startTime: Double): AudioParam   = js.native
+  def linearRampToValueAtTime(value: Double, endTime: Double): AudioParam = js.native
+  def cancelScheduledValues(startTime: Double): AudioParam           = js.native
+
+@js.native
+trait GainNode extends AudioNode:
+  val gain: AudioParam = js.native
+
+@js.native
+trait AudioScheduledSourceNode extends AudioNode:
+  def start(when: Double): Unit                = js.native
+  def stop(when: Double): Unit                 = js.native
+  var onended: js.Function1[js.Dynamic, Unit]  = js.native
+
+@js.native
+trait OscillatorNode extends AudioScheduledSourceNode:
+  val frequency: AudioParam = js.native
+
+@js.native
+trait AudioBuffer extends js.Object:
+  def getChannelData(channel: Int): scala.scalajs.js.typedarray.Float32Array = js.native
+
+@js.native
+trait AudioBufferSourceNode extends AudioScheduledSourceNode:
+  var buffer: AudioBuffer = js.native
+  var loop: Boolean       = js.native
+
+@js.native
+trait BiquadFilterNode extends AudioNode:
+  var `type`: String        = js.native
+  val frequency: AudioParam = js.native
 
 @js.native
 trait DelayNode extends AudioNode:

@@ -78,6 +78,7 @@ final class Controller(
 
   // Playback is tab-wide rather than part of the voice-session state machine.
   private val player = new Player(rpcCall, () => refreshSnapshot())
+  private val cues   = new SoundCuePlayer
   private var replyHeld: Boolean = false
 
   // React 18 external-store contract: a stable snapshot object per change.
@@ -120,10 +121,12 @@ final class Controller(
     )
     listeners.foreach(_())
 
-  private def setPhase(next: String): Unit =
+  private def setPhase(next: String, stoppedByUser: Boolean = false): Unit =
     if phase != next then
       debug(s"phase: $phase -> $next")
+      val previous = phase
       phase = next
+      cues.onPhase(previous, next, stoppedByUser)
       refreshSnapshot()
       syncReplyHold()
 
@@ -182,6 +185,24 @@ final class Controller(
   def configure(opts: js.Dynamic): Unit =
     startOptions = opts
     player.setTtsMode(opts.ttsMode.asInstanceOf[js.UndefOr[String]].getOrElse("browser"))
+    val soundCues = opts.soundCues.asInstanceOf[js.UndefOr[js.Dynamic]]
+    soundCues.foreach { sc =>
+      val enabledKeys = sc.enabled.asInstanceOf[js.Array[String]].toSet
+      val repeats     = sc.repeats.asInstanceOf[js.Dictionary[js.Dynamic]]
+      cues.configure(
+        enabledCues = SoundCue.values.filter(cue => enabledKeys.contains(cue.settingKey)).toSet,
+        masterVolume = sc.volume.asInstanceOf[Double],
+        repeatOverrides = SoundCue.values.flatMap { cue =>
+          repeats.get(cue.settingKey).map { r =>
+            cue -> Repeat(r.leadInMs.asInstanceOf[Int], r.intervalMs.asInstanceOf[Int])
+          }
+        }.toMap
+      )
+    }
+
+  /** Plays one cue on demand, ignoring whether it is enabled. */
+  def previewCue(settingKey: String): Unit =
+    SoundCue.values.find(_.settingKey == settingKey).foreach(cues.preview)
 
   /** Start a session targeting the thread currently in view. */
   def startViewed(): Unit =
@@ -207,6 +228,7 @@ final class Controller(
       audioContext = new AudioContext
       player.setAudioContext(audioContext)
     val _ = audioContext.resume()
+    cues.ensureReady()
 
   def start(newThreadId: String, opts: js.Dynamic): Unit =
     stopInternal(notifyServer = true)
@@ -320,6 +342,12 @@ final class Controller(
     debug("stopped by user")
     stopInternal(notifyServer = true)
     errorNote = null
+    setPhase("idle", stoppedByUser = true)
+
+  /** Ends the session because the plugin is unloading, not because the user asked. */
+  def teardown(): Unit =
+    debug("torn down")
+    stopInternal(notifyServer = true)
     setPhase("idle")
 
   private def closeAudioContext(): Unit =
@@ -715,6 +743,9 @@ def createController(deps: js.Dynamic): js.Dynamic =
     "start"       -> js.Any.fromFunction2((threadId: String, opts: js.Dynamic) => ctl.start(threadId, opts)),
     "startViewed" -> js.Any.fromFunction0(() => ctl.startViewed()),
     "stop"        -> js.Any.fromFunction0(() => ctl.stop()),
+    "teardown"    -> js.Any.fromFunction0(() => ctl.teardown()),
+    "previewCue"  -> js.Any.fromFunction1((settingKey: String) => ctl.previewCue(settingKey)),
+    "soundCues"   -> SoundCue.values.map(cue => js.Dynamic.literal("key" -> cue.settingKey, "label" -> cue.label)).toJSArray,
     "configure"   -> js.Any.fromFunction1((opts: js.Dynamic) => ctl.configure(opts)),
     "replay"      -> js.Any.fromFunction2((text: String, threadId: String) => ctl.replay(text, threadId).toJSPromise),
     "handleSignal" -> js.Any.fromFunction1((p: js.Any) => ctl.handleSignal(p)),
