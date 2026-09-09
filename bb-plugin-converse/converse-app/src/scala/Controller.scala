@@ -370,7 +370,7 @@ final class Controller(
     debug("stopped by user")
     stopInternal(VoiceSessionRestore.SessionEnd.StoppedByUser)
     errorNote = null
-    setPhase("idle")
+    setPhase("idle", stoppedByUser = true)
 
   private def pauseUntilUserGesture(): Unit =
     debug("audio context still suspended; pausing until the user clicks")
@@ -385,12 +385,6 @@ final class Controller(
     debug("frontend unloading; the session resumes on the next mount")
     stopInternal(VoiceSessionRestore.SessionEnd.FrontendUnloaded)
     errorNote = null
-    setPhase("idle", stoppedByUser = true)
-
-  /** Ends the session because the plugin is unloading, not because the user asked. */
-  def teardown(): Unit =
-    debug("torn down")
-    stopInternal(notifyServer = true)
     setPhase("idle")
 
   private def closeAudioContext(): Unit =
