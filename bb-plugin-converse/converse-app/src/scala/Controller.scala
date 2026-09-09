@@ -397,6 +397,7 @@ final class Controller(
         case Some(route) =>
           utteranceRoute = route
           captureActive = true
+          noteCapture(active = true)
           utteranceSeq += 1
           interimText = null
           interimAccum = ""
@@ -413,10 +414,27 @@ final class Controller(
           }
 
   private def abandonCapture(): Unit =
+    if captureActive then noteCapture(active = false)
     captureActive = false
     if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
     stopPreviewRecorder()
     debug("capture discarded")
+
+  /** Tell the backend an utterance is being captured for the latched route, so
+    * an agent waiting for more speech keeps waiting. A capture that ends in a
+    * submission stays active server-side until that submission completes.
+    */
+  private def noteCapture(active: Boolean): Unit =
+    val sess = sessionId
+    if sess != null then
+      rpcCall(
+        "captureState",
+        js.Dynamic.literal(
+          "sessionId" -> sess,
+          "threadId"  -> (if utteranceRoute != null then utteranceRoute.existingThreadId.orNull else null),
+          "active"    -> active
+        )
+      ).toFuture.failed.foreach(_ => ())
 
   private def evidenceToJs(evidence: SpeechDetectorEvidence): js.Dynamic =
     js.Dynamic.literal(

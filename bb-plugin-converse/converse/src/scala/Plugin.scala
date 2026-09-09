@@ -8,6 +8,7 @@ import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.annotation.JSExportTopLevel
+import scala.util.chaining.*
 
 given ExecutionContext = ExecutionContext.parasitic
 
@@ -61,6 +62,9 @@ private final case class AwaitingReply(sessionId: String, previousAssistantMessa
 private final class State:
   var active: Option[ActiveSession]     = None
   val awaiting: mutable.Map[String, AwaitingReply] = mutable.Map.empty // threadId -> pending voice reply
+  // The thread an utterance is currently being captured or submitted for;
+  // "" while it will start a new thread.
+  var capturingFor: Option[String] = None
   val continuationWaiters = ContinuationWaiters()
   private var eventCounter              = 0
   def nextEventId(): String =
@@ -303,10 +307,18 @@ def plugin(bb: BbApi): Unit =
           .filter(ms => ms >= 1000 && ms <= 30000)
           .getOrElse(8000.0)
         val waiting = state.continuationWaiters.begin(threadId)
-        val timer = js.Dynamic.global.setTimeout(
-          js.Any.fromFunction0(() => { val _ = state.continuationWaiters.expire(threadId) }),
-          waitMs
-        )
+        // The wait covers speech that has not started yet; speech already
+        // being captured is waited for to completion, however long it runs.
+        var timer: js.Dynamic = null
+        def scheduleExpiry(delayMs: Double): Unit =
+          timer = js.Dynamic.global.setTimeout(
+            js.Any.fromFunction0 { () =>
+              if state.capturingFor.contains(threadId) then scheduleExpiry(1000)
+              else { val _ = state.continuationWaiters.expire(threadId) }
+            },
+            delayMs
+          )
+        scheduleExpiry(waitMs)
         waiting.map { continuation =>
           val _ = js.Dynamic.global.clearTimeout(timer)
           continuation match
@@ -711,6 +723,10 @@ def plugin(bb: BbApi): Unit =
         "input"  -> Schema.stringsWithOptional(Seq("sessionId" -> 100), Seq("threadId" -> 100)),
         "output" -> Schema.passthrough
       ),
+      "captureState" -> js.Dynamic.literal(
+        "input"  -> Schema.stringsWithOptional(Seq("sessionId" -> 100), Seq("threadId" -> 100)),
+        "output" -> Schema.passthrough
+      ),
       "voiceSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "updateVoiceSettings" -> js.Dynamic.literal(
         "input" -> Schema.passthrough,
@@ -752,7 +768,9 @@ def plugin(bb: BbApi): Unit =
       },
       "stopSession" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val sessionId = str(input.sessionId)
-        if state.active.exists(_.sessionId == sessionId) then state.active = None
+        if state.active.exists(_.sessionId == sessionId) then
+          state.active = None
+          state.capturingFor = None
         state.awaiting.filterInPlace((_, reply) => reply.sessionId != sessionId)
         state.continuationWaiters.expireAll()
         js.Dynamic.literal("ok" -> true)
@@ -765,6 +783,8 @@ def plugin(bb: BbApi): Unit =
         if !state.active.exists(_.sessionId == sessionId) then rejected("voice session is no longer active")
         else if threadId.isEmpty == projectId.isEmpty then rejected("exactly one of threadId or projectId is required")
         else
+          def submissionDone[A](outcome: Future[A]): Future[A] =
+            outcome.andThen { case _ => state.capturingFor = None }
           if threadId.nonEmpty then state.active = state.active.map(_.copy(threadId = threadId))
           val diagnosticContext =
             if threadId.nonEmpty then s"final thread=$threadId request=${state.nextEventId()}"
@@ -839,7 +859,15 @@ def plugin(bb: BbApi): Unit =
                     }
                 }
             }
+            .pipe(submissionDone)
             .toJSPromise
+      },
+      "captureState" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val sessionId = str(input.sessionId)
+        if state.active.exists(_.sessionId == sessionId) then
+          val active = input.active.asInstanceOf[js.UndefOr[Boolean]].getOrElse(false)
+          state.capturingFor = if active then Some(str(input.threadId)) else None
+        js.Dynamic.literal("ok" -> true)
       },
       "reportDiscardedCapture" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val sessionId = str(input.sessionId)
