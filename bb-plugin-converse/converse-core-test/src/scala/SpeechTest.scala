@@ -26,6 +26,14 @@ class SpeechTest extends munit.FunSuite:
     val chunks = Speech.splitSpeechChunks("John F. Kennedy spoke.")
     assertEquals(chunks.map(_.text), List("John F. Kennedy spoke."))
 
+  test("speaks a period inside an identifier as 'dot' so TTS engines do not end the sentence there"):
+    val chunks = Speech.splitSpeechChunks("Call object.method from Widget.scala.")
+    assertEquals(chunks.map(_.text), List("Call object dot method from Widget dot scala."))
+
+  test("keeps periods in decimals and abbreviations"):
+    val chunks = Speech.splitSpeechChunks("Version 3.5 ships, e.g. at 9 a.m. in the U.S.")
+    assertEquals(chunks.map(_.text), List("Version 3.5 ships, e.g. at 9 a.m. in the U.S."))
+
   test("list items become one chunk per line"):
     val chunks = Speech.splitSpeechChunks("Steps:\n\n- First step\n- Second step")
     assertEquals(chunks.map(_.text), List("Steps:", "First step", "Second step"))

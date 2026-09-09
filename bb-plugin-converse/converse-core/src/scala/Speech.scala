@@ -18,6 +18,10 @@ object Speech:
   private val SingleInitial  = "^[A-Z]\\.$".r
   private val SentenceEnding = ".*[.!?]$".r
   private val ListLine       = "^\\s*(?:[-*+]\\s|\\d+\\.\\s).*".r
+  // A period joining word characters (object.method, Widget.scala). At least
+  // two characters must follow so decimals (3.5) and dotted abbreviations
+  // (e.g., a.m., U.S.) keep their periods.
+  private val IdentifierDot  = "([A-Za-z0-9_])\\.(?=[A-Za-z_][A-Za-z0-9_])".r
 
   // No (?m)/(?s) flags: Scala.js rejects MULTILINE and DOTALL on the default
   // ES target, so line anchors are handled by splitting instead.
@@ -39,6 +43,12 @@ object Speech:
       }
       .mkString("\n")
     out.trim
+
+  /** TTS engines end a sentence at every period, so speak the ones inside
+    * identifiers as the word "dot".
+    */
+  private def speakable(text: String): String =
+    IdentifierDot.replaceAllIn(text, "$1 dot ")
 
   private def splitSentences(text: String): List[String] =
     val words     = text.split("\\s+").toList.filter(_.nonEmpty)
@@ -66,13 +76,13 @@ object Speech:
         if isList then
           for line <- lines do
             val clean = stripMarkdown(line).trim
-            if clean.nonEmpty then chunks += SpeechChunk(clean, SentencePause)
+            if clean.nonEmpty then chunks += SpeechChunk(speakable(clean), SentencePause)
         else
           val clean    = stripMarkdown(paragraph)
           val fullText = clean.split("\n").map(_.trim).filter(_.nonEmpty).mkString(" ")
           for sentence <- splitSentences(fullText) do
             val trimmed = sentence.trim
-            if trimmed.nonEmpty then chunks += SpeechChunk(trimmed, SentencePause)
+            if trimmed.nonEmpty then chunks += SpeechChunk(speakable(trimmed), SentencePause)
         if paragraphIndex < paragraphs.length - 1 && chunks.nonEmpty then
           chunks(chunks.length - 1) = chunks.last.copy(pauseSeconds = ParagraphPause)
       if chunks.nonEmpty then chunks(chunks.length - 1) = chunks.last.copy(pauseSeconds = 0)
