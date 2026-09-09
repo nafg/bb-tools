@@ -18,11 +18,14 @@ class VoiceSessionRestoreTest extends munit.FunSuite:
     assertEquals(VoiceSessionRestore.decode("sess-1"), None)
     assertEquals(VoiceSessionRestore.decode("\nthread-a\n{}"), None)
 
-  test("only an unload the user did not ask for keeps the intent"):
-    assertEquals(SessionEnd.values.filter(_.keepsIntent).toList, List(SessionEnd.FrontendUnloaded))
+  test("only an end the user did not ask for and can undo by interacting keeps the intent"):
+    assertEquals(
+      SessionEnd.values.filter(_.keepsIntent).toList,
+      List(SessionEnd.PausedUntilUserGesture, SessionEnd.FrontendUnloaded)
+    )
 
-  test("an end the server already knows about, or must not learn of, is not reported to it"):
+  test("an end the server already knows about, or that the session will come back from, is not reported to it"):
     assertEquals(
       SessionEnd.values.filterNot(_.notifiesServer).toList,
-      List(SessionEnd.TakenOverByAnotherWindow, SessionEnd.FrontendUnloaded)
+      List(SessionEnd.TakenOverByAnotherWindow, SessionEnd.PausedUntilUserGesture, SessionEnd.FrontendUnloaded)
     )

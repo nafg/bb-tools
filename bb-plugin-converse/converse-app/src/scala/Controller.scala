@@ -23,8 +23,9 @@ final class Controller(
     createMicVad: js.Function1[js.Dynamic, js.Promise[js.Dynamic]],
     encodeWav: js.Function1[Float32Array, js.Any]
 ):
-  private val PreRollMs      = 500.0
-  private val MaxUtteranceMs = 60_000.0
+  private val PreRollMs         = 500.0
+  private val MaxUtteranceMs    = 60_000.0
+  private val AudioStartGraceMs = 1000.0
 
   // Session
   private var sessionId: String   = null
@@ -209,7 +210,7 @@ final class Controller(
     if viewedThread == null && composeSurface.isEmpty then
       errorNote = "open a thread first"
       refreshSnapshot()
-    else start(viewedThread, startOptions)
+    else startSession(storedRestoreIntent.map(_.sessionId).getOrElse(freshSessionId()), viewedThread, startOptions)
 
   private def currentTarget: String =
     if viewedThread != null then viewedThread else threadId
@@ -243,8 +244,10 @@ final class Controller(
   private def storedRestoreIntent: Option[VoiceSessionRestore.Intent] =
     Option(restoreStorage.getItem(RestoreIntentKey).asInstanceOf[String]).flatMap(VoiceSessionRestore.decode)
 
+  private def freshSessionId(): String = js.Dynamic.global.crypto.randomUUID().asInstanceOf[String]
+
   def start(newThreadId: String, opts: js.Dynamic): Unit =
-    startSession(js.Dynamic.global.crypto.randomUUID().asInstanceOf[String], newThreadId, opts)
+    startSession(freshSessionId(), newThreadId, opts)
 
   /** Bring back the session a previous frontend generation was unloaded under. */
   def resumeInterruptedSession(): Unit =
@@ -318,9 +321,12 @@ final class Controller(
       audioContext.resume().toFuture.onComplete { result =>
         val state = if audioContext == null then "closed" else audioContext.state
         debug(s"audio context state after resume: $state ($result)")
-        if state == "suspended" then
-          errorNote = "the browser blocked audio processing (suspended AudioContext)"
-          refreshSnapshot()
+      }
+      // Checked on a timer: a browser that wants a user gesture first leaves
+      // resume() pending rather than rejecting it.
+      val _ = setTimeout(AudioStartGraceMs) {
+        if sessionId == sess && audioContext != null && audioContext.state == "suspended" then
+          pauseUntilUserGesture()
       }
       recordingStream = PreRollRecordingStream.build(
         preRollMilliseconds = PreRollMs,
@@ -364,6 +370,12 @@ final class Controller(
     debug("stopped by user")
     stopInternal(VoiceSessionRestore.SessionEnd.StoppedByUser)
     errorNote = null
+    setPhase("idle")
+
+  private def pauseUntilUserGesture(): Unit =
+    debug("audio context still suspended; pausing until the user clicks")
+    stopInternal(VoiceSessionRestore.SessionEnd.PausedUntilUserGesture)
+    errorNote = "the browser paused voice until you click: click the microphone to resume"
     setPhase("idle")
 
   /** End the session because the plugin's frontend is unloading; the next

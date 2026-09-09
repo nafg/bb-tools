@@ -99,6 +99,10 @@ object Widget:
     newThreadTarget.style.cssText = "color:var(--muted-foreground, #888);overflow-wrap:anywhere;"
     val _ = pill.appendChild(newThreadTarget)
 
+    val idleNote = document.createElement("div")
+    idleNote.style.cssText = "color:var(--destructive, #ef4444);overflow-wrap:anywhere;"
+    val _ = pill.appendChild(idleNote)
+
     button.onclick = js.Any.fromFunction1 { (_: js.Any) =>
       val snap = ctl.getSnapshot()
       if snap.phase.asInstanceOf[String] != "idle" then ctl.stop() else ctl.startViewed()
@@ -132,6 +136,9 @@ object Widget:
 
       label.style.color = color
       label.textContent = if active then phaseLabels.getOrElse(phase, phase) else "Voice"
+
+      idleNote.style.display = if !active && error != null then "block" else "none"
+      if !active && error != null then idleNote.textContent = error
 
       meter.style.display = if active then "inline-block" else "none"
       if active then

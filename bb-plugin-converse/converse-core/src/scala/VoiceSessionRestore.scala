@@ -9,13 +9,15 @@ object VoiceSessionRestore:
   final case class Intent(sessionId: String, threadId: Option[String], startOptionsJson: String)
 
   enum SessionEnd:
-    case StoppedByUser, Superseded, Failed, TakenOverByAnotherWindow, FrontendUnloaded
+    case StoppedByUser, Superseded, Failed, TakenOverByAnotherWindow, PausedUntilUserGesture, FrontendUnloaded
 
     def notifiesServer: Boolean = this match
-      case TakenOverByAnotherWindow | FrontendUnloaded => false
-      case StoppedByUser | Superseded | Failed         => true
+      case TakenOverByAnotherWindow | PausedUntilUserGesture | FrontendUnloaded => false
+      case StoppedByUser | Superseded | Failed                                  => true
 
-    def keepsIntent: Boolean = this == FrontendUnloaded
+    def keepsIntent: Boolean = this match
+      case PausedUntilUserGesture | FrontendUnloaded                        => true
+      case StoppedByUser | Superseded | Failed | TakenOverByAnotherWindow => false
 
   private val FieldSeparator = "\n"
 
