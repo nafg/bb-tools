@@ -5,6 +5,7 @@ import {
   definePluginApp,
   experimental_useSidebarThreads,
   useBbContext,
+  useBbNavigate,
   useComposerView,
   useRealtime,
   useSettings,
@@ -43,8 +44,12 @@ function VoiceBridge() {
   const bbContext = useBbContext();
   const settings = useSettings();
   const sidebar = experimental_useSidebarThreads();
+  const navigate = useBbNavigate();
   const ctl = getController();
   useRealtime("converse", (payload) => ctl.handleSignal(payload));
+  useEffect(() => {
+    ctl.setNavigateToThread(navigate.toThread);
+  }, [ctl, navigate]);
   useEffect(() => {
     if (bbContext.threadId) ctl.noteViewed(bbContext.threadId);
   }, [ctl, bbContext.threadId]);

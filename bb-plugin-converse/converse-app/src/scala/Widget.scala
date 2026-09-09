@@ -78,13 +78,22 @@ object Widget:
     val _ = meter.appendChild(meterFill)
     val _ = row.appendChild(meter)
 
-    val speechTarget = document.createElement("div")
-    speechTarget.style.cssText = "color:var(--muted-foreground, #888);overflow-wrap:anywhere;"
-    val _ = pill.appendChild(speechTarget)
+    // "<caption> <thread name>" where the name opens the thread.
+    def threadReference(caption: String): (js.Dynamic, js.Dynamic) =
+      val line = document.createElement("div")
+      line.style.cssText = "color:var(--muted-foreground, #888);overflow-wrap:anywhere;"
+      val _ = line.appendChild(document.createTextNode(s"$caption "))
+      val link = document.createElement("button")
+      val _ = link.setAttribute("type", "button")
+      link.style.cssText =
+        "background:none;border:none;padding:0;font:inherit;color:inherit;" +
+          "text-decoration:underline;cursor:pointer;overflow-wrap:anywhere;text-align:left;"
+      val _ = line.appendChild(link)
+      val _ = pill.appendChild(line)
+      (line, link)
 
-    val speakingSource = document.createElement("div")
-    speakingSource.style.cssText = "color:var(--muted-foreground, #888);overflow-wrap:anywhere;"
-    val _ = pill.appendChild(speakingSource)
+    val (speechTarget, speechTargetLink)     = threadReference("Speech goes to:")
+    val (speakingSource, speakingSourceLink) = threadReference("Speaking from:")
 
     button.onclick = js.Any.fromFunction1 { (_: js.Any) =>
       val snap = ctl.getSnapshot()
@@ -127,17 +136,16 @@ object Widget:
           if speechProbability >= threshold then "var(--destructive, #ef4444)"
           else "var(--success, #22c55e)"
 
-      speechTarget.style.display = if active && target != null then "block" else "none"
-      if target != null then
-        val name = if targetName == null then target else targetName
-        speechTarget.textContent = s"Speech goes to: $name"
-        val _ = speechTarget.setAttribute("title", name)
+      def showReference(line: js.Dynamic, link: js.Dynamic, tid: String | Null, name: String | Null): Unit =
+        line.style.display = if tid != null then "block" else "none"
+        if tid != null then
+          val shown = if name == null then tid else name
+          link.textContent = shown
+          val _ = link.setAttribute("title", s"Open thread: $shown")
+          link.onclick = js.Any.fromFunction1((_: js.Any) => ctl.openThread(tid))
 
-      speakingSource.style.display = if speakingThread != null then "block" else "none"
-      if speakingThread != null then
-        val name = if speakingName == null then speakingThread else speakingName
-        speakingSource.textContent = s"Speaking from: $name"
-        val _ = speakingSource.setAttribute("title", name)
+      showReference(speechTarget, speechTargetLink, if active then target else null, targetName)
+      showReference(speakingSource, speakingSourceLink, speakingThread, speakingName)
 
     render()
     val unsubscribe = ctl.subscribe(() => render())

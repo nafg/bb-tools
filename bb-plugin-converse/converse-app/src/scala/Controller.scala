@@ -64,6 +64,9 @@ final class Controller(
   // components); utterances are routed here.
   private var viewedThread: String = null
   private var threadDisplayNamesById = js.Dictionary.empty[String]
+  // Host navigation, captured from a React slot; the plain-DOM widget has no
+  // hook access. Null until the first thread surface mounts.
+  private var navigateToThread: js.Function1[String, Unit] = null
 
   // Latest effective settings, pushed by the React bridge so the chrome-level
   // widget can start a session without access to hooks.
@@ -129,6 +132,12 @@ final class Controller(
   def setThreadDisplayNames(namesByThreadId: js.Dictionary[String]): Unit =
     threadDisplayNamesById = namesByThreadId
     refreshSnapshot()
+
+  def setNavigateToThread(navigate: js.Function1[String, Unit]): Unit =
+    navigateToThread = navigate
+
+  def openThread(tid: String): Unit =
+    if navigateToThread != null then navigateToThread(tid)
 
   def configure(opts: js.Dynamic): Unit =
     startOptions = opts
@@ -634,6 +643,9 @@ def createController(deps: js.Dynamic): js.Dynamic =
     "noteViewed" -> js.Any.fromFunction1((tid: String) => ctl.noteViewed(tid)),
     "setThreadDisplayNames" -> js.Any.fromFunction1(
       (namesByThreadId: js.Dictionary[String]) => ctl.setThreadDisplayNames(namesByThreadId)
+    ),
+    "setNavigateToThread" -> js.Any.fromFunction1(
+      (navigate: js.Function1[String, Unit]) => ctl.setNavigateToThread(navigate)
     ),
     "mountWidget"  -> js.Any.fromFunction0(() => Widget.mount(ctl)),
     "subscribe"    -> js.Any.fromFunction1((cb: js.Function0[Unit]) => ctl.subscribe(cb)),

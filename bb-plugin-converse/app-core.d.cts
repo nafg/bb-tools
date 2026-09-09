@@ -54,6 +54,8 @@ export interface ConverseController {
   noteViewed(threadId: string): void;
   /** Supply current sidebar names for identifying routing and playback. */
   setThreadDisplayNames(namesByThreadId: Record<string, string>): void;
+  /** Supply the host's thread navigation so widget thread references can open them. */
+  setNavigateToThread(navigate: (threadId: string) => void): void;
   /** Render the floating chrome widget; returns a disposer. */
   mountWidget(): () => void;
   subscribe(onChange: () => void): () => void;
