@@ -23,7 +23,8 @@ enum TurnEvent:
 
 /** The activity a thread's turn events say the agent is in. Items started but
   * not yet completed are tracked most recent first; the activity is that of
-  * the most recently started open item that has one. Events that say nothing
+  * the most recently started open item that has one. With nothing open the
+  * agent is back to reasoning about its next step. Events that say nothing
   * about the activity (an item kind with none, a completion leaving only such
   * items open) keep the previous one.
   */
@@ -37,7 +38,9 @@ final case class TurnActivityTracker(openItems: List[(String, String)], activity
       withOpen(openItems.filterNot(_._1 == itemId))
 
   private def withOpen(open: List[(String, String)]): TurnActivityTracker =
-    TurnActivityTracker(open, open.iterator.flatMap((_, kind) => TurnActivityTracker.ofItemKind(kind)).nextOption().orElse(activity))
+    val fromOpenItems = open.iterator.flatMap((_, kind) => TurnActivityTracker.ofItemKind(kind)).nextOption()
+    val betweenItems  = if open.isEmpty && activity.isDefined then Some(AgentActivity.Reasoning) else activity
+    TurnActivityTracker(open, fromOpenItems.orElse(betweenItems))
 
 object TurnActivityTracker:
   val initial: TurnActivityTracker = TurnActivityTracker(Nil, None)

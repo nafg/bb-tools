@@ -18,11 +18,14 @@ class TurnActivityTrackerTest extends munit.FunSuite:
     for kind <- List("toolCall", "commandExecution", "fileRead", "fileChange", "webSearch", "webFetch", "imageView", "search") do
       assertEquals(activityAfter(TurnStarted, ItemStarted("i1", kind)), Some(Tool), kind)
 
-  test("a tool completing keeps the activity until the next item says otherwise"):
+  test("a tool completing with nothing else open means the agent is thinking again"):
     val tracker = TurnActivityTracker.after(List(TurnStarted, ItemStarted("i1", "commandExecution"), ItemCompleted("i1")))
-    assertEquals(tracker.activity, Some(Tool))
+    assertEquals(tracker.activity, Some(Reasoning))
     assertEquals(tracker.openItems, Nil)
-    assertEquals(tracker(ItemStarted("i2", "reasoning")).activity, Some(Reasoning))
+    assertEquals(tracker(ItemStarted("i2", "toolCall")).activity, Some(Tool))
+
+  test("outside a turn, a stray completion does not invent thinking"):
+    assertEquals(activityAfter(TurnStarted, TurnCompleted, ItemCompleted("i1")), None)
 
   test("a nested item completing falls back to the enclosing open item"):
     assertEquals(
