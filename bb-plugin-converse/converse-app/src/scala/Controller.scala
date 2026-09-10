@@ -19,12 +19,21 @@ given ExecutionContext = ExecutionContext.parasitic
   * navigation: any mounted converse component relays realtime signals to this
   * singleton, which filters by session id.
   */
+private final case class PendingUpload(
+    sessionId: String,
+    route: UtteranceRoute,
+    blob: js.Dynamic,
+    evidence: js.Dynamic
+)
+
 final class Controller(
     rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynamic]],
     createMicVad: js.Function1[js.Dynamic, js.Promise[js.Dynamic]],
     encodeWav: js.Function1[Float32Array, js.Any]
 ):
   private val PreRollMs         = 500.0
+  // Speech transcribes fine at this Opus rate; the browser default is about four times it.
+  private val UploadBitsPerSecond = 32_000
   private val MaxUtteranceMs    = 60_000.0
   private val AudioStartGraceMs = 1000.0
 
@@ -58,6 +67,15 @@ final class Controller(
   private var captureActive: Boolean              = false
   private var maxUtteranceTimer: SetTimeoutHandle = null
   private var previewRecorder: MediaRecorder      = null
+  // Records the utterance itself as compressed audio while Silero captures
+  // it as samples; the compressed file is what gets uploaded when it exists.
+  private var utteranceRecorder: MediaRecorder    = null
+  private var utteranceChunks: js.Array[js.Any]   = js.Array()
+  private var utteranceRecording: Promise[Option[js.Dynamic]] = null
+  // Uploads go up one at a time in capture order; a failed upload is retried
+  // before the recording is given up on.
+  private val pendingUploads = scala.collection.mutable.Queue.empty[PendingUpload]
+  private var uploading: Boolean = false
   private var previewDiscard: Boolean             = false
   private var previewSegmentStart: Double         = 0
   private var previewInFlight: Boolean            = false
@@ -437,6 +455,8 @@ final class Controller(
     player.stop()
     replyHeld = false
     abandonCapture()
+    pendingUploads.clear()
+    uploading = false
     if speechDetector != null then
       val detector = speechDetector
       speechDetector = null
@@ -501,7 +521,9 @@ final class Controller(
           if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
           stopPreviewRecorder()
           debug(s"utterance captured (${recording.size.asInstanceOf[Double]} bytes)")
-          submitUtterance(recording, evidenceToJs(evidence))
+          finishUtteranceRecorder().foreach { compressed =>
+            enqueueUpload(compressed.getOrElse(recording), evidenceToJs(evidence))
+          }
           syncReplyHold()
         else backToListening(SessionPhase.Recording)
 
@@ -522,6 +544,7 @@ final class Controller(
           interimText = null
           interimAccum = ""
           startPreviewRecorder()
+          startUtteranceRecorder()
           debug("capture started")
           maxUtteranceTimer = setTimeout(MaxUtteranceMs + PreRollMs) {
             maxUtteranceTimer = null
@@ -538,6 +561,7 @@ final class Controller(
     captureActive = false
     if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
     stopPreviewRecorder()
+    discardUtteranceRecorder()
     debug("capture discarded")
     syncReplyHold()
 
@@ -587,8 +611,10 @@ final class Controller(
     if previewRecorder == null && recordingStream != null then
       try
         val chunks  = js.Array[js.Any]()
-        val options = if mimeType.nonEmpty then js.Dynamic.literal("mimeType" -> mimeType) else js.Dynamic.literal()
-        val r       = new MediaRecorder(recordingStream, options)
+        val options =
+          if mimeType.nonEmpty then js.Dynamic.literal("mimeType" -> mimeType, "audioBitsPerSecond" -> UploadBitsPerSecond)
+          else js.Dynamic.literal("audioBitsPerSecond" -> UploadBitsPerSecond)
+        val r = new MediaRecorder(recordingStream, options)
         previewDiscard = false
         val seq = utteranceSeq
         r.ondataavailable = { e =>
@@ -704,61 +730,129 @@ final class Controller(
     val _ = reader.readAsDataURL(blob)
     p.future
 
-  private def submitUtterance(blob: js.Dynamic, evidence: js.Dynamic): Unit =
-    val sess  = sessionId
-    val route = if utteranceRoute != null then utteranceRoute else UtteranceRoute.ToThread(threadId)
-    val tid   = route.existingThreadId.orNull
-    if sess != null then
+  /** Records the utterance as compressed audio from capture start; uploads
+    * are a tenth the size of the sample recording, which matters on a slow
+    * link. Silero's samples remain the fallback when recording is unavailable.
+    */
+  private def startUtteranceRecorder(): Unit =
+    if utteranceRecorder == null && recordingStream != null && mimeType.nonEmpty then
+      try
+        val chunks   = js.Array[js.Any]()
+        val finished = Promise[Option[js.Dynamic]]()
+        val r        = new MediaRecorder(recordingStream, js.Dynamic.literal("mimeType" -> mimeType, "audioBitsPerSecond" -> UploadBitsPerSecond))
+        r.ondataavailable = { e =>
+          if e.data.size.asInstanceOf[Double] > 0 then { val _ = chunks.push(e.data.asInstanceOf[js.Any]) }
+        }
+        r.onstop = { _ =>
+          val blob =
+            if chunks.length == 0 then None
+            else Some(js.Dynamic.newInstance(js.Dynamic.global.Blob)(chunks, js.Dynamic.literal("type" -> mimeType)))
+          val _ = finished.trySuccess(blob)
+        }
+        r.onerror = { _ => val _ = finished.trySuccess(None) }
+        r.start()
+        utteranceRecorder = r
+        utteranceChunks = chunks
+        utteranceRecording = finished
+      catch
+        case e: Throwable => debug(s"utterance recorder unavailable, uploading samples instead: ${e.getMessage}")
+
+  /** Stops the recorder and yields its file, or None when there is nothing usable. */
+  private def finishUtteranceRecorder(): Future[Option[js.Dynamic]] =
+    val r        = utteranceRecorder
+    val finished = utteranceRecording
+    utteranceRecorder = null
+    utteranceRecording = null
+    if r == null then Future.successful(None)
+    else
+      if r.state != "inactive" then r.stop() else { val _ = finished.trySuccess(None) }
+      finished.future
+
+  private def discardUtteranceRecorder(): Unit =
+    val r = utteranceRecorder
+    utteranceRecorder = null
+    utteranceRecording = null
+    if r != null && r.state != "inactive" then r.stop()
+
+  private def enqueueUpload(blob: js.Dynamic, evidence: js.Dynamic): Unit =
+    if sessionId != null then
+      val route = if utteranceRoute != null then utteranceRoute else UtteranceRoute.ToThread(threadId)
+      pendingUploads.enqueue(PendingUpload(sessionId, route, blob, evidence))
+      uploadNext()
+
+  private def uploadNext(): Unit =
+    if !uploading && pendingUploads.nonEmpty then
+      uploading = true
+      val upload = pendingUploads.dequeue()
       enter(SessionPhase.Transcribing)
-      val submitted =
-        for
-          b64 <- blobToBase64(blob)
-          result <- {
-            def send(): Future[js.Dynamic] =
-              val request = js.Dynamic.literal(
-                "sessionId"   -> sess,
-                "mimeType"    -> blob.`type`.asInstanceOf[String],
-                "audioBase64" -> b64,
-                "evidence"    -> evidence
-              )
-              route match
-                case UtteranceRoute.ToThread(id)         => request.updateDynamic("threadId")(id)
-                case UtteranceRoute.NewThread(projectId) => request.updateDynamic("projectId")(projectId)
-              rpcCall("submitUtterance", request).toFuture
-            withSessionReregistered(sess, tid)(send)
-          }
-        yield result
-      submitted.onComplete {
-        case _ if sessionId != sess => ()
-        case Success(result) if result == null =>
-          interimText = null
-          backToListening(SessionPhase.Transcribing)
-        case Success(result) =>
-          if result.sent.asInstanceOf[Boolean] then
-            heardText = result.text.asInstanceOf[String]
-            interimText = null
-            debug(s"heard: $heardText")
-            notice = null
-            // A new thread was started for this utterance: it becomes the
-            // session's thread and the app opens it.
-            result.threadId.asInstanceOf[js.UndefOr[String]].foreach { created =>
-              debug(s"new thread $created started by voice")
-              threadId = created
-              viewedThread = created
-              openThread(created)
-            }
-            enter(SessionPhase.Waiting)
+      attemptUpload(upload, attempt = 1)
+
+  private def attemptUpload(upload: PendingUpload, attempt: Int): Unit =
+    val sess = upload.sessionId
+    val tid  = upload.route.existingThreadId.orNull
+    val submitted =
+      for
+        b64 <- blobToBase64(upload.blob)
+        result <- withSessionReregistered(sess, tid) { () =>
+                    val request = js.Dynamic.literal(
+                      "sessionId"   -> sess,
+                      "mimeType"    -> upload.blob.`type`.asInstanceOf[String],
+                      "audioBase64" -> b64,
+                      "evidence"    -> upload.evidence
+                    )
+                    upload.route match
+                      case UtteranceRoute.ToThread(id)         => request.updateDynamic("threadId")(id)
+                      case UtteranceRoute.NewThread(projectId) => request.updateDynamic("projectId")(projectId)
+                    rpcCall("submitUtterance", request).toFuture
+                  }
+      yield result
+    submitted.onComplete {
+      case _ if sessionId != sess => ()
+      case Success(result) =>
+        uploaded(result)
+        uploading = false
+        if pendingUploads.nonEmpty then uploadNext()
+      case Failure(e) =>
+        UtteranceUploadRetry.delayBeforeRetry(attempt, transcriptionFailure(e)) match
+          case Some(delayMs) =>
+            debug(s"upload failed (attempt $attempt, retrying in ${delayMs}ms): ${e.getMessage}")
+            notice = s"voice message upload failed, retrying…"
             refreshSnapshot()
-          else
-            debug("transcription was empty; ignoring")
-            backToListening(SessionPhase.Transcribing)
-        case Failure(e) =>
-          debug(s"submit failed: ${e.getMessage}")
-          // Covers the whole submit pipeline (reading the recording,
-          // transcription, and the thread send), so don't blame transcription.
-          notice = s"voice message failed: ${e.getMessage}"
-          if state == On(SessionPhase.Transcribing) then enter(SessionPhase.Listening) else refreshSnapshot()
+            val _ = setTimeout(delayMs.toDouble) { if sessionId == sess then attemptUpload(upload, attempt + 1) }
+          case None =>
+            debug(s"upload given up after $attempt attempts: ${e.getMessage}")
+            // Covers the whole submit pipeline (reading the recording,
+            // transcription, and the thread send), so don't blame transcription.
+            notice = s"voice message failed: ${e.getMessage}"
+            uploading = false
+            if pendingUploads.nonEmpty then uploadNext()
+            else if state == On(SessionPhase.Transcribing) then enter(SessionPhase.Listening)
+            else refreshSnapshot()
+    }
+
+  private def uploaded(result: js.Dynamic): Unit =
+    val moreQueued = pendingUploads.nonEmpty
+    if result == null then
+      interimText = null
+      if !moreQueued then backToListening(SessionPhase.Transcribing)
+    else if result.sent.asInstanceOf[Boolean] then
+      heardText = result.text.asInstanceOf[String]
+      interimText = null
+      debug(s"heard: $heardText")
+      notice = null
+      // A new thread was started for this utterance: it becomes the
+      // session's thread and the app opens it.
+      result.threadId.asInstanceOf[js.UndefOr[String]].foreach { created =>
+        debug(s"new thread $created started by voice")
+        threadId = created
+        viewedThread = created
+        openThread(created)
       }
+      enter(SessionPhase.Waiting)
+      refreshSnapshot()
+    else
+      debug("transcription was empty; ignoring")
+      if !moreQueued then backToListening(SessionPhase.Transcribing)
 
   // ---------------------------------------------------------------- signals
 

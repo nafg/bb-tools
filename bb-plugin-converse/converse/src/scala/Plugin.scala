@@ -511,6 +511,11 @@ def plugin(bb: BbApi): Unit =
           "name"    -> "wait",
           "summary" -> "Wait briefly for continued speech in the current thread",
           "usage"   -> "bb converse wait"
+        ),
+        js.Dynamic.literal(
+          "name"    -> "status",
+          "summary" -> "Print the live voice session as JSON: its thread and whether the user is mid-utterance",
+          "usage"   -> "bb converse status"
         )
       ),
       "run" -> js.Any.fromFunction2 { (argv: js.Array[String], context: js.Dynamic) =>
@@ -526,11 +531,19 @@ def plugin(bb: BbApi): Unit =
               )
             else
               waitForMoreSpeech(threadId).map(message => js.Dynamic.literal("exitCode" -> 0, "stdout" -> message))
+          case "status" :: Nil =>
+            val status = js.Dynamic.literal(
+              "active"    -> state.active.isDefined,
+              "threadId"  -> state.active.map(_.threadId).orNull,
+              "capturing" -> state.capturingFor.isDefined,
+              "awaiting"  -> state.awaiting.keys.toJSArray
+            )
+            Future.successful(js.Dynamic.literal("exitCode" -> 0, "stdout" -> js.JSON.stringify(status)))
           case _ =>
             Future.successful(
               js.Dynamic.literal(
                 "exitCode" -> 1,
-                "stderr"   -> "usage: bb converse wait"
+                "stderr"   -> "usage: bb converse wait | bb converse status"
               )
             )
         result.toJSPromise
