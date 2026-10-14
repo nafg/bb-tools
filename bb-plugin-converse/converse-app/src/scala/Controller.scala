@@ -87,7 +87,7 @@ final class Controller(
   private var utteranceSeq: Int                   = 0
   private var utteranceRoute: UtteranceRoute      = null
   private var interimText: String                 = null
-  private var interimAccum: String                = ""
+  private var interimSegments: List[String]       = Nil
 
   // The thread the app route currently shows (reported by mounted converse
   // components); utterances are routed here.
@@ -544,7 +544,7 @@ final class Controller(
           noteCapture(active = true)
           utteranceSeq += 1
           interimText = null
-          interimAccum = ""
+          interimSegments = Nil
           startPreviewRecorder()
           startUtteranceRecorder()
           debug("capture started")
@@ -681,7 +681,7 @@ final class Controller(
                           "threadId"            -> tid,
                           "mimeType"            -> blob.`type`.asInstanceOf[String],
                           "audioBase64"         -> b64,
-                          "precedingTranscript" -> TranscriptionContext.promptFrom(interimAccum)
+                          "precedingTranscript" -> TranscriptionContext.promptFrom(InterimTranscript.wordsSoFar(interimSegments))
                         )
                       ).toFuture
                     }
@@ -692,8 +692,8 @@ final class Controller(
           case Success(result) if sessionId == sess && utteranceSeq == seq =>
             previewRateLimitPauseMs = None
             val segment = result.text.asInstanceOf[String]
-            interimAccum = (interimAccum + " " + segment).trim
-            interimText = interimAccum
+            interimSegments = interimSegments :+ segment
+            interimText = InterimTranscript.render(interimSegments, stillCapturing = captureActive)
             debug(s"interim: $interimText")
             refreshSnapshot()
           case Failure(e) =>
