@@ -724,6 +724,50 @@ function SoundCueDesigner({ cue, config, onSave, onClose }: {
 
 // Each cue: whether it sounds, a preview of its configured sound, the
 // designer, and a reset; plus the master volume.
+type RecentUtterance = {
+  id: string;
+  at: number;
+  threadId: string;
+  mimeType: string;
+  bytes: number;
+  text: string;
+  segments: string | null;
+};
+
+// The last uploads with what was heard in them: play one back to tell
+// whether missing or invented words were in the audio or in the transcript.
+function RecentUtterancesSection() {
+  const [utterances, setUtterances] = useState<RecentUtterance[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const load = () =>
+    rpcCall("recentUtterances", {})
+      .then((result) => setUtterances((result as { utterances: RecentUtterance[] }).utterances))
+      .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+  useEffect(() => {
+    void load();
+  }, []);
+  useRealtime("converse-utterances", () => void load());
+  if (error) return <p className="text-xs text-destructive">{error}</p>;
+  if (!utterances) return <div className="text-xs text-muted-foreground">Loading…</div>;
+  if (utterances.length === 0) return <div className="text-xs text-muted-foreground">Nothing uploaded since the plugin started.</div>;
+  return (
+    <div className="space-y-2">
+      {utterances.map((u) => (
+        <div key={u.id} className="space-y-1 rounded border p-2 text-xs">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
+            <span>{new Date(u.at).toLocaleTimeString()}</span>
+            <span>{u.threadId || "new thread"}</span>
+            <span>{Math.round(u.bytes / 1024)} KB {u.mimeType}</span>
+          </div>
+          <audio controls preload="none" className="h-8 w-full" src={`/api/v1/plugins/converse/http/recent-utterance?id=${encodeURIComponent(u.id)}`} />
+          <p className="break-words">{u.text || <span className="text-muted-foreground">(nothing transcribed)</span>}</p>
+          {u.segments && <p className="break-all font-mono text-muted-foreground">{u.segments}</p>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function SoundCueSettingsSection() {
   const ctl = getController();
   const { state, setState, error, setError } = useSoundCueSettings();
@@ -878,6 +922,12 @@ export default definePluginApp((app) => {
     title: "Sound cues",
     description: "Tones that mark what the voice session is doing.",
     component: SoundCueSettingsSection,
+  });
+  app.slots.settingsSection({
+    id: "recent-utterances",
+    title: "Recent utterances",
+    description: "The last ten uploads, with their transcripts and the transcriber's per-segment silence and confidence figures.",
+    component: RecentUtterancesSection,
   });
   app.slots.experimental_threadHeaderAction({
     id: "thread-voice",

@@ -72,6 +72,23 @@ private final case class AwaitingReply(sessionId: String, previousAssistantMessa
 /** Voice-conversation state for the whole server: at most one active browser
   * session, plus the threads whose next idle transition should be spoken.
   */
+private val RecentUtterancesKept = 10
+
+private final case class RecentUtterance(
+    id: String,
+    at: Double,
+    threadId: String,
+    mimeType: String,
+    audioBase64: String,
+    text: String,
+    segments: Option[String]
+)
+
+/** A transcript and, when the provider reports them, its per-segment
+  * silence and confidence figures as one summary line.
+  */
+private final case class Transcription(text: String, segments: Option[String])
+
 private final class State:
   var active: Option[ActiveSession]     = None
   val awaiting: mutable.Map[String, AwaitingReply] = mutable.Map.empty // threadId -> pending voice reply
@@ -82,6 +99,12 @@ private final class State:
   // What a thread should be told with its next utterance: replies of its that
   // the user cut off while speaking to another thread.
   val pendingNotes: mutable.Map[String, List[String]] = mutable.Map.empty
+  // The last uploads with what was heard in them, for checking whether words
+  // were lost before or after transcription.
+  val recentUtterances = mutable.ArrayDeque.empty[RecentUtterance]
+  def remember(utterance: RecentUtterance): Unit =
+    recentUtterances.prepend(utterance)
+    while recentUtterances.length > RecentUtterancesKept do recentUtterances.removeLast()
   private var eventCounter              = 0
   def nextEventId(): String =
     eventCounter += 1
@@ -625,11 +648,11 @@ def plugin(bb: BbApi): Unit =
     val _ = js.Dynamic.global.setTimeout(js.Any.fromFunction0(() => { val _ = p.success(()) }), ms)
     p.future
 
-  def transcribeViaBb(file: js.Dynamic): Future[String] =
+  def transcribeViaBb(file: js.Dynamic): Future[Transcription] =
     bb.sdk.system
       .transcribeVoice(js.Dynamic.literal("file" -> file))
       .toFuture
-      .map(result => str(result.text).trim)
+      .map(result => Transcription(str(result.text).trim, None))
 
   def transcribeViaEndpoint(
       url: String,
@@ -639,7 +662,7 @@ def plugin(bb: BbApi): Unit =
       file: js.Dynamic,
       precedingTranscript: String,
       diagnosticContext: String
-  ): Future[String] =
+  ): Future[Transcription] =
     val form = js.Dynamic.newInstance(js.Dynamic.global.FormData)()
     val _    = form.set("file", file)
     if model.nonEmpty then { val _ = form.set("model", model) }
@@ -673,18 +696,17 @@ def plugin(bb: BbApi): Unit =
         // reference heuristic per segment: high no-speech probability combined
         // with low average log-probability means the segment is not speech.
         val segments = payload.segments.asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]]
-        segments.fold(str(payload.text).trim) { segs =>
-          bb.log.info(
-            s"transcription segment evidence ($diagnosticContext): " + segs.zipWithIndex.map { (seg, index) =>
-              val start    = seg.start.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
-              val end      = seg.end.asInstanceOf[js.UndefOr[Double]].getOrElse(start)
-              val noSpeech = seg.no_speech_prob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
-              val logProb  = seg.avg_logprob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
-              val chars    = str(seg.text).trim.length
-              f"$index%d:${end - start}%.2fs,noSpeech=$noSpeech%.3f,avgLogProb=$logProb%.3f,chars=$chars%d"
-            }.mkString("[", "; ", "]")
-          )
-          segs
+        segments.fold(Transcription(str(payload.text).trim, None)) { segs =>
+          val evidence = segs.zipWithIndex.map { (seg, index) =>
+            val start    = seg.start.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
+            val end      = seg.end.asInstanceOf[js.UndefOr[Double]].getOrElse(start)
+            val noSpeech = seg.no_speech_prob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
+            val logProb  = seg.avg_logprob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
+            val chars    = str(seg.text).trim.length
+            f"$index%d:${end - start}%.2fs,noSpeech=$noSpeech%.3f,avgLogProb=$logProb%.3f,chars=$chars%d"
+          }.mkString("[", "; ", "]")
+          bb.log.info(s"transcription segment evidence ($diagnosticContext): $evidence")
+          val text = segs
             .filterNot { seg =>
               val noSpeech = seg.no_speech_prob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
               val logProb  = seg.avg_logprob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
@@ -694,6 +716,7 @@ def plugin(bb: BbApi): Unit =
             .filter(_.nonEmpty)
             .mkString(" ")
             .trim
+          Transcription(text, Some(evidence))
         }
       }
 
@@ -703,7 +726,7 @@ def plugin(bb: BbApi): Unit =
       retryUnavailable: Boolean,
       precedingTranscript: String,
       diagnosticContext: String
-  ): Future[String] =
+  ): Future[Transcription] =
     val file = audioFile(mimeType, audioBase64)
     settings.get().toFuture.flatMap { s =>
       val language = str(s.sttLanguage)
@@ -889,6 +912,7 @@ def plugin(bb: BbApi): Unit =
       ),
       "threadVoiceSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "soundCueSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "recentUtterances" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "updateSoundCueSettings" -> js.Dynamic.literal(
         "input"  -> Schema.passthrough,
         "output" -> Schema.passthrough
@@ -973,8 +997,21 @@ def plugin(bb: BbApi): Unit =
             precedingTranscript = "",
             diagnosticContext = diagnosticContext
           )
-            .flatMap { text =>
+            .flatMap { transcription =>
+              val text = transcription.text
               bb.log.info(s"transcribed ($diagnosticContext) ${text.length} chars")
+              state.remember(
+                RecentUtterance(
+                  id = state.nextEventId(),
+                  at = js.Date.now(),
+                  threadId = threadId,
+                  mimeType = str(input.mimeType),
+                  audioBase64 = str(input.audioBase64),
+                  text = text,
+                  segments = transcription.segments
+                )
+              )
+              bb.realtime.publish("converse-utterances", js.Dynamic.literal())
               val heardContext = input.heardContext.asInstanceOf[js.UndefOr[js.Dynamic]].toOption.filter(_ != null)
               val speaking = heardContext
                 .map(_.interrupted)
@@ -1079,7 +1116,7 @@ def plugin(bb: BbApi): Unit =
             precedingTranscript = str(input.precedingTranscript),
             diagnosticContext = diagnosticContext
           )
-            .map(text => js.Dynamic.literal("text" -> text))
+            .map(transcription => js.Dynamic.literal("text" -> transcription.text))
             .toJSPromise
       },
       "voiceSettings" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
@@ -1088,6 +1125,23 @@ def plugin(bb: BbApi): Unit =
           if requestedProvider.nonEmpty then Future.successful(requestedProvider)
           else settings.get().toFuture.map(s => str(s.ttsProvider))
         providerF.flatMap(voiceSettingsResponse).toJSPromise
+      },
+      "recentUtterances" -> js.Any.fromFunction1 { (_: js.Dynamic) =>
+        Future.successful(
+          js.Dynamic.literal(
+            "utterances" -> state.recentUtterances.toJSArray.map { u =>
+              js.Dynamic.literal(
+                "id"       -> u.id,
+                "at"       -> u.at,
+                "threadId" -> u.threadId,
+                "mimeType" -> u.mimeType,
+                "bytes"    -> (u.audioBase64.length * 3 / 4),
+                "text"     -> u.text,
+                "segments" -> u.segments.orNull
+              )
+            }
+          )
+        ).toJSPromise
       },
       "soundCueSettings" -> js.Any.fromFunction1 { (_: js.Dynamic) =>
         soundCueSettings().map(soundCueSettingsResponse).toJSPromise
@@ -1257,6 +1311,21 @@ def plugin(bb: BbApi): Unit =
         )
       }
       ()
+    }
+  )
+
+  bb.http.route(
+    "GET",
+    "/recent-utterance",
+    { context =>
+      val id = str(context.req.query("id"))
+      state.recentUtterances.find(_.id == id) match
+        case None => jsonResponse(404, "no such utterance")
+        case Some(u) =>
+          js.Dynamic.newInstance(js.Dynamic.global.Response)(
+            js.Dynamic.global.Buffer.from(u.audioBase64, "base64"),
+            js.Dynamic.literal("status" -> 200, "headers" -> js.Dynamic.literal("content-type" -> u.mimeType))
+          )
     }
   )
 
