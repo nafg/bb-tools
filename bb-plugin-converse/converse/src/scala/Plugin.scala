@@ -5,6 +5,7 @@ import conversecore.{
   AssistantMessage,
   AssistantReply,
   ContinuationWaiters,
+  ReplyInterruption,
   SoundCue,
   SoundCueSettings,
   SoundCueSettingsJson,
@@ -78,6 +79,9 @@ private final class State:
   // "" while it will start a new thread.
   var capturingFor: Option[String] = None
   val continuationWaiters = ContinuationWaiters()
+  // What a thread should be told with its next utterance: replies of its that
+  // the user cut off while speaking to another thread.
+  val pendingNotes: mutable.Map[String, List[String]] = mutable.Map.empty
   private var eventCounter              = 0
   def nextEventId(): String =
     eventCounter += 1
@@ -577,9 +581,13 @@ def plugin(bb: BbApi): Unit =
   /** A spoken utterance as thread input: the transcript between agent-only
     * markers so the agent knows it was heard, not typed.
     */
-  def heardInput(text: String): js.Array[js.Dynamic] =
+  /** The transcript as the thread's input; notes about what the user was
+    * hearing are agent-only, like the markers, and come first.
+    */
+  def heardInput(text: String, notes: List[ReplyInterruption.Note] = Nil): js.Array[js.Dynamic] =
+    val opener = "[heard]\n" + ReplyInterruption.preface(notes).fold("")(_ + "\n")
     js.Array(
-      js.Dynamic.literal("type" -> "text", "text" -> "[heard]\n", "visibility" -> "agent-only"),
+      js.Dynamic.literal("type" -> "text", "text" -> opener, "visibility" -> "agent-only"),
       js.Dynamic.literal("type" -> "text", "text" -> text),
       js.Dynamic.literal("type" -> "text", "text" -> "[/heard]", "visibility" -> "agent-only")
     )
@@ -967,6 +975,21 @@ def plugin(bb: BbApi): Unit =
           )
             .flatMap { text =>
               bb.log.info(s"transcribed ($diagnosticContext) ${text.length} chars")
+              val heardContext = input.heardContext.asInstanceOf[js.UndefOr[js.Dynamic]].toOption.filter(_ != null)
+              val speaking = heardContext
+                .map(_.interrupted)
+                .filter(i => i != null && !js.isUndefined(i))
+                .map(i => ReplyInterruption.SpeakingReply(str(i.threadId), str(i.sentence)))
+              val beforeHearing = heardContext.exists(_.beforeHearingReply.asInstanceOf[Any] == true)
+              val notes = ReplyInterruption.notes(threadId, speaking, beforeHearing)
+              notes.filter(_.threadId != threadId).foreach { note =>
+                state.pendingNotes.updateWith(note.threadId)(prior => Some(prior.getOrElse(Nil) :+ note.text))
+              }
+              val notesForThread =
+                if threadId.isEmpty then Nil
+                else
+                  state.pendingNotes.remove(threadId).getOrElse(Nil).map(ReplyInterruption.Note(threadId, _)) ++
+                    notes.filter(_.threadId == threadId)
               if text.isEmpty then Future.successful(js.Dynamic.literal("text" -> "", "sent" -> false))
               else if threadId.isEmpty then
                 bb.sdk.threads
@@ -985,14 +1008,14 @@ def plugin(bb: BbApi): Unit =
                     state.awaiting.update(newThreadId, AwaitingReply(sessionId, None))
                     js.Dynamic.literal("text" -> text, "sent" -> true, "threadId" -> newThreadId)
                   }
-              else if state.continuationWaiters.deliver(threadId, text) then
+              else if state.continuationWaiters.deliver(threadId, ReplyInterruption.heardText(text, notesForThread)) then
                 bb.log.info(s"delivered ${text.length} chars to continuation waiter")
                 Future.successful(js.Dynamic.literal("text" -> text, "sent" -> true, "continued" -> true))
               else
                 def send(mode: String): Future[js.Dynamic] =
                   bb.sdk.threads
                     .send(
-                      js.Dynamic.literal("threadId" -> threadId, "mode" -> mode, "input" -> heardInput(text))
+                      js.Dynamic.literal("threadId" -> threadId, "mode" -> mode, "input" -> heardInput(text, notesForThread))
                     )
                     .toFuture
                 latestAssistantMessage(threadId).flatMap { previousAssistantMessage =>

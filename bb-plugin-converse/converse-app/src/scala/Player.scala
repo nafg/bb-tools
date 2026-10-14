@@ -32,6 +32,7 @@ final class Player(
   private var held: Boolean              = false
   private var currentThread: String      = null
   private var currentVoice: String       = null
+  private var currentSentence: String    = null
   private var generation: Int            = 0
   private var currentAudio: js.Dynamic   = null
   private var abortCtl: js.Dynamic       = null
@@ -55,6 +56,9 @@ final class Player(
 
   /** The thread whose text is playing, or null when nothing is. */
   def speakingThread: String = currentThread
+
+  /** The chunk of the reply being spoken right now, or null when nothing is. */
+  def speakingSentence: String = currentSentence
 
   /** The concrete persisted voice used by the current response, or null when
     * browser speech/default provider playback is active.
@@ -100,6 +104,7 @@ final class Player(
           speakingActive = false
           currentThread = null
           currentVoice = null
+          currentSentence = null
           if currentSettled eq item.settled then currentSettled = null
           if queuedSpeech.nonEmpty then startNextQueuedSpeech() else onChange()
           val _ = item.settled.trySuccess(true)
@@ -108,6 +113,7 @@ final class Player(
           speakingActive = false
           currentThread = null
           currentVoice = null
+          currentSentence = null
           if currentSettled eq item.settled then currentSettled = null
           if queuedSpeech.nonEmpty then startNextQueuedSpeech() else onChange()
           val _ = item.settled.tryFailure(e)
@@ -125,6 +131,7 @@ final class Player(
     speakingActive = false
     currentThread = null
     currentVoice = null
+    currentSentence = null
     if abortCtl != null then { val _ = abortCtl.abort(); abortCtl = null }
     if !js.isUndefined(js.Dynamic.global.speechSynthesis) then { val _ = js.Dynamic.global.speechSynthesis.cancel() }
     if currentAudio != null then
@@ -153,6 +160,7 @@ final class Player(
             val voices = js.Dynamic.global.speechSynthesis.getVoices().asInstanceOf[js.Array[js.Dynamic]]
             voices.find(v => v.voiceURI.asInstanceOf[String] == voice || v.name.asInstanceOf[String] == voice)
               .foreach(v => utterance.voice = v)
+          currentSentence = chunk.text
           utterance.onend = js.Any.fromFunction1((_: js.Any) => { val _ = p.success(()) })
           utterance.onerror = js.Any.fromFunction1((_: js.Any) => { val _ = p.success(()) })
           val _ = js.Dynamic.global.speechSynthesis.speak(utterance)
@@ -234,6 +242,7 @@ final class Player(
         else
           val next =
             if i + 1 < all.length then fetchTts(all(i + 1).text, voice, ctl.signal) else null
+          currentSentence = all(i).text
           playBlob(gen, blob)
             .flatMap(_ => delay(all(i).pauseSeconds))
             .flatMap { _ =>

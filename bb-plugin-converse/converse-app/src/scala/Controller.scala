@@ -23,7 +23,9 @@ private final case class PendingUpload(
     sessionId: String,
     route: UtteranceRoute,
     blob: js.Dynamic,
-    evidence: js.Dynamic
+    evidence: js.Dynamic,
+    interrupted: Option[ReplyInterruption.SpeakingReply],
+    beforeHearingReply: Boolean
 )
 
 final class Controller(
@@ -86,6 +88,10 @@ final class Controller(
   private var previewRateLimitPauseMs: Option[Double] = None
   private var utteranceSeq: Int                   = 0
   private var utteranceRoute: UtteranceRoute      = null
+  // What the user was hearing when this capture began: a reply they cut off,
+  // or none yet from the thread they are speaking to.
+  private var captureInterrupted: Option[ReplyInterruption.SpeakingReply] = None
+  private var captureBeforeReply: Boolean         = false
   private var interimText: String                 = null
   private var interimSegments: List[String]       = Nil
 
@@ -508,6 +514,7 @@ final class Controller(
         beginCapture()
         if player.isSpeaking then
           debug("barge-in: stopping playback")
+          captureInterrupted = Option(player.speakingThread).map(ReplyInterruption.SpeakingReply(_, Option(player.speakingSentence).getOrElse("")))
           player.stop()
         enter(SessionPhase.Recording)
       case SpeechDetectorEvent.PreviewPoint =>
@@ -539,6 +546,8 @@ final class Controller(
           refreshSnapshot()
         case Some(route) =>
           utteranceRoute = route
+          captureInterrupted = None
+          captureBeforeReply = route.existingThreadId.contains(threadId) && (state == On(SessionPhase.Waiting) || replyHeld)
           captureActive = true
           syncReplyHold()
           noteCapture(active = true)
@@ -564,6 +573,8 @@ final class Controller(
     if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
     stopPreviewRecorder()
     discardUtteranceRecorder()
+    captureInterrupted = None
+    captureBeforeReply = false
     debug("capture discarded")
     syncReplyHold()
 
@@ -779,7 +790,7 @@ final class Controller(
   private def enqueueUpload(blob: js.Dynamic, evidence: js.Dynamic): Unit =
     if sessionId != null then
       val route = if utteranceRoute != null then utteranceRoute else UtteranceRoute.ToThread(threadId)
-      pendingUploads.enqueue(PendingUpload(sessionId, route, blob, evidence))
+      pendingUploads.enqueue(PendingUpload(sessionId, route, blob, evidence, captureInterrupted, captureBeforeReply))
       uploadNext()
 
   private def uploadNext(): Unit =
@@ -800,7 +811,13 @@ final class Controller(
                       "sessionId"   -> sess,
                       "mimeType"    -> upload.blob.`type`.asInstanceOf[String],
                       "audioBase64" -> b64,
-                      "evidence"    -> upload.evidence
+                      "evidence"    -> upload.evidence,
+                      "heardContext" -> js.Dynamic.literal(
+                        "interrupted" -> upload.interrupted.fold(null: js.Any)(r =>
+                          js.Dynamic.literal("threadId" -> r.threadId, "sentence" -> r.sentence)
+                        ),
+                        "beforeHearingReply" -> upload.beforeHearingReply
+                      )
                     )
                     upload.route match
                       case UtteranceRoute.ToThread(id)         => request.updateDynamic("threadId")(id)
