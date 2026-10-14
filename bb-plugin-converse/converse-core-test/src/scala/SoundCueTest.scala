@@ -24,6 +24,11 @@ class SoundCueTest extends munit.FunSuite:
   test("a reply starting chimes"):
     assertEquals(SoundCue.onTransition(On(P.Waiting), On(P.Speaking)), Some(ReplyStarting))
 
+  test("a reply finishing is not a transition cue: speech also stops for barge-in and failures"):
+    assertEquals(SoundCue.onTransition(On(P.Speaking), On(P.Listening)), None)
+    assertEquals(ReplyFinished.defaultRepeat, None)
+    assert(ReplyFinished.sound.notes.head.frequencyHz < ReplyStarting.sound.notes.head.frequencyHz)
+
   test("a stop the user asked for is distinct from every other ending"):
     assertEquals(SoundCue.onTransition(On(P.Listening), endedBy(SessionEnd.StoppedByUser)), Some(StoppedByUser))
     for end <- SessionEnd.values.filterNot(_ == SessionEnd.StoppedByUser) do

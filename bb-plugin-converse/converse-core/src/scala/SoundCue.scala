@@ -44,6 +44,13 @@ enum SoundCue(val settingKey: String, val label: String, val sound: ToneSound, v
     ToneSound(List(ToneNote(659, 0.35, 0.01, 0.35))),
     None
   )
+  // A pause between spoken chunks is indistinguishable from the end without this.
+  case ReplyFinished extends SoundCue(
+    "cueReplyFinished",
+    "Reply finished",
+    ToneSound(List(ToneNote(523, 0.25, 0.01, 0.3))),
+    None
+  )
   case StoppedByUser extends SoundCue(
     "cueStoppedByUser",
     "Stopped by you",

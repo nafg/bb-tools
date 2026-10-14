@@ -919,7 +919,9 @@ final class Controller(
       else enter(SessionPhase.Speaking)
       player.enqueue(text, sourceThread).onComplete {
         case Success(completed) if completed && !player.isSpeaking =>
-          backToListening(SessionPhase.Speaking)
+          if state == On(SessionPhase.Speaking) then
+            val _ = cues.play(SoundCue.ReplyFinished)
+            enter(SessionPhase.Listening)
         case Failure(e) =>
           debug(s"speech failed: ${e.getMessage}")
           notice = s"speech failed: ${e.getMessage}"
