@@ -31,7 +31,9 @@ final class Controller(
     createMicVad: js.Function1[js.Dynamic, js.Promise[js.Dynamic]],
     encodeWav: js.Function1[Float32Array, js.Any]
 ):
-  private val PreRollMs         = 500.0
+  // Audio kept from before speech is detected. Soft onsets detect late, and
+  // the utterance recorder starts only on detection, so this must cover both.
+  private val PreRollMs         = 1000.0
   // Speech transcribes fine at this Opus rate; the browser default is about four times it.
   private val UploadBitsPerSecond = 32_000
   private val MaxUtteranceMs    = 60_000.0

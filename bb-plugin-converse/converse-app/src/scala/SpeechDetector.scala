@@ -59,7 +59,7 @@ final class SpeechDetector private (
 object SpeechDetector:
   private val SampleRate                 = 16000
   private val FrameSamples               = 512
-  private val PreSpeechPadMs             = 500
+  private val PreSpeechPadMs             = 1000
   private val MinSpeechMs                = 192
   private val PreviewPauseMs             = 640
   private val TrailingContextMs          = 320
