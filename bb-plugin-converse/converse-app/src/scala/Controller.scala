@@ -180,6 +180,14 @@ final class Controller(
     setState(Off(Some(VoiceState.Ending(end, Option(detail)))))
 
   /** Leaves `from` for Listening, if that is where the session still is. */
+  /** Where the session rests when nothing is being said or played: still
+    * transcribing while any recording is on its way to becoming a message, so
+    * its repeating tap keeps saying so; otherwise listening.
+    */
+  private def idlePhase: SessionPhase =
+    if uploading || pendingUploads.nonEmpty || recordingsInProcess.nonEmpty then SessionPhase.Transcribing
+    else SessionPhase.Listening
+
   private def backToListening(from: SessionPhase): Unit =
     if state == On(from) then enter(SessionPhase.Listening)
 
@@ -882,7 +890,7 @@ final class Controller(
             debug(s"speak signal (${text.length} chars)")
             if text.trim.nonEmpty then
               speakText(text, p.threadId.asInstanceOf[js.UndefOr[String]].getOrElse(null))
-            else enter(SessionPhase.Listening)
+            else enter(idlePhase)
           case "utterance-processed" =>
             recordingProcessed(p)
           case "status" =>
@@ -892,7 +900,7 @@ final class Controller(
             refreshSnapshot()
           case "agent-failed" =>
             notice = p.error.asInstanceOf[js.UndefOr[String]].getOrElse("the agent failed")
-            enter(SessionPhase.Listening)
+            enter(idlePhase)
           case "activity" =>
             turnActivity = AgentActivity.fromSignalName(p.activity.asInstanceOf[js.UndefOr[String]].getOrElse(""))
             activityChanged()
@@ -925,7 +933,7 @@ final class Controller(
 
   private def speakText(text: String, sourceThread: String): Unit =
     val chunks = Speech.splitSpeechChunks(text)
-    if chunks.isEmpty then enter(SessionPhase.Listening)
+    if chunks.isEmpty then enter(idlePhase)
     else
       if player.isHeld then
         debug("reply held until the current utterance is submitted")
@@ -935,11 +943,11 @@ final class Controller(
         case Success(completed) if completed && !player.isSpeaking =>
           if state == On(SessionPhase.Speaking) then
             val _ = cues.play(SoundCue.ReplyFinished)
-            enter(SessionPhase.Listening)
+            enter(idlePhase)
         case Failure(e) =>
           debug(s"speech failed: ${e.getMessage}")
           notice = s"speech failed: ${e.getMessage}"
-          if player.isSpeaking then refreshSnapshot() else enter(SessionPhase.Listening)
+          if player.isSpeaking then refreshSnapshot() else enter(idlePhase)
         case _ => ()
       }
 

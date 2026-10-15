@@ -93,10 +93,12 @@ private final case class ReceivedRecording(
     notes: List[String]
 )
 
-/** The transcriber refused the audio itself (a client error other than a rate
-  * limit), so sending the same audio again gets the same answer.
+/** The transcriber called the request itself malformed (400, 413, 415 or
+  * 422): bad audio or a bad parameter. Sending the same request again gets the
+  * same answer. Other client errors (a bad key, a wrong URL or model) are
+  * configuration, which can be fixed while the recording waits.
   */
-private final class TranscriberRejected(message: String) extends RuntimeException(message)
+private final class TranscriberRejectedRequest(message: String) extends RuntimeException(message)
 
 /** A transcript, which service produced it, and, when the service reports
   * them, its per-segment timing, silence and confidence figures as one
@@ -822,7 +824,7 @@ def plugin(bb: BbApi): Unit =
             val status = str(response.status)
             Future.failed(
               if status == "429" then new RuntimeException(s"${TranscriptionFailure.RateLimitedMessage}: $detail")
-              else if status.startsWith("4") then new TranscriberRejected(s"transcription endpoint returned $status: $detail")
+              else if Set("400", "413", "415", "422").contains(status) then new TranscriberRejectedRequest(s"transcription endpoint returned $status: $detail")
               else new RuntimeException(s"transcription endpoint returned $status: $detail")
             )
           }
@@ -1098,8 +1100,8 @@ def plugin(bb: BbApi): Unit =
           }
       case _ => Future.unit
 
-  /** Transcribes until it succeeds, or until the transcriber refuses the audio
-    * itself (Left with the reason). Any other failure is retried: the
+  /** Transcribes until it succeeds, or until the transcriber calls the request
+    * malformed (Left with the reason). Any other failure is retried: the
     * recording is stored, so waiting costs nothing but time.
     */
   def transcribeUntilDone(
@@ -1112,7 +1114,7 @@ def plugin(bb: BbApi): Unit =
     transcribeAudio(mimeType, audioBase64, isFinal = true, precedingTranscript = "", diagnosticContext = context)
       .map(Right(_))
       .recoverWith {
-        case e: TranscriberRejected => Future.successful(Left(e.getMessage))
+        case e: TranscriberRejectedRequest => Future.successful(Left(e.getMessage))
         case e =>
           val delay = RetryBackoff.delayBeforeRetry(attempt)
           bb.log.warn(s"transcription failed ($context, attempt $attempt; retrying in ${delay}ms): ${e.getMessage}")
@@ -1333,10 +1335,10 @@ def plugin(bb: BbApi): Unit =
               .map(i => ReplyInterruption.SpeakingReply(str(i.threadId), str(i.sentence)))
             // Decided now, as spoken, not when the recording is delivered: by
             // then the reply may have been read aloud. Unheard: the thread is
-            // still answering an earlier utterance, or its answer is queued
-            // unplayed.
+            // still answering an earlier utterance, has one not yet delivered
+            // to it, or its answer is queued unplayed.
             val targetReplyUnheard =
-              state.awaiting.contains(threadId) ||
+              state.awaiting.contains(threadId) || recordingInProgressFor(threadId) ||
                 heardContext.exists(_.targetReplyUnplayed.asInstanceOf[Any] == true)
             val notes = ReplyInterruption.notes(threadId, speaking, targetReplyUnheard)
             notes.filter(_.threadId != threadId).foreach { note =>

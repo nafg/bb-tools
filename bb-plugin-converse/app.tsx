@@ -759,9 +759,12 @@ function RecordingStatus({ u }: { u: RecentUtterance }) {
       <span className={u.status === "failed" ? "text-destructive" : "text-muted-foreground"}>{recordingStatusLabels[u.status]}</span>
       {u.status !== "sent" && u.status !== "empty" && u.lastError && <span className="text-muted-foreground">({u.lastError})</span>}
       {u.status === "failed" && (
-        <button type="button" className="rounded border px-2 text-xs hover:bg-muted" onClick={() => void retry()}>
-          Retry
-        </button>
+        <>
+          <button type="button" className="rounded border px-2 text-xs hover:bg-muted" onClick={() => void retry()}>
+            Retry
+          </button>
+          <span className="text-muted-foreground">You were asked to say it again; if you did, retrying sends it twice.</span>
+        </>
       )}
       {retryError && <span className="text-destructive">{retryError}</span>}
     </div>
