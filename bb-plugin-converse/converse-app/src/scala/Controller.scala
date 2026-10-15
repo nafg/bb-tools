@@ -860,6 +860,7 @@ final class Controller(
       refreshSnapshot()
     else
       debug("transcription was empty; ignoring")
+      val _ = cues.play(SoundCue.NothingHeard)
       if !moreQueued then backToListening(SessionPhase.Transcribing)
 
   // ---------------------------------------------------------------- signals
