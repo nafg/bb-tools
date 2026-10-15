@@ -2,6 +2,8 @@ package converse
 
 import bbplugin.*
 import conversecore.{
+  TranscriptSegment,
+  TranscriptSegments,
   AssistantMessage,
   AssistantReply,
   ContinuationWaiters,
@@ -706,17 +708,20 @@ def plugin(bb: BbApi): Unit =
             f"$index%d:${end - start}%.2fs,noSpeech=$noSpeech%.3f,avgLogProb=$logProb%.3f,chars=$chars%d"
           }.mkString("[", "; ", "]")
           bb.log.info(s"transcription segment evidence ($diagnosticContext): $evidence")
-          val text = segs
-            .filterNot { seg =>
-              val noSpeech = seg.no_speech_prob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
-              val logProb  = seg.avg_logprob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
-              noSpeech > 0.6 && logProb < -1.0
-            }
-            .map(seg => str(seg.text).trim)
-            .filter(_.nonEmpty)
-            .mkString(" ")
-            .trim
-          Transcription(text, Some(evidence))
+          val reported = segs.toList.map { seg =>
+            val start = seg.start.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
+            TranscriptSegment(
+              durationSec = seg.end.asInstanceOf[js.UndefOr[Double]].getOrElse(start) - start,
+              noSpeechProbability = seg.no_speech_prob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0),
+              avgLogProb = seg.avg_logprob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0),
+              text = str(seg.text).trim
+            )
+          }
+          val kept = TranscriptSegments.keep(reported)
+          if kept.length < reported.length then
+            bb.log.info(s"dropped ${reported.length - kept.length} segment(s) as not speech ($diagnosticContext): " +
+              reported.filterNot(kept.contains).map(_.text).mkString(" | "))
+          Transcription(kept.map(_.text).filter(_.nonEmpty).mkString(" ").trim, Some(evidence))
         }
       }
 
