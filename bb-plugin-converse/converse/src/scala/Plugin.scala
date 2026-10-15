@@ -798,46 +798,62 @@ def plugin(bb: BbApi): Unit =
         }
       }
 
+  /** `isFinal` marks the transcription of a whole utterance, which becomes a
+    * message; it is worth extra effort not to lose, unlike a preview.
+    */
   def transcribeAudio(
       mimeType: String,
       audioBase64: String,
-      retryUnavailable: Boolean,
+      isFinal: Boolean,
       precedingTranscript: String,
       diagnosticContext: String
   ): Future[Transcription] =
     val file = audioFile(mimeType, audioBase64)
+    def viaBb: Future[Transcription] =
+      transcribeViaBb(file).recoverWith {
+        case e if isFinal && e.getMessage != null && e.getMessage.contains("503") =>
+          bb.log.warn(s"transcription unavailable; retrying once: ${e.getMessage}")
+          delayMs(1500).flatMap(_ => transcribeViaBb(file))
+      }
+    // A provider's quota refills slowly, so retrying it would lose the
+    // utterance; bb's own transcriber has a separate allowance.
+    def viaBbWhenRateLimited(attempt: Future[Transcription]): Future[Transcription] =
+      attempt.recoverWith {
+        case e if isFinal && TranscriptionFailure.classify(Option(e.getMessage).getOrElse("")) == TranscriptionFailure.RateLimited =>
+          bb.log.warn(s"transcription rate limited ($diagnosticContext); transcribing with bb instead")
+          viaBb
+      }
     settings.get().toFuture.flatMap { s =>
       val language = str(s.sttLanguage)
       str(s.sttProvider) match
         case "groq" =>
-          transcribeViaEndpoint(
-            "https://api.groq.com/openai/v1/audio/transcriptions",
-            str(s.groqModel),
-            str(s.groqApiKey),
-            language,
-            file,
-            precedingTranscript,
-            diagnosticContext
-          )
-        case "openai-compatible" =>
-          val url = str(s.sttCustomUrl)
-          if url.isEmpty then Future.failed(new RuntimeException("sttCustomUrl is not configured"))
-          else
+          viaBbWhenRateLimited(
             transcribeViaEndpoint(
-              url,
-              str(s.sttCustomModel),
-              str(s.sttCustomApiKey),
+              "https://api.groq.com/openai/v1/audio/transcriptions",
+              str(s.groqModel),
+              str(s.groqApiKey),
               language,
               file,
               precedingTranscript,
               diagnosticContext
             )
-        case _ =>
-          transcribeViaBb(file).recoverWith {
-            case e if retryUnavailable && e.getMessage != null && e.getMessage.contains("503") =>
-              bb.log.warn(s"transcription unavailable; retrying once: ${e.getMessage}")
-              delayMs(1500).flatMap(_ => transcribeViaBb(file))
-          }
+          )
+        case "openai-compatible" =>
+          val url = str(s.sttCustomUrl)
+          if url.isEmpty then Future.failed(new RuntimeException("sttCustomUrl is not configured"))
+          else
+            viaBbWhenRateLimited(
+              transcribeViaEndpoint(
+                url,
+                str(s.sttCustomModel),
+                str(s.sttCustomApiKey),
+                language,
+                file,
+                precedingTranscript,
+                diagnosticContext
+              )
+            )
+        case _ => viaBb
     }
 
   // ------------------------------------------------------- managed services
@@ -1073,7 +1089,7 @@ def plugin(bb: BbApi): Unit =
           transcribeAudio(
             str(input.mimeType),
             str(input.audioBase64),
-            retryUnavailable = true,
+            isFinal = true,
             precedingTranscript = "",
             diagnosticContext = diagnosticContext
           )
@@ -1200,7 +1216,7 @@ def plugin(bb: BbApi): Unit =
           transcribeAudio(
             str(input.mimeType),
             str(input.audioBase64),
-            retryUnavailable = false,
+            isFinal = false,
             precedingTranscript = str(input.precedingTranscript),
             diagnosticContext = diagnosticContext
           )
