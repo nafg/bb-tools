@@ -74,6 +74,9 @@ private final case class AwaitingReply(sessionId: String, previousAssistantMessa
 /** Voice-conversation state for the whole server: at most one active browser
   * session, plus the threads whose next idle transition should be spoken.
   */
+/** What the browser's speech detector reported for an upload. */
+private final case class DetectorEvidence(frames: Int, speechFrames: Int, peakSpeechProbability: Double, peakRms: Double)
+
 private final case class RecentUtterance(
     id: String,
     at: Double,
@@ -81,7 +84,8 @@ private final case class RecentUtterance(
     mimeType: String,
     audioBase64: String,
     text: String,
-    segments: Option[String]
+    segments: Option[String],
+    detector: Option[DetectorEvidence]
 )
 
 /** A transcript and, when the provider reports them, its per-segment
@@ -183,7 +187,11 @@ def plugin(bb: BbApi): Unit =
         |  audio BLOB NOT NULL,
         |  text TEXT NOT NULL,
         |  segments TEXT
-        |)""".stripMargin
+        |)""".stripMargin,
+      "ALTER TABLE utterances ADD COLUMN detector_frames INTEGER",
+      "ALTER TABLE utterances ADD COLUMN detector_speech_frames INTEGER",
+      "ALTER TABLE utterances ADD COLUMN detector_peak_speech_probability REAL",
+      "ALTER TABLE utterances ADD COLUMN detector_peak_rms REAL"
     )
   )
 
@@ -191,11 +199,28 @@ def plugin(bb: BbApi): Unit =
   // against the audio that was actually sent, days later and across reloads.
   val UtterancesKeptDays = 7
   val UtterancesListed   = 50
-  val UtteranceColumns = "id, at, thread_id, mime_type, length(audio) AS bytes, text, segments"
+  val UtteranceColumns =
+    "id, at, thread_id, mime_type, length(audio) AS bytes, text, segments, detector_frames, " +
+      "detector_speech_frames, detector_peak_speech_probability, detector_peak_rms"
   def rememberUtterance(u: RecentUtterance): Unit =
     val _ = db
-      .prepare("INSERT INTO utterances (id, at, thread_id, mime_type, audio, text, segments) VALUES (?, ?, ?, ?, ?, ?, ?)")
-      .run(u.id, u.at, u.threadId, u.mimeType, js.Dynamic.global.Buffer.from(u.audioBase64, "base64"), u.text, u.segments.orNull)
+      .prepare(
+        "INSERT INTO utterances (id, at, thread_id, mime_type, audio, text, segments, detector_frames, " +
+          "detector_speech_frames, detector_peak_speech_probability, detector_peak_rms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      )
+      .run(
+        u.id,
+        u.at,
+        u.threadId,
+        u.mimeType,
+        js.Dynamic.global.Buffer.from(u.audioBase64, "base64"),
+        u.text,
+        u.segments.orNull,
+        u.detector.map(_.frames: js.Any).orNull,
+        u.detector.map(_.speechFrames: js.Any).orNull,
+        u.detector.map(_.peakSpeechProbability: js.Any).orNull,
+        u.detector.map(_.peakRms: js.Any).orNull
+      )
     val _ = db.prepare("DELETE FROM utterances WHERE at < ?").run(js.Date.now() - UtterancesKeptDays * 86_400_000.0)
   def listUtterances(): js.Array[js.Dynamic] =
     db.prepare(s"SELECT $UtteranceColumns FROM utterances ORDER BY at DESC LIMIT ?").all(UtterancesListed).map(utteranceRow)
@@ -207,7 +232,17 @@ def plugin(bb: BbApi): Unit =
       "mimeType" -> row.mime_type,
       "bytes"    -> row.bytes,
       "text"     -> row.text,
-      "segments" -> row.segments
+      "segments" -> row.segments,
+      "detector" -> (
+        if row.detector_frames == null then null
+        else
+          js.Dynamic.literal(
+            "frames"                -> row.detector_frames,
+            "speechFrames"          -> row.detector_speech_frames,
+            "peakSpeechProbability" -> row.detector_peak_speech_probability,
+            "peakRms"               -> row.detector_peak_rms
+          )
+      )
     )
   def utteranceById(id: String): Option[js.Dynamic] =
     db.prepare(s"SELECT $UtteranceColumns FROM utterances WHERE id = ?").get(id).toOption.map(utteranceRow)
@@ -1053,7 +1088,15 @@ def plugin(bb: BbApi): Unit =
                   mimeType = str(input.mimeType),
                   audioBase64 = str(input.audioBase64),
                   text = text,
-                  segments = transcription.segments
+                  segments = transcription.segments,
+                  detector = evidence.toOption.filter(_ != null).map { e =>
+                    DetectorEvidence(
+                      frames = e.frameCount.asInstanceOf[Int],
+                      speechFrames = e.speechFrameCount.asInstanceOf[Int],
+                      peakSpeechProbability = e.peakSpeechProbability.asInstanceOf[Double],
+                      peakRms = e.peakRms.asInstanceOf[Double]
+                    )
+                  }
                 )
               )
               bb.realtime.publish("converse-utterances", js.Dynamic.literal())

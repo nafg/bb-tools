@@ -732,6 +732,7 @@ type RecentUtterance = {
   bytes: number;
   text: string;
   segments: string | null;
+  detector: { frames: number; speechFrames: number; peakSpeechProbability: number; peakRms: number } | null;
 };
 
 function UtteranceCard({ u }: { u: RecentUtterance }) {
@@ -744,7 +745,13 @@ function UtteranceCard({ u }: { u: RecentUtterance }) {
       </div>
       <audio controls preload="none" className="h-8 w-full" src={`/api/v1/plugins/converse/http/recent-utterance?id=${encodeURIComponent(u.id)}`} />
       <p className="break-words">{u.text || <span className="text-muted-foreground">(nothing transcribed)</span>}</p>
-      {u.segments && <p className="break-all font-mono text-muted-foreground">{u.segments}</p>}
+      {u.detector && (
+        <p className="font-mono text-muted-foreground">
+          detector: {u.detector.speechFrames}/{u.detector.frames} speech frames ({(u.detector.speechFrames * 0.032).toFixed(2)}s), peak{" "}
+          {u.detector.peakSpeechProbability.toFixed(2)}, loudness {u.detector.peakRms.toFixed(3)}
+        </p>
+      )}
+      {u.segments && <p className="break-all font-mono text-muted-foreground">transcriber: {u.segments}</p>}
     </div>
   );
 }
