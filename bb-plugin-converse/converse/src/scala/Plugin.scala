@@ -84,14 +84,16 @@ private final case class RecentUtterance(
     mimeType: String,
     audioBase64: String,
     text: String,
+    transcriber: String,
     segments: Option[String],
     detector: Option[DetectorEvidence]
 )
 
-/** A transcript and, when the provider reports them, its per-segment
-  * silence and confidence figures as one summary line.
+/** A transcript, which service produced it, and, when the service reports
+  * them, its per-segment timing, silence and confidence figures as one
+  * summary line.
   */
-private final case class Transcription(text: String, segments: Option[String])
+private final case class Transcription(text: String, transcriber: String, segments: Option[String])
 
 private final class State:
   var active: Option[ActiveSession]     = None
@@ -191,7 +193,8 @@ def plugin(bb: BbApi): Unit =
       "ALTER TABLE utterances ADD COLUMN detector_frames INTEGER",
       "ALTER TABLE utterances ADD COLUMN detector_speech_frames INTEGER",
       "ALTER TABLE utterances ADD COLUMN detector_peak_speech_probability REAL",
-      "ALTER TABLE utterances ADD COLUMN detector_peak_rms REAL"
+      "ALTER TABLE utterances ADD COLUMN detector_peak_rms REAL",
+      "ALTER TABLE utterances ADD COLUMN transcriber TEXT"
     )
   )
 
@@ -201,12 +204,13 @@ def plugin(bb: BbApi): Unit =
   val UtterancesListed   = 50
   val UtteranceColumns =
     "id, at, thread_id, mime_type, length(audio) AS bytes, text, segments, detector_frames, " +
-      "detector_speech_frames, detector_peak_speech_probability, detector_peak_rms"
+      "detector_speech_frames, detector_peak_speech_probability, detector_peak_rms, transcriber"
   def rememberUtterance(u: RecentUtterance): Unit =
     val _ = db
       .prepare(
         "INSERT INTO utterances (id, at, thread_id, mime_type, audio, text, segments, detector_frames, " +
-          "detector_speech_frames, detector_peak_speech_probability, detector_peak_rms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+          "detector_speech_frames, detector_peak_speech_probability, detector_peak_rms, transcriber) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
       )
       .run(
         u.id,
@@ -219,7 +223,8 @@ def plugin(bb: BbApi): Unit =
         u.detector.map(_.frames: js.Any).orNull,
         u.detector.map(_.speechFrames: js.Any).orNull,
         u.detector.map(_.peakSpeechProbability: js.Any).orNull,
-        u.detector.map(_.peakRms: js.Any).orNull
+        u.detector.map(_.peakRms: js.Any).orNull,
+        u.transcriber
       )
     val _ = db.prepare("DELETE FROM utterances WHERE at < ?").run(js.Date.now() - UtterancesKeptDays * 86_400_000.0)
   def listUtterances(): js.Array[js.Dynamic] =
@@ -231,8 +236,9 @@ def plugin(bb: BbApi): Unit =
       "threadId" -> row.thread_id,
       "mimeType" -> row.mime_type,
       "bytes"    -> row.bytes,
-      "text"     -> row.text,
-      "segments" -> row.segments,
+      "text"        -> row.text,
+      "transcriber" -> row.transcriber,
+      "segments"    -> row.segments,
       "detector" -> (
         if row.detector_frames == null then null
         else
@@ -727,9 +733,10 @@ def plugin(bb: BbApi): Unit =
     bb.sdk.system
       .transcribeVoice(js.Dynamic.literal("file" -> file))
       .toFuture
-      .map(result => Transcription(str(result.text).trim, None))
+      .map(result => Transcription(str(result.text).trim, "bb", None))
 
   def transcribeViaEndpoint(
+      provider: String,
       url: String,
       model: String,
       apiKey: String,
@@ -771,7 +778,8 @@ def plugin(bb: BbApi): Unit =
         // reference heuristic per segment: high no-speech probability combined
         // with low average log-probability means the segment is not speech.
         val segments = payload.segments.asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]]
-        segments.fold(Transcription(str(payload.text).trim, None)) { segs =>
+        val transcriber = s"$provider:$model"
+        segments.fold(Transcription(str(payload.text).trim, transcriber, None)) { segs =>
           val reported = segs.toList.map { seg =>
             val start = seg.start.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
             TranscriptSegment(
@@ -794,7 +802,7 @@ def plugin(bb: BbApi): Unit =
           if kept.length < reported.length then
             bb.log.info(s"dropped ${reported.length - kept.length} segment(s) as not speech ($diagnosticContext): " +
               reported.filterNot(kept.contains).map(_.text).mkString(" | "))
-          Transcription(kept.map(_.text).filter(_.nonEmpty).mkString(" ").trim, Some(evidence))
+          Transcription(kept.map(_.text).filter(_.nonEmpty).mkString(" ").trim, transcriber, Some(evidence))
         }
       }
 
@@ -829,6 +837,7 @@ def plugin(bb: BbApi): Unit =
         case "groq" =>
           viaBbWhenRateLimited(
             transcribeViaEndpoint(
+              "groq",
               "https://api.groq.com/openai/v1/audio/transcriptions",
               str(s.groqModel),
               str(s.groqApiKey),
@@ -844,6 +853,7 @@ def plugin(bb: BbApi): Unit =
           else
             viaBbWhenRateLimited(
               transcribeViaEndpoint(
+                "openai-compatible",
                 url,
                 str(s.sttCustomModel),
                 str(s.sttCustomApiKey),
@@ -1104,6 +1114,7 @@ def plugin(bb: BbApi): Unit =
                   mimeType = str(input.mimeType),
                   audioBase64 = str(input.audioBase64),
                   text = text,
+                  transcriber = transcription.transcriber,
                   segments = transcription.segments,
                   detector = evidence.toOption.filter(_ != null).map { e =>
                     DetectorEvidence(

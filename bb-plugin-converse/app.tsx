@@ -731,6 +731,7 @@ type RecentUtterance = {
   mimeType: string;
   bytes: number;
   text: string;
+  transcriber: string | null;
   segments: string | null;
   detector: { frames: number; speechFrames: number; peakSpeechProbability: number; peakRms: number } | null;
 };
@@ -742,6 +743,7 @@ function UtteranceCard({ u }: { u: RecentUtterance }) {
         <span>{new Date(u.at).toLocaleString()}</span>
         <span>{u.threadId || "new thread"}</span>
         <span>{Math.round(u.bytes / 1024)} KB {u.mimeType}</span>
+        {u.transcriber && <span>transcribed by {u.transcriber}</span>}
       </div>
       <audio controls preload="none" className="h-8 w-full" src={`/api/v1/plugins/converse/http/recent-utterance?id=${encodeURIComponent(u.id)}`} />
       <p className="break-words">{u.text || <span className="text-muted-foreground">(nothing transcribed)</span>}</p>
