@@ -51,10 +51,11 @@ enum SoundCue(val settingKey: String, val label: String, val sound: ToneSound, v
     ToneSound(List(ToneNote(523, 0.25, 0.01, 0.3))),
     None
   )
-  // An empty transcript is otherwise dropped in silence.
-  case NothingHeard extends SoundCue(
-    "cueNothingHeard",
-    "Didn't catch that",
+  // An utterance that never became a message (it transcribed to nothing, or
+  // could not be delivered) is otherwise dropped in silence.
+  case SayAgain extends SoundCue(
+    "cueSayAgain",
+    "Say that again",
     ToneSound(List(ToneNote(392, 0.12, 0.01, 0.3), ToneNote(392, 0.2, 0.01, 0.3))),
     None
   )

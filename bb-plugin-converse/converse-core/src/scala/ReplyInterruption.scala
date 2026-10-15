@@ -26,9 +26,17 @@ object ReplyInterruption:
     }
     val beforeHearing =
       Option.when(targetReplyUnheard && !speaking.exists(_.threadId == utteranceThreadId))(
-        Note(utteranceThreadId, "Spoken before the previous reply was read aloud.")
+        Note(utteranceThreadId, SpokenBeforeReply)
       )
     interrupted.toList ++ beforeHearing
+
+  private val SpokenBeforeReply = "Spoken before the previous reply was read aloud."
+
+  /** The notes for speech that continues a message an agent is still waiting
+    * on: being the rest of that message, it comes before no reply.
+    */
+  def forContinuation(notesForThread: List[Note]): List[Note] =
+    notesForThread.filterNot(_.text == SpokenBeforeReply)
 
   /** The notes as the lines that precede a transcript, in the order things happened. */
   def preface(notesForThread: List[Note]): Option[String] =

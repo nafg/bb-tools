@@ -37,3 +37,8 @@ class ReplyInterruptionTest extends munit.FunSuite:
     )
     assertEquals(ReplyInterruption.heardText("yes go on", Nil), "yes go on")
     assertEquals(ReplyInterruption.preface(Nil), None)
+
+  test("speech continuing a message the agent waits on is not 'spoken before the reply', but keeps other notes"):
+    val carried = Note("a", "The user interrupted this reply while it was being read aloud, during: “x”.")
+    val notes   = carried :: ReplyInterruption.notes("a", None, targetReplyUnheard = true)
+    assertEquals(ReplyInterruption.forContinuation(notes), List(carried))

@@ -734,7 +734,39 @@ type RecentUtterance = {
   transcriber: string | null;
   segments: string | null;
   detector: { frames: number; speechFrames: number; peakSpeechProbability: number; peakRms: number } | null;
+  // Null for uploads stored before delivery was tracked.
+  status: "received" | "sending" | "sent" | "empty" | "failed" | null;
+  lastError: string | null;
 };
+
+const recordingStatusLabels = {
+  received: "waiting to be transcribed and delivered",
+  sending: "being delivered",
+  sent: "delivered",
+  empty: "nothing to deliver",
+  failed: "not delivered",
+};
+
+function RecordingStatus({ u }: { u: RecentUtterance }) {
+  const [retryError, setRetryError] = useState<string | null>(null);
+  if (!u.status) return null;
+  const retry = () =>
+    rpcCall("retryRecording", { id: u.id })
+      .then(() => setRetryError(null))
+      .catch((cause) => setRetryError(cause instanceof Error ? cause.message : String(cause)));
+  return (
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+      <span className={u.status === "failed" ? "text-destructive" : "text-muted-foreground"}>{recordingStatusLabels[u.status]}</span>
+      {u.status !== "sent" && u.status !== "empty" && u.lastError && <span className="text-muted-foreground">({u.lastError})</span>}
+      {u.status === "failed" && (
+        <button type="button" className="rounded border px-2 text-xs hover:bg-muted" onClick={() => void retry()}>
+          Retry
+        </button>
+      )}
+      {retryError && <span className="text-destructive">{retryError}</span>}
+    </div>
+  );
+}
 
 function UtteranceCard({ u }: { u: RecentUtterance }) {
   return (
@@ -745,6 +777,7 @@ function UtteranceCard({ u }: { u: RecentUtterance }) {
         <span>{Math.round(u.bytes / 1024)} KB {u.mimeType}</span>
         {u.transcriber && <span>transcribed by {u.transcriber}</span>}
       </div>
+      <RecordingStatus u={u} />
       <audio controls preload="none" className="h-8 w-full" src={`/api/v1/plugins/converse/http/recent-utterance?id=${encodeURIComponent(u.id)}`} />
       <p className="break-words">{u.text || <span className="text-muted-foreground">(nothing transcribed)</span>}</p>
       {u.detector && (

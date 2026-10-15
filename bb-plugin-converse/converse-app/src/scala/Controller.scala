@@ -20,6 +20,7 @@ given ExecutionContext = ExecutionContext.parasitic
   * singleton, which filters by session id.
   */
 private final case class PendingUpload(
+    recordingId: String,
     sessionId: String,
     route: UtteranceRoute,
     blob: js.Dynamic,
@@ -76,6 +77,8 @@ final class Controller(
   // before the recording is given up on.
   private val pendingUploads = scala.collection.mutable.Queue.empty[PendingUpload]
   private var uploading: Boolean = false
+  // Recordings the backend has stored and is still transcribing or delivering.
+  private val recordingsInProcess = scala.collection.mutable.Set.empty[String]
   private var previewDiscard: Boolean             = false
   private var previewSegmentStart: Double         = 0
   private var previewInFlight: Boolean            = false
@@ -189,7 +192,7 @@ final class Controller(
     refreshSnapshot()
 
   private def syncReplyHold(): Unit =
-    val hold = ReplySpeechHold.holds(captureActive, state)
+    val hold = ReplySpeechHold.holds(captureActive, recordingUnstored = uploading || pendingUploads.nonEmpty)
     if hold != player.isHeld then
       player.setHeld(hold)
       if !hold && replyHeld then
@@ -458,6 +461,7 @@ final class Controller(
     abandonCapture()
     pendingUploads.clear()
     uploading = false
+    recordingsInProcess.clear()
     if speechDetector != null then
       val detector = speechDetector
       speechDetector = null
@@ -777,7 +781,8 @@ final class Controller(
       refreshSnapshot()
     else if sessionId != null then
       val route = if utteranceRoute != null then utteranceRoute else UtteranceRoute.ToThread(threadId)
-      pendingUploads.enqueue(PendingUpload(sessionId, route, blob, evidence, captureInterrupted))
+      val recordingId = js.Dynamic.global.crypto.randomUUID().asInstanceOf[String]
+      pendingUploads.enqueue(PendingUpload(recordingId, sessionId, route, blob, evidence, captureInterrupted))
       uploadNext()
 
   private def uploadNext(): Unit =
@@ -796,6 +801,7 @@ final class Controller(
         result <- withSessionReregistered(sess, tid) { () =>
                     val request = js.Dynamic.literal(
                       "sessionId"   -> sess,
+                      "recordingId" -> upload.recordingId,
                       "mimeType"    -> upload.blob.`type`.asInstanceOf[String],
                       "audioBase64" -> b64,
                       "evidence"    -> upload.evidence,
@@ -814,45 +820,51 @@ final class Controller(
       yield result
     submitted.onComplete {
       case _ if sessionId != sess => ()
-      case Success(result) =>
+      case Success(_) =>
+        // Stored: the backend transcribes and delivers it from here, and
+        // announces the outcome with an utterance-processed signal.
         if attempt > 1 then notice = null
-        uploaded(result)
         uploading = false
-        if pendingUploads.nonEmpty then uploadNext()
+        recordingsInProcess += upload.recordingId
+        syncReplyHold()
+        if pendingUploads.nonEmpty then uploadNext() else refreshSnapshot()
       case Failure(e) =>
-        val delayMs = UtteranceUploadRetry.delayBeforeRetry(attempt)
+        val delayMs = RetryBackoff.delayBeforeRetry(attempt)
         debug(s"upload failed (attempt $attempt, retrying in ${delayMs}ms): ${e.getMessage}")
-        // Covers the whole submit pipeline (reading the recording,
-        // transcription, and the thread send), so don't blame transcription.
         notice = s"voice message not sent yet, retrying: ${e.getMessage}"
         refreshSnapshot()
         val _ = setTimeout(delayMs.toDouble) { if sessionId == sess then attemptUpload(upload, attempt + 1) }
     }
 
-  private def uploaded(result: js.Dynamic): Unit =
-    val moreQueued = pendingUploads.nonEmpty
-    if result == null then
-      interimText = null
-      if !moreQueued then backToListening(SessionPhase.Transcribing)
-    else if result.sent.asInstanceOf[Boolean] then
-      heardText = result.text.asInstanceOf[String]
-      interimText = null
-      debug(s"heard: $heardText")
-      notice = null
-      // A new thread was started for this utterance: it becomes the
-      // session's thread and the app opens it.
-      result.threadId.asInstanceOf[js.UndefOr[String]].foreach { created =>
-        debug(s"new thread $created started by voice")
-        threadId = created
-        viewedThread = created
-        openThread(created)
-      }
-      enter(SessionPhase.Waiting)
-      refreshSnapshot()
-    else
-      debug("transcription was empty; ignoring")
-      val _ = cues.play(SoundCue.NothingHeard)
-      if !moreQueued then backToListening(SessionPhase.Transcribing)
+  /** The backend finished with a stored recording, possibly one this tab did
+    * not upload (it was reloaded since, or the recording was retried from the
+    * recordings list).
+    */
+  private def recordingProcessed(p: js.Dynamic): Unit =
+    p.recordingId.asInstanceOf[js.UndefOr[String]].foreach(recordingsInProcess -= _)
+    val moreComing = uploading || pendingUploads.nonEmpty || recordingsInProcess.nonEmpty
+    p.outcome.asInstanceOf[js.UndefOr[String]].getOrElse("") match
+      case "sent" =>
+        heardText = p.text.asInstanceOf[js.UndefOr[String]].getOrElse("")
+        interimText = null
+        debug(s"heard: $heardText")
+        notice = null
+        // A new thread was started for this utterance: it becomes the
+        // session's thread and the app opens it.
+        p.createdThreadId.asInstanceOf[js.UndefOr[String | Null]].toOption.flatMap(Option(_)).foreach { created =>
+          debug(s"new thread $created started by voice")
+          threadId = created
+          viewedThread = created
+          openThread(created)
+        }
+        if player.isSpeaking then refreshSnapshot() else enter(SessionPhase.Waiting)
+      case outcome =>
+        debug(s"recording not delivered ($outcome)")
+        if outcome == "failed" then
+          notice = s"a voice message could not be delivered (${p.error.asInstanceOf[js.UndefOr[String]].getOrElse("")}); " +
+            "it is kept in the recent recordings, where it can be retried"
+        val _ = cues.play(SoundCue.SayAgain)
+        if moreComing then refreshSnapshot() else backToListening(SessionPhase.Transcribing)
 
   // ---------------------------------------------------------------- signals
 
@@ -871,6 +883,8 @@ final class Controller(
             if text.trim.nonEmpty then
               speakText(text, p.threadId.asInstanceOf[js.UndefOr[String]].getOrElse(null))
             else enter(SessionPhase.Listening)
+          case "utterance-processed" =>
+            recordingProcessed(p)
           case "status" =>
             // Transient backend progress (e.g. managed service startup);
             // shown as interim text and naturally replaced by later updates.

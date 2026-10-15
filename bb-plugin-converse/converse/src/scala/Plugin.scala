@@ -3,6 +3,8 @@ package converse
 import bbplugin.*
 import conversecore.{
   UploadLimit,
+  RecordingStatus,
+  RetryBackoff,
   TranscriptSegment,
   TranscriptSegments,
   AssistantMessage,
@@ -71,23 +73,30 @@ private def ttsConfigKey(provider: String): String = s"tts.config.$provider"
 private final case class ActiveSession(sessionId: String, threadId: String)
 private final case class AwaitingReply(sessionId: String, previousAssistantMessageId: Option[String])
 
-/** Voice-conversation state for the whole server: at most one active browser
-  * session, plus the threads whose next idle transition should be spoken.
-  */
 /** What the browser's speech detector reported for an upload. */
 private final case class DetectorEvidence(frames: Int, speechFrames: Int, peakSpeechProbability: Double, peakRms: Double)
 
-private final case class RecentUtterance(
+/** A recording as it arrives, before it is transcribed. Exactly one of
+  * `threadId` and `projectId` is non-empty: the thread it goes to, or the
+  * project to start a thread in. `notes` are what the target thread is to be
+  * told with it, decided when it was spoken.
+  */
+private final case class ReceivedRecording(
     id: String,
     at: Double,
+    sessionId: String,
     threadId: String,
+    projectId: String,
     mimeType: String,
     audioBase64: String,
-    text: String,
-    transcriber: String,
-    segments: Option[String],
-    detector: Option[DetectorEvidence]
+    detector: Option[DetectorEvidence],
+    notes: List[String]
 )
+
+/** The transcriber refused the audio itself (a client error other than a rate
+  * limit), so sending the same audio again gets the same answer.
+  */
+private final class TranscriberRejected(message: String) extends RuntimeException(message)
 
 /** A transcript, which service produced it, and, when the service reports
   * them, its per-segment timing, silence and confidence figures as one
@@ -95,6 +104,9 @@ private final case class RecentUtterance(
   */
 private final case class Transcription(text: String, transcriber: String, segments: Option[String])
 
+/** Voice-conversation state for the whole server: at most one active browser
+  * session, plus the threads whose next idle transition should be spoken.
+  */
 private final class State:
   var active: Option[ActiveSession]     = None
   val awaiting: mutable.Map[String, AwaitingReply] = mutable.Map.empty // threadId -> pending voice reply
@@ -105,6 +117,9 @@ private final class State:
   // What a thread should be told with its next utterance: replies of its that
   // the user cut off while speaking to another thread.
   val pendingNotes: mutable.Map[String, List[String]] = mutable.Map.empty
+  // Stored recordings are transcribed and delivered one at a time, in the
+  // order they were stored, so messages reach threads in the order spoken.
+  var recordingQueue: Future[Unit] = Future.unit
   private var eventCounter              = 0
   def nextEventId(): String =
     eventCounter += 1
@@ -194,39 +209,76 @@ def plugin(bb: BbApi): Unit =
       "ALTER TABLE utterances ADD COLUMN detector_speech_frames INTEGER",
       "ALTER TABLE utterances ADD COLUMN detector_peak_speech_probability REAL",
       "ALTER TABLE utterances ADD COLUMN detector_peak_rms REAL",
-      "ALTER TABLE utterances ADD COLUMN transcriber TEXT"
+      "ALTER TABLE utterances ADD COLUMN transcriber TEXT",
+      "ALTER TABLE utterances ADD COLUMN status TEXT",
+      "ALTER TABLE utterances ADD COLUMN last_error TEXT",
+      "ALTER TABLE utterances ADD COLUMN session_id TEXT",
+      "ALTER TABLE utterances ADD COLUMN project_id TEXT",
+      "ALTER TABLE utterances ADD COLUMN notes TEXT"
     )
   )
 
-  // Uploads are kept with their transcripts so a wrong ending can be checked
-  // against the audio that was actually sent, days later and across reloads.
+  // Recordings are stored before anything else is done with them, and kept
+  // with their transcripts so a wrong ending can be checked against the audio
+  // that was actually sent, days later and across reloads. Ones not yet
+  // delivered are kept until they are.
   val UtterancesKeptDays = 7
   val UtterancesListed   = 50
   val UtteranceColumns =
-    "id, at, thread_id, mime_type, length(audio) AS bytes, text, segments, detector_frames, " +
-      "detector_speech_frames, detector_peak_speech_probability, detector_peak_rms, transcriber"
-  def rememberUtterance(u: RecentUtterance): Unit =
+    "id, at, thread_id, project_id, mime_type, length(audio) AS bytes, text, segments, detector_frames, " +
+      "detector_speech_frames, detector_peak_speech_probability, detector_peak_rms, transcriber, status, last_error"
+  def recordingStored(id: String): Boolean =
+    db.prepare("SELECT 1 FROM utterances WHERE id = ?").get(id).isDefined
+  def storeRecording(r: ReceivedRecording): Unit =
     val _ = db
       .prepare(
-        "INSERT INTO utterances (id, at, thread_id, mime_type, audio, text, segments, detector_frames, " +
-          "detector_speech_frames, detector_peak_speech_probability, detector_peak_rms, transcriber) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        "INSERT INTO utterances (id, at, session_id, thread_id, project_id, mime_type, audio, text, detector_frames, " +
+          "detector_speech_frames, detector_peak_speech_probability, detector_peak_rms, notes, status) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)"
       )
       .run(
-        u.id,
-        u.at,
-        u.threadId,
-        u.mimeType,
-        js.Dynamic.global.Buffer.from(u.audioBase64, "base64"),
-        u.text,
-        u.segments.orNull,
-        u.detector.map(_.frames: js.Any).orNull,
-        u.detector.map(_.speechFrames: js.Any).orNull,
-        u.detector.map(_.peakSpeechProbability: js.Any).orNull,
-        u.detector.map(_.peakRms: js.Any).orNull,
-        u.transcriber
+        r.id,
+        r.at,
+        r.sessionId,
+        r.threadId,
+        r.projectId,
+        r.mimeType,
+        js.Dynamic.global.Buffer.from(r.audioBase64, "base64"),
+        r.detector.map(_.frames: js.Any).orNull,
+        r.detector.map(_.speechFrames: js.Any).orNull,
+        r.detector.map(_.peakSpeechProbability: js.Any).orNull,
+        r.detector.map(_.peakRms: js.Any).orNull,
+        js.JSON.stringify(r.notes.toJSArray),
+        RecordingStatus.Received.code
       )
-    val _ = db.prepare("DELETE FROM utterances WHERE at < ?").run(js.Date.now() - UtterancesKeptDays * 86_400_000.0)
+    val _ = db
+      .prepare(
+        "DELETE FROM utterances WHERE at < ? AND (status IS NULL OR status IN (?, ?))"
+      )
+      .run(js.Date.now() - UtterancesKeptDays * 86_400_000.0, RecordingStatus.Sent.code, RecordingStatus.Empty.code)
+  def setRecordingStatus(id: String, status: RecordingStatus): Unit =
+    status match
+      case RecordingStatus.Failed(reason) =>
+        val _ = db.prepare("UPDATE utterances SET status = ?, last_error = ? WHERE id = ?").run(status.code, reason, id)
+      case _ =>
+        val _ = db.prepare("UPDATE utterances SET status = ? WHERE id = ?").run(status.code, id)
+    bb.realtime.publish("converse-utterances", js.Dynamic.literal())
+  def noteRecordingError(id: String, message: String): Unit =
+    val _ = db.prepare("UPDATE utterances SET last_error = ? WHERE id = ?").run(message, id)
+    bb.realtime.publish("converse-utterances", js.Dynamic.literal())
+  def saveTranscription(id: String, transcription: Transcription): Unit =
+    val _ = db
+      .prepare("UPDATE utterances SET text = ?, transcriber = ?, segments = ? WHERE id = ?")
+      .run(transcription.text, transcription.transcriber, transcription.segments.orNull, id)
+  def setRecordingThread(id: String, threadId: String): Unit =
+    val _ = db.prepare("UPDATE utterances SET thread_id = ? WHERE id = ?").run(threadId, id)
+  def recordingStatus(row: js.Dynamic): Option[RecordingStatus] =
+    RecordingStatus.fromColumns(row.status.asInstanceOf[String | Null], row.last_error.asInstanceOf[String | Null])
+  /** Whether a recording for this thread is stored but not yet delivered. */
+  def recordingInProgressFor(threadId: String): Boolean =
+    db.prepare("SELECT 1 FROM utterances WHERE thread_id = ? AND status IN (?, ?) LIMIT 1")
+      .get(threadId, RecordingStatus.Received.code, RecordingStatus.Sending.code)
+      .isDefined
   def listUtterances(): js.Array[js.Dynamic] =
     db.prepare(s"SELECT $UtteranceColumns FROM utterances ORDER BY at DESC LIMIT ?").all(UtterancesListed).map(utteranceRow)
   def utteranceRow(row: js.Dynamic): js.Dynamic =
@@ -236,8 +288,11 @@ def plugin(bb: BbApi): Unit =
       "threadId" -> row.thread_id,
       "mimeType" -> row.mime_type,
       "bytes"    -> row.bytes,
+      "projectId" -> row.project_id,
       "text"        -> row.text,
       "transcriber" -> row.transcriber,
+      "status"      -> row.status,
+      "lastError"   -> row.last_error,
       "segments"    -> row.segments,
       "detector" -> (
         if row.detector_frames == null then null
@@ -549,12 +604,13 @@ def plugin(bb: BbApi): Unit =
           val waiting = state.continuationWaiters.begin(threadId)
           publishSignal("awaiting-speech-begin", awaitedReply.sessionId, threadId)
           // The wait covers speech that has not started yet; speech already
-          // being captured is waited for to completion, however long it runs.
+          // being captured, or stored and not yet delivered, is waited for to
+          // completion, however long it takes.
           var timer: js.Dynamic = null
           def scheduleExpiry(delayMs: Double): Unit =
             timer = js.Dynamic.global.setTimeout(
               js.Any.fromFunction0 { () =>
-                if state.capturingFor.contains(threadId) then scheduleExpiry(1000)
+                if state.capturingFor.contains(threadId) || recordingInProgressFor(threadId) then scheduleExpiry(1000)
                 else { val _ = state.continuationWaiters.expire(threadId) }
               },
               delayMs
@@ -765,10 +821,9 @@ def plugin(bb: BbApi): Unit =
             bb.log.warn(s"transcription endpoint ${str(response.status)}: $detail")
             val status = str(response.status)
             Future.failed(
-              new RuntimeException(
-                if status == "429" then s"${TranscriptionFailure.RateLimitedMessage}: $detail"
-                else s"transcription endpoint returned $status: $detail"
-              )
+              if status == "429" then new RuntimeException(s"${TranscriptionFailure.RateLimitedMessage}: $detail")
+              else if status.startsWith("4") then new TranscriberRejected(s"transcription endpoint returned $status: $detail")
+              else new RuntimeException(s"transcription endpoint returned $status: $detail")
             )
           }
         else response.json().asInstanceOf[js.Promise[js.Dynamic]].toFuture
@@ -974,6 +1029,178 @@ def plugin(bb: BbApi): Unit =
       yield ()).toJSPromise
   )
 
+  // ------------------------------------------------------ stored recordings
+
+  /** What became of a stored recording. */
+  enum RecordingOutcome:
+    case Delivered(text: String, createdThreadId: Option[String])
+    case NothingSaid
+    case NotDelivered(reason: String)
+
+  /** Delivery errors carry no type to tell a passing fault from a lasting one,
+    * so delivery is tried this many times before the recording is marked
+    * failed and left for a manual retry.
+    */
+  val DeliveryAttempts = 6
+
+  def enqueueRecording(id: String): Unit =
+    state.recordingQueue = state.recordingQueue.transformWith { _ =>
+      processRecording(id).recover { case e =>
+        bb.log.error(s"recording $id could not be processed: ${e.getMessage}")
+      }
+    }
+
+  def processRecording(id: String): Future[Unit] =
+    db.prepare("SELECT * FROM utterances WHERE id = ?").get(id).toOption match
+      case Some(row) if recordingStatus(row).contains(RecordingStatus.Received) =>
+        val sessionId = str(row.session_id)
+        val threadId  = str(row.thread_id)
+        val projectId = str(row.project_id)
+        val context =
+          if threadId.nonEmpty then s"final thread=$threadId recording=$id" else s"final project=$projectId recording=$id"
+        val notes = Option(row.notes.asInstanceOf[String | Null])
+          .map(json => js.JSON.parse(json).asInstanceOf[js.Array[String]].toList)
+          .getOrElse(Nil)
+          .map(ReplyInterruption.Note(threadId, _))
+        val transcribed: Future[Either[String, String]] =
+          if row.transcriber != null then Future.successful(Right(str(row.text)))
+          else
+            val audioBase64 = js.Dynamic.global.Buffer.from(row.audio).applyDynamic("toString")("base64").asInstanceOf[String]
+            transcribeUntilDone(id, str(row.mime_type), audioBase64, context, attempt = 1).map(_.map { transcription =>
+              bb.log.info(s"transcribed ($context) ${transcription.text.length} chars")
+              saveTranscription(id, transcription)
+              transcription.text
+            })
+        transcribed
+          .flatMap {
+            case Left(reason)                => Future.successful(RecordingOutcome.NotDelivered(reason))
+            case Right(text) if text.isEmpty => Future.successful(RecordingOutcome.NothingSaid)
+            case Right(text) =>
+              deliverUntilDone(id, sessionId, threadId, projectId, text, notes, attempt = 1)
+          }
+          .map { outcome =>
+            setRecordingStatus(
+              id,
+              outcome match
+                case RecordingOutcome.Delivered(_, _)      => RecordingStatus.Sent
+                case RecordingOutcome.NothingSaid          => RecordingStatus.Empty
+                case RecordingOutcome.NotDelivered(reason) => RecordingStatus.Failed(reason)
+            )
+            val signalThread = outcome match
+              case RecordingOutcome.Delivered(_, Some(created)) => created
+              case _                                            => threadId
+            val details: Seq[(String, js.Any)] = outcome match
+              case RecordingOutcome.Delivered(text, created) =>
+                Seq("outcome" -> "sent", "text" -> text, "createdThreadId" -> created.orNull)
+              case RecordingOutcome.NothingSaid          => Seq("outcome" -> "empty")
+              case RecordingOutcome.NotDelivered(reason) => Seq("outcome" -> "failed", "error" -> reason)
+            publishSignal("utterance-processed", sessionId, signalThread, (("recordingId" -> (id: js.Any)) +: details)*)
+          }
+      case _ => Future.unit
+
+  /** Transcribes until it succeeds, or until the transcriber refuses the audio
+    * itself (Left with the reason). Any other failure is retried: the
+    * recording is stored, so waiting costs nothing but time.
+    */
+  def transcribeUntilDone(
+      id: String,
+      mimeType: String,
+      audioBase64: String,
+      context: String,
+      attempt: Int
+  ): Future[Either[String, Transcription]] =
+    transcribeAudio(mimeType, audioBase64, isFinal = true, precedingTranscript = "", diagnosticContext = context)
+      .map(Right(_))
+      .recoverWith {
+        case e: TranscriberRejected => Future.successful(Left(e.getMessage))
+        case e =>
+          val delay = RetryBackoff.delayBeforeRetry(attempt)
+          bb.log.warn(s"transcription failed ($context, attempt $attempt; retrying in ${delay}ms): ${e.getMessage}")
+          noteRecordingError(id, e.getMessage)
+          delayMs(delay).flatMap(_ => transcribeUntilDone(id, mimeType, audioBase64, context, attempt + 1))
+      }
+
+  def deliverUntilDone(
+      id: String,
+      sessionId: String,
+      threadId: String,
+      projectId: String,
+      text: String,
+      notes: List[ReplyInterruption.Note],
+      attempt: Int
+  ): Future[RecordingOutcome] =
+    setRecordingStatus(id, RecordingStatus.Sending)
+    deliver(id, sessionId, threadId, projectId, text, notes)
+      .map(created => RecordingOutcome.Delivered(text, created))
+      .recoverWith { case e =>
+        setRecordingStatus(id, RecordingStatus.Received)
+        noteRecordingError(id, e.getMessage)
+        if attempt >= DeliveryAttempts then
+          Future.successful(RecordingOutcome.NotDelivered(s"could not be delivered after $attempt attempts: ${e.getMessage}"))
+        else
+          val delay = RetryBackoff.delayBeforeRetry(attempt)
+          bb.log.warn(s"delivery of recording $id failed (attempt $attempt; retrying in ${delay}ms): ${e.getMessage}")
+          delayMs(delay).flatMap(_ => deliverUntilDone(id, sessionId, threadId, projectId, text, notes, attempt + 1))
+      }
+
+  /** Hands the transcript to its thread, or starts a thread with it; the
+    * started thread's id, if one was started.
+    */
+  def deliver(
+      id: String,
+      sessionId: String,
+      threadId: String,
+      projectId: String,
+      text: String,
+      notes: List[ReplyInterruption.Note]
+  ): Future[Option[String]] =
+    if threadId.isEmpty then
+      bb.sdk.threads
+        .spawn(
+          js.Dynamic.literal(
+            "projectId"   -> projectId,
+            "environment" -> js.Dynamic.literal("type" -> "project-default"),
+            "input"       -> heardInput(text)
+          )
+        )
+        .toFuture
+        .map { thread =>
+          val newThreadId = str(thread.id)
+          bb.log.info(s"started thread $newThreadId in project $projectId by voice")
+          setRecordingThread(id, newThreadId)
+          if state.active.exists(_.sessionId == sessionId) then activate(state.active.map(_.copy(threadId = newThreadId)))
+          state.awaiting.update(newThreadId, AwaitingReply(sessionId, None))
+          Some(newThreadId)
+        }
+    else if state.continuationWaiters.deliver(
+        threadId,
+        ReplyInterruption.heardText(text, ReplyInterruption.forContinuation(notes))
+      )
+    then
+      bb.log.info(s"delivered ${text.length} chars to continuation waiter")
+      Future.successful(None)
+    else
+      def send(mode: String): Future[js.Dynamic] =
+        bb.sdk.threads
+          .send(js.Dynamic.literal("threadId" -> threadId, "mode" -> mode, "input" -> heardInput(text, notes)))
+          .toFuture
+      latestAssistantMessage(threadId).flatMap { previousAssistantMessage =>
+        state.awaiting.update(threadId, AwaitingReply(sessionId, previousAssistantMessage.map(_.id)))
+        send("steer-if-active")
+          .recoverWith {
+            // steer-if-active 409s ("Thread is not active") when the
+            // thread is starting or errored; auto resolves those to a
+            // plain start, so the utterance is not dropped.
+            case e if e.getMessage != null && e.getMessage.contains("Thread is not active") =>
+              send("auto")
+          }
+          .map(_ => None)
+          .recoverWith { case e =>
+            val _ = state.awaiting.remove(threadId)
+            Future.failed(e)
+          }
+      }
+
   bb.rpc.register(
     js.Dynamic.literal(
       // threadId is empty while the New thread screen is in view.
@@ -988,7 +1215,7 @@ def plugin(bb: BbApi): Unit =
       "submitUtterance" -> js.Dynamic.literal(
         // threadId or projectId: exactly one; the handler checks.
         "input" -> Schema.stringsWithOptional(
-          Seq("sessionId" -> 100, "mimeType" -> 100, "audioBase64" -> UploadLimit.MaxAudioBase64Chars),
+          Seq("sessionId" -> 100, "recordingId" -> 100, "mimeType" -> 100, "audioBase64" -> UploadLimit.MaxAudioBase64Chars),
           Seq("threadId" -> 100, "projectId" -> 100)
         ),
         "output" -> Schema.passthrough
@@ -1017,6 +1244,7 @@ def plugin(bb: BbApi): Unit =
       "threadVoiceSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "soundCueSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "recentUtterances" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "retryRecording" -> js.Dynamic.literal("input" -> Schema.strings("id" -> 100), "output" -> Schema.passthrough),
       "utterance" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "utteranceForMessage" -> js.Dynamic.literal("input" -> Schema.strings("threadId" -> 100, "text" -> 100_000), "output" -> Schema.passthrough),
       "updateSoundCueSettings" -> js.Dynamic.literal(
@@ -1070,134 +1298,87 @@ def plugin(bb: BbApi): Unit =
         js.Dynamic.literal("ok" -> true)
       },
       "submitUtterance" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
-        val sessionId = str(input.sessionId)
-        val threadId  = str(input.threadId)
+        val sessionId   = str(input.sessionId)
+        val recordingId = str(input.recordingId)
+        val threadId    = str(input.threadId)
         // A projectId instead of a threadId starts a new thread in that project.
         val projectId = str(input.projectId)
         if !state.active.exists(_.sessionId == sessionId) then rejected(TranscriptionFailure.SessionForgottenMessage)
         else if threadId.isEmpty == projectId.isEmpty then rejected("exactly one of threadId or projectId is required")
         else
-          def submissionDone[A](outcome: Future[A]): Future[A] =
-            outcome.andThen { case _ => state.capturingFor = None }
-          if threadId.nonEmpty then activate(state.active.map(_.copy(threadId = threadId)))
-          val diagnosticContext =
-            if threadId.nonEmpty then s"final thread=$threadId request=${state.nextEventId()}"
-            else s"final project=$projectId request=${state.nextEventId()}"
-          val evidence = input.evidence.asInstanceOf[js.UndefOr[js.Dynamic]]
-          evidence.foreach { e =>
-            bb.log.info(
-              s"speech detector evidence ($diagnosticContext): " +
-                s"classifier=${str(e.classifier)}, frames=${str(e.frameCount)}, " +
-                s"speechFrames=${str(e.speechFrameCount)}, peakRms=${str(e.peakRms)}, " +
-                s"peakSpeechProbability=${str(e.peakSpeechProbability)}, " +
-                s"positiveSpeechThreshold=${str(e.positiveSpeechThreshold)}"
-            )
-          }
-          bb.log.info(
-            s"utterance received ($diagnosticContext): ${str(input.audioBase64).length} b64 chars, ${str(input.mimeType)}"
-          )
-          transcribeAudio(
-            str(input.mimeType),
-            str(input.audioBase64),
-            isFinal = true,
-            precedingTranscript = "",
-            diagnosticContext = diagnosticContext
-          )
-            .flatMap { transcription =>
-              val text = transcription.text
-              bb.log.info(s"transcribed ($diagnosticContext) ${text.length} chars")
-              rememberUtterance(
-                RecentUtterance(
-                  id = s"${js.Date.now().toLong}-${state.nextEventId()}",
-                  at = js.Date.now(),
-                  threadId = threadId,
-                  mimeType = str(input.mimeType),
-                  audioBase64 = str(input.audioBase64),
-                  text = text,
-                  transcriber = transcription.transcriber,
-                  segments = transcription.segments,
-                  detector = evidence.toOption.filter(_ != null).map { e =>
-                    DetectorEvidence(
-                      frames = e.frameCount.asInstanceOf[Int],
-                      speechFrames = e.speechFrameCount.asInstanceOf[Int],
-                      peakSpeechProbability = e.peakSpeechProbability.asInstanceOf[Double],
-                      peakRms = e.peakRms.asInstanceOf[Double]
-                    )
-                  }
-                )
+          state.capturingFor = None
+          // A retry after a lost response: the recording is already stored.
+          if !recordingStored(recordingId) then
+            if threadId.nonEmpty then activate(state.active.map(_.copy(threadId = threadId)))
+            val diagnosticContext =
+              if threadId.nonEmpty then s"final thread=$threadId recording=$recordingId"
+              else s"final project=$projectId recording=$recordingId"
+            val evidence = input.evidence.asInstanceOf[js.UndefOr[js.Dynamic]].toOption.filter(_ != null)
+            evidence.foreach { e =>
+              bb.log.info(
+                s"speech detector evidence ($diagnosticContext): " +
+                  s"classifier=${str(e.classifier)}, frames=${str(e.frameCount)}, " +
+                  s"speechFrames=${str(e.speechFrameCount)}, peakRms=${str(e.peakRms)}, " +
+                  s"peakSpeechProbability=${str(e.peakSpeechProbability)}, " +
+                  s"positiveSpeechThreshold=${str(e.positiveSpeechThreshold)}"
               )
-              bb.realtime.publish("converse-utterances", js.Dynamic.literal())
-              val heardContext = input.heardContext.asInstanceOf[js.UndefOr[js.Dynamic]].toOption.filter(_ != null)
-              val speaking = heardContext
-                .map(_.interrupted)
-                .filter(i => i != null && !js.isUndefined(i))
-                .map(i => ReplyInterruption.SpeakingReply(str(i.threadId), str(i.sentence)))
-              // Unheard: the thread is still answering an earlier utterance, or
-              // its answer is queued unplayed. An agent waiting for more speech
-              // gets this as the rest of the same message, so no reply exists.
-              val targetReplyUnheard =
-                !state.continuationWaiters.isWaiting(threadId) &&
-                  (state.awaiting.contains(threadId) ||
-                    heardContext.exists(_.targetReplyUnplayed.asInstanceOf[Any] == true))
-              val notes = ReplyInterruption.notes(threadId, speaking, targetReplyUnheard)
-              notes.filter(_.threadId != threadId).foreach { note =>
-                state.pendingNotes.updateWith(note.threadId)(prior => Some(prior.getOrElse(Nil) :+ note.text))
-              }
-              val notesForThread =
-                if threadId.isEmpty then Nil
-                else
-                  state.pendingNotes.remove(threadId).getOrElse(Nil).map(ReplyInterruption.Note(threadId, _)) ++
-                    notes.filter(_.threadId == threadId)
-              if text.isEmpty then Future.successful(js.Dynamic.literal("text" -> "", "sent" -> false))
-              else if threadId.isEmpty then
-                bb.sdk.threads
-                  .spawn(
-                    js.Dynamic.literal(
-                      "projectId"   -> projectId,
-                      "environment" -> js.Dynamic.literal("type" -> "project-default"),
-                      "input"       -> heardInput(text)
-                    )
-                  )
-                  .toFuture
-                  .map { thread =>
-                    val newThreadId = str(thread.id)
-                    bb.log.info(s"started thread $newThreadId in project $projectId by voice")
-                    activate(state.active.map(_.copy(threadId = newThreadId)))
-                    state.awaiting.update(newThreadId, AwaitingReply(sessionId, None))
-                    js.Dynamic.literal("text" -> text, "sent" -> true, "threadId" -> newThreadId)
-                  }
-              else if state.continuationWaiters.deliver(threadId, ReplyInterruption.heardText(text, notesForThread)) then
-                bb.log.info(s"delivered ${text.length} chars to continuation waiter")
-                Future.successful(js.Dynamic.literal("text" -> text, "sent" -> true, "continued" -> true))
-              else
-                def send(mode: String): Future[js.Dynamic] =
-                  bb.sdk.threads
-                    .send(
-                      js.Dynamic.literal("threadId" -> threadId, "mode" -> mode, "input" -> heardInput(text, notesForThread))
-                    )
-                    .toFuture
-                latestAssistantMessage(threadId).flatMap { previousAssistantMessage =>
-                  state.awaiting.update(
-                    threadId,
-                    AwaitingReply(sessionId, previousAssistantMessage.map(_.id))
-                  )
-                  send("steer-if-active")
-                    .recoverWith {
-                      // steer-if-active 409s ("Thread is not active") when the
-                      // thread is starting or errored; auto resolves those to a
-                      // plain start, so the utterance is not dropped.
-                      case e if e.getMessage != null && e.getMessage.contains("Thread is not active") =>
-                        send("auto")
-                    }
-                    .map(_ => js.Dynamic.literal("text" -> text, "sent" -> true))
-                    .recoverWith { case e =>
-                      val _ = state.awaiting.remove(threadId)
-                      Future.failed(e)
-                    }
-                }
             }
-            .pipe(submissionDone)
-            .toJSPromise
+            bb.log.info(
+              s"utterance received ($diagnosticContext): ${str(input.audioBase64).length} b64 chars, ${str(input.mimeType)}"
+            )
+            val heardContext = input.heardContext.asInstanceOf[js.UndefOr[js.Dynamic]].toOption.filter(_ != null)
+            val speaking = heardContext
+              .map(_.interrupted)
+              .filter(i => i != null && !js.isUndefined(i))
+              .map(i => ReplyInterruption.SpeakingReply(str(i.threadId), str(i.sentence)))
+            // Decided now, as spoken, not when the recording is delivered: by
+            // then the reply may have been read aloud. Unheard: the thread is
+            // still answering an earlier utterance, or its answer is queued
+            // unplayed.
+            val targetReplyUnheard =
+              state.awaiting.contains(threadId) ||
+                heardContext.exists(_.targetReplyUnplayed.asInstanceOf[Any] == true)
+            val notes = ReplyInterruption.notes(threadId, speaking, targetReplyUnheard)
+            notes.filter(_.threadId != threadId).foreach { note =>
+              state.pendingNotes.updateWith(note.threadId)(prior => Some(prior.getOrElse(Nil) :+ note.text))
+            }
+            val notesForThread =
+              if threadId.isEmpty then Nil
+              else state.pendingNotes.remove(threadId).getOrElse(Nil) ++ notes.filter(_.threadId == threadId).map(_.text)
+            storeRecording(
+              ReceivedRecording(
+                id = recordingId,
+                at = js.Date.now(),
+                sessionId = sessionId,
+                threadId = threadId,
+                projectId = projectId,
+                mimeType = str(input.mimeType),
+                audioBase64 = str(input.audioBase64),
+                detector = evidence.map { e =>
+                  DetectorEvidence(
+                    frames = e.frameCount.asInstanceOf[Int],
+                    speechFrames = e.speechFrameCount.asInstanceOf[Int],
+                    peakSpeechProbability = e.peakSpeechProbability.asInstanceOf[Double],
+                    peakRms = e.peakRms.asInstanceOf[Double]
+                  )
+                },
+                notes = notesForThread
+              )
+            )
+            bb.realtime.publish("converse-utterances", js.Dynamic.literal())
+            enqueueRecording(recordingId)
+          Future.successful(js.Dynamic.literal("stored" -> true)).toJSPromise
+      },
+      "retryRecording" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val id = str(input.id)
+        db.prepare("SELECT status, last_error FROM utterances WHERE id = ?").get(id).toOption.flatMap(recordingStatus) match
+          case Some(RecordingStatus.Failed(_)) =>
+            // Its outcome is announced to whichever session is active now.
+            state.active.foreach(session => db.prepare("UPDATE utterances SET session_id = ? WHERE id = ?").run(session.sessionId, id))
+            setRecordingStatus(id, RecordingStatus.Received)
+            enqueueRecording(id)
+            Future.successful(js.Dynamic.literal("ok" -> true)).toJSPromise
+          case _ => rejected("only a recording that failed can be retried")
       },
       "captureState" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val sessionId = str(input.sessionId)
@@ -1537,6 +1718,17 @@ def plugin(bb: BbApi): Unit =
       handled.toJSPromise
     }
   )
+
+  // Recordings stored before the last shutdown and not yet delivered.
+  db.prepare("SELECT id, status, last_error FROM utterances WHERE status IN (?, ?) ORDER BY at")
+    .all(RecordingStatus.Received.code, RecordingStatus.Sending.code)
+    .foreach { row =>
+      val id = str(row.id)
+      recordingStatus(row).map(RecordingStatus.afterRestart) match
+        case Some(RecordingStatus.Received) => enqueueRecording(id)
+        case Some(other)                    => setRecordingStatus(id, other)
+        case None                           => ()
+    }
 
   bb.onDispose { () =>
     activate(None)
