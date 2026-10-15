@@ -2,6 +2,7 @@ package converse
 
 import bbplugin.*
 import conversecore.{
+  UploadLimit,
   TranscriptSegment,
   TranscriptSegments,
   AssistantMessage,
@@ -32,7 +33,6 @@ private def str(value: js.Dynamic): String =
 /** Longest accepted base64 audio field (~5 MiB decoded): far above a minute of
   * browser-compressed speech, far below transcribeVoice's 25 MiB cap.
   */
-private val MaxAudioBase64Chars = 7 * 1024 * 1024
 
 private val PocketEnglishVoices = Vector(
   "alba",
@@ -962,7 +962,7 @@ def plugin(bb: BbApi): Unit =
       "submitUtterance" -> js.Dynamic.literal(
         // threadId or projectId: exactly one; the handler checks.
         "input" -> Schema.stringsWithOptional(
-          Seq("sessionId" -> 100, "mimeType" -> 100, "audioBase64" -> MaxAudioBase64Chars),
+          Seq("sessionId" -> 100, "mimeType" -> 100, "audioBase64" -> UploadLimit.MaxAudioBase64Chars),
           Seq("threadId" -> 100, "projectId" -> 100)
         ),
         "output" -> Schema.passthrough
@@ -971,7 +971,7 @@ def plugin(bb: BbApi): Unit =
         "input" -> Schema.strings(
           "sessionId"   -> 100,
           "mimeType"    -> 100,
-          "audioBase64" -> MaxAudioBase64Chars
+          "audioBase64" -> UploadLimit.MaxAudioBase64Chars
         ),
         "output" -> Schema.passthrough
       ),

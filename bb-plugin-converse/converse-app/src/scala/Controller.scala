@@ -772,7 +772,15 @@ final class Controller(
     if r != null && r.state != "inactive" then r.stop()
 
   private def enqueueUpload(blob: js.Dynamic, evidence: js.Dynamic): Unit =
-    if sessionId != null then
+    val bytes = blob.size.asInstanceOf[Double]
+    if sessionId != null && !UploadLimit.fits(bytes) then
+      // The backend would refuse it, and retrying would resend it in full.
+      val minutes = (evidence.frameCount.asInstanceOf[Double] * SpeechDetector.FrameSeconds / 60).round
+      debug(s"utterance of $bytes bytes exceeds the upload limit; not sent")
+      notice = s"that recording was too long to send (about $minutes minutes); please say it again in parts"
+      backToListening(SessionPhase.Recording)
+      refreshSnapshot()
+    else if sessionId != null then
       val route = if utteranceRoute != null then utteranceRoute else UtteranceRoute.ToThread(threadId)
       pendingUploads.enqueue(PendingUpload(sessionId, route, blob, evidence, captureInterrupted, captureBeforeReply))
       uploadNext()
