@@ -592,6 +592,8 @@ def plugin(bb: BbApi): Unit =
       soundCueSettingsResponse(settings)
     }
 
+  val StoredRecordingWaitMs = 3 * 60_000.0
+
   def waitForMoreSpeech(threadId: String): Future[String] =
     state.awaiting.get(threadId) match
       case None =>
@@ -605,14 +607,18 @@ def plugin(bb: BbApi): Unit =
             .getOrElse(8000.0)
           val waiting = state.continuationWaiters.begin(threadId)
           publishSignal("awaiting-speech-begin", awaitedReply.sessionId, threadId)
-          // The wait covers speech that has not started yet; speech already
-          // being captured, or stored and not yet delivered, is waited for to
-          // completion, however long it takes.
+          // The wait covers speech that has not started yet. Speech already
+          // being captured is waited for to completion, however long it runs;
+          // a recording stored and not yet delivered, only for a few minutes,
+          // since its transcription can stall until the transcriber is fixed.
+          val storedRecordingWaitEndsAt = js.Date.now() + waitMs + StoredRecordingWaitMs
           var timer: js.Dynamic = null
           def scheduleExpiry(delayMs: Double): Unit =
             timer = js.Dynamic.global.setTimeout(
               js.Any.fromFunction0 { () =>
-                if state.capturingFor.contains(threadId) || recordingInProgressFor(threadId) then scheduleExpiry(1000)
+                val keepWaiting = state.capturingFor.contains(threadId) ||
+                  (recordingInProgressFor(threadId) && js.Date.now() < storedRecordingWaitEndsAt)
+                if keepWaiting then scheduleExpiry(1000)
                 else { val _ = state.continuationWaiters.expire(threadId) }
               },
               delayMs
@@ -625,6 +631,9 @@ def plugin(bb: BbApi): Unit =
               case Some(text) =>
                 ("The user continued speaking. Treat this as part of the preceding voice message:\n" +
                   "<voice-continuation>\n" + text + "\n</voice-continuation>")
+              case None if recordingInProgressFor(threadId) =>
+                "The user said more, and it was recorded, but it has not been transcribed yet. " +
+                  "It will arrive as a new message once it is; end your turn rather than waiting for it."
               case None =>
                 s"No additional speech arrived within ${waitMs.toInt} milliseconds. " +
                   "Treat the preceding voice message as complete and continue."
