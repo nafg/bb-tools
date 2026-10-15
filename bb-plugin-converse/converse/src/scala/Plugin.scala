@@ -74,8 +74,6 @@ private final case class AwaitingReply(sessionId: String, previousAssistantMessa
 /** Voice-conversation state for the whole server: at most one active browser
   * session, plus the threads whose next idle transition should be spoken.
   */
-private val RecentUtterancesKept = 10
-
 private final case class RecentUtterance(
     id: String,
     at: Double,
@@ -101,12 +99,6 @@ private final class State:
   // What a thread should be told with its next utterance: replies of its that
   // the user cut off while speaking to another thread.
   val pendingNotes: mutable.Map[String, List[String]] = mutable.Map.empty
-  // The last uploads with what was heard in them, for checking whether words
-  // were lost before or after transcription.
-  val recentUtterances = mutable.ArrayDeque.empty[RecentUtterance]
-  def remember(utterance: RecentUtterance): Unit =
-    recentUtterances.prepend(utterance)
-    while recentUtterances.length > RecentUtterancesKept do recentUtterances.removeLast()
   private var eventCounter              = 0
   def nextEventId(): String =
     eventCounter += 1
@@ -182,9 +174,44 @@ def plugin(bb: BbApi): Unit =
         |  PRIMARY KEY (provider, thread_id)
         |)""".stripMargin,
       """INSERT OR IGNORE INTO thread_provider_voice_assignments (provider, thread_id, voice)
-        |SELECT 'pocket-tts', thread_id, voice FROM thread_voice_assignments""".stripMargin
+        |SELECT 'pocket-tts', thread_id, voice FROM thread_voice_assignments""".stripMargin,
+      """CREATE TABLE IF NOT EXISTS utterances (
+        |  id TEXT PRIMARY KEY,
+        |  at REAL NOT NULL,
+        |  thread_id TEXT NOT NULL,
+        |  mime_type TEXT NOT NULL,
+        |  audio BLOB NOT NULL,
+        |  text TEXT NOT NULL,
+        |  segments TEXT
+        |)""".stripMargin
     )
   )
+
+  // Uploads are kept with their transcripts so a wrong ending can be checked
+  // against the audio that was actually sent, days later and across reloads.
+  val UtterancesKeptDays = 7
+  val UtterancesListed   = 50
+  def rememberUtterance(u: RecentUtterance): Unit =
+    val _ = db
+      .prepare("INSERT INTO utterances (id, at, thread_id, mime_type, audio, text, segments) VALUES (?, ?, ?, ?, ?, ?, ?)")
+      .run(u.id, u.at, u.threadId, u.mimeType, js.Dynamic.global.Buffer.from(u.audioBase64, "base64"), u.text, u.segments.orNull)
+    val _ = db.prepare("DELETE FROM utterances WHERE at < ?").run(js.Date.now() - UtterancesKeptDays * 86_400_000.0)
+  def listUtterances(): js.Array[js.Dynamic] =
+    db.prepare("SELECT id, at, thread_id, mime_type, length(audio) AS bytes, text, segments FROM utterances ORDER BY at DESC LIMIT ?")
+      .all(UtterancesListed)
+      .map { row =>
+        js.Dynamic.literal(
+          "id"       -> row.id,
+          "at"       -> row.at,
+          "threadId" -> row.thread_id,
+          "mimeType" -> row.mime_type,
+          "bytes"    -> row.bytes,
+          "text"     -> row.text,
+          "segments" -> row.segments
+        )
+      }
+  def utteranceAudio(id: String): Option[(String, js.Dynamic)] =
+    db.prepare("SELECT mime_type, audio FROM utterances WHERE id = ?").get(id).toOption.map(row => (str(row.mime_type), row.audio))
 
   val settings = bb.settings.define(
     js.Dynamic.literal(
@@ -1005,9 +1032,9 @@ def plugin(bb: BbApi): Unit =
             .flatMap { transcription =>
               val text = transcription.text
               bb.log.info(s"transcribed ($diagnosticContext) ${text.length} chars")
-              state.remember(
+              rememberUtterance(
                 RecentUtterance(
-                  id = state.nextEventId(),
+                  id = s"${js.Date.now().toLong}-${state.nextEventId()}",
                   at = js.Date.now(),
                   threadId = threadId,
                   mimeType = str(input.mimeType),
@@ -1132,21 +1159,7 @@ def plugin(bb: BbApi): Unit =
         providerF.flatMap(voiceSettingsResponse).toJSPromise
       },
       "recentUtterances" -> js.Any.fromFunction1 { (_: js.Dynamic) =>
-        Future.successful(
-          js.Dynamic.literal(
-            "utterances" -> state.recentUtterances.toJSArray.map { u =>
-              js.Dynamic.literal(
-                "id"       -> u.id,
-                "at"       -> u.at,
-                "threadId" -> u.threadId,
-                "mimeType" -> u.mimeType,
-                "bytes"    -> (u.audioBase64.length * 3 / 4),
-                "text"     -> u.text,
-                "segments" -> u.segments.orNull
-              )
-            }
-          )
-        ).toJSPromise
+        Future.successful(js.Dynamic.literal("utterances" -> listUtterances())).toJSPromise
       },
       "soundCueSettings" -> js.Any.fromFunction1 { (_: js.Dynamic) =>
         soundCueSettings().map(soundCueSettingsResponse).toJSPromise
@@ -1323,13 +1336,12 @@ def plugin(bb: BbApi): Unit =
     "GET",
     "/recent-utterance",
     { context =>
-      val id = str(context.req.query("id"))
-      state.recentUtterances.find(_.id == id) match
+      utteranceAudio(str(context.req.query("id"))) match
         case None => jsonResponse(404, "no such utterance")
-        case Some(u) =>
+        case Some((mimeType, audio)) =>
           js.Dynamic.newInstance(js.Dynamic.global.Response)(
-            js.Dynamic.global.Buffer.from(u.audioBase64, "base64"),
-            js.Dynamic.literal("status" -> 200, "headers" -> js.Dynamic.literal("content-type" -> u.mimeType))
+            audio,
+            js.Dynamic.literal("status" -> 200, "headers" -> js.Dynamic.literal("content-type" -> mimeType))
           )
     }
   )

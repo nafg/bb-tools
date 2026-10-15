@@ -749,13 +749,13 @@ function RecentUtterancesSection() {
   useRealtime("converse-utterances", () => void load());
   if (error) return <p className="text-xs text-destructive">{error}</p>;
   if (!utterances) return <div className="text-xs text-muted-foreground">Loading…</div>;
-  if (utterances.length === 0) return <div className="text-xs text-muted-foreground">Nothing uploaded since the plugin started.</div>;
+  if (utterances.length === 0) return <div className="text-xs text-muted-foreground">Nothing uploaded in the last week.</div>;
   return (
     <div className="space-y-2">
       {utterances.map((u) => (
         <div key={u.id} className="space-y-1 rounded border p-2 text-xs">
           <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
-            <span>{new Date(u.at).toLocaleTimeString()}</span>
+            <span>{new Date(u.at).toLocaleString()}</span>
             <span>{u.threadId || "new thread"}</span>
             <span>{Math.round(u.bytes / 1024)} KB {u.mimeType}</span>
           </div>
@@ -926,7 +926,7 @@ export default definePluginApp((app) => {
   app.slots.settingsSection({
     id: "recent-utterances",
     title: "Recent utterances",
-    description: "The last ten uploads, with their transcripts and the transcriber's per-segment silence and confidence figures.",
+    description: "A week of uploads, with their transcripts and the transcriber's per-segment silence and confidence figures.",
     component: RecentUtterancesSection,
   });
   app.slots.experimental_threadHeaderAction({
