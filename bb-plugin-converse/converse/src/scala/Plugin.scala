@@ -191,25 +191,32 @@ def plugin(bb: BbApi): Unit =
   // against the audio that was actually sent, days later and across reloads.
   val UtterancesKeptDays = 7
   val UtterancesListed   = 50
+  val UtteranceColumns = "id, at, thread_id, mime_type, length(audio) AS bytes, text, segments"
   def rememberUtterance(u: RecentUtterance): Unit =
     val _ = db
       .prepare("INSERT INTO utterances (id, at, thread_id, mime_type, audio, text, segments) VALUES (?, ?, ?, ?, ?, ?, ?)")
       .run(u.id, u.at, u.threadId, u.mimeType, js.Dynamic.global.Buffer.from(u.audioBase64, "base64"), u.text, u.segments.orNull)
     val _ = db.prepare("DELETE FROM utterances WHERE at < ?").run(js.Date.now() - UtterancesKeptDays * 86_400_000.0)
   def listUtterances(): js.Array[js.Dynamic] =
-    db.prepare("SELECT id, at, thread_id, mime_type, length(audio) AS bytes, text, segments FROM utterances ORDER BY at DESC LIMIT ?")
-      .all(UtterancesListed)
-      .map { row =>
-        js.Dynamic.literal(
-          "id"       -> row.id,
-          "at"       -> row.at,
-          "threadId" -> row.thread_id,
-          "mimeType" -> row.mime_type,
-          "bytes"    -> row.bytes,
-          "text"     -> row.text,
-          "segments" -> row.segments
-        )
-      }
+    db.prepare(s"SELECT $UtteranceColumns FROM utterances ORDER BY at DESC LIMIT ?").all(UtterancesListed).map(utteranceRow)
+  def utteranceRow(row: js.Dynamic): js.Dynamic =
+    js.Dynamic.literal(
+      "id"       -> row.id,
+      "at"       -> row.at,
+      "threadId" -> row.thread_id,
+      "mimeType" -> row.mime_type,
+      "bytes"    -> row.bytes,
+      "text"     -> row.text,
+      "segments" -> row.segments
+    )
+  def utteranceById(id: String): Option[js.Dynamic] =
+    db.prepare(s"SELECT $UtteranceColumns FROM utterances WHERE id = ?").get(id).toOption.map(utteranceRow)
+  /** The latest upload whose transcript became this message's text. */
+  def utteranceForMessage(threadId: String, text: String): Option[js.Dynamic] =
+    db.prepare(s"SELECT $UtteranceColumns FROM utterances WHERE thread_id = ? AND text = ? ORDER BY at DESC LIMIT 1")
+      .get(threadId, text.trim)
+      .toOption
+      .map(utteranceRow)
   def utteranceAudio(id: String): Option[(String, js.Dynamic)] =
     db.prepare("SELECT mime_type, audio FROM utterances WHERE id = ?").get(id).toOption.map(row => (str(row.mime_type), row.audio))
 
@@ -949,6 +956,8 @@ def plugin(bb: BbApi): Unit =
       "threadVoiceSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "soundCueSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "recentUtterances" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "utterance" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "utteranceForMessage" -> js.Dynamic.literal("input" -> Schema.strings("threadId" -> 100, "text" -> 100_000), "output" -> Schema.passthrough),
       "updateSoundCueSettings" -> js.Dynamic.literal(
         "input"  -> Schema.passthrough,
         "output" -> Schema.passthrough
@@ -1161,6 +1170,12 @@ def plugin(bb: BbApi): Unit =
           if requestedProvider.nonEmpty then Future.successful(requestedProvider)
           else settings.get().toFuture.map(s => str(s.ttsProvider))
         providerF.flatMap(voiceSettingsResponse).toJSPromise
+      },
+      "utterance" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        Future.successful(js.Dynamic.literal("utterance" -> utteranceById(str(input.id)).orNull)).toJSPromise
+      },
+      "utteranceForMessage" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        Future.successful(js.Dynamic.literal("utterance" -> utteranceForMessage(str(input.threadId), str(input.text)).orNull)).toJSPromise
       },
       "recentUtterances" -> js.Any.fromFunction1 { (_: js.Dynamic) =>
         Future.successful(js.Dynamic.literal("utterances" -> listUtterances())).toJSPromise

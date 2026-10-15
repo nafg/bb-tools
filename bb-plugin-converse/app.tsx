@@ -734,6 +734,44 @@ type RecentUtterance = {
   segments: string | null;
 };
 
+function UtteranceCard({ u }: { u: RecentUtterance }) {
+  return (
+    <div className="space-y-1 rounded border p-2 text-xs">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
+        <span>{new Date(u.at).toLocaleString()}</span>
+        <span>{u.threadId || "new thread"}</span>
+        <span>{Math.round(u.bytes / 1024)} KB {u.mimeType}</span>
+      </div>
+      <audio controls preload="none" className="h-8 w-full" src={`/api/v1/plugins/converse/http/recent-utterance?id=${encodeURIComponent(u.id)}`} />
+      <p className="break-words">{u.text || <span className="text-muted-foreground">(nothing transcribed)</span>}</p>
+      {u.segments && <p className="break-all font-mono text-muted-foreground">{u.segments}</p>}
+    </div>
+  );
+}
+
+// Opened from a heard message's "Recording" action: that message's upload.
+function UtterancePanel({ params }: { threadId: string; params: unknown }) {
+  const id = params && typeof params === "object" && "id" in params ? String((params as { id: unknown }).id) : null;
+  const [utterance, setUtterance] = useState<RecentUtterance | null | undefined>(undefined);
+  useEffect(() => {
+    if (!id) {
+      setUtterance(null);
+      return;
+    }
+    rpcCall("utterance", { id })
+      .then((result) => setUtterance((result as { utterance: RecentUtterance | null }).utterance))
+      .catch(() => setUtterance(null));
+  }, [id]);
+  if (utterance === undefined) return <div className="text-xs text-muted-foreground">Loading…</div>;
+  if (!utterance)
+    return (
+      <p className="text-xs text-muted-foreground">
+        No recording is kept for this message. Uploads are kept for a week; a message typed or sent before that has none.
+      </p>
+    );
+  return <UtteranceCard u={utterance} />;
+}
+
 // The last uploads with what was heard in them: play one back to tell
 // whether missing or invented words were in the audio or in the transcript.
 function RecentUtterancesSection() {
@@ -753,16 +791,7 @@ function RecentUtterancesSection() {
   return (
     <div className="space-y-2">
       {utterances.map((u) => (
-        <div key={u.id} className="space-y-1 rounded border p-2 text-xs">
-          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-muted-foreground">
-            <span>{new Date(u.at).toLocaleString()}</span>
-            <span>{u.threadId || "new thread"}</span>
-            <span>{Math.round(u.bytes / 1024)} KB {u.mimeType}</span>
-          </div>
-          <audio controls preload="none" className="h-8 w-full" src={`/api/v1/plugins/converse/http/recent-utterance?id=${encodeURIComponent(u.id)}`} />
-          <p className="break-words">{u.text || <span className="text-muted-foreground">(nothing transcribed)</span>}</p>
-          {u.segments && <p className="break-all font-mono text-muted-foreground">{u.segments}</p>}
-        </div>
+        <UtteranceCard key={u.id} u={u} />
       ))}
     </div>
   );
@@ -1002,6 +1031,21 @@ export default definePluginApp((app) => {
       const ctl = getController();
       if (ctl.getSnapshot().on) ctl.stop();
       else ctl.startViewed();
+    },
+  });
+  app.slots.threadPanelAction({
+    id: "utterance",
+    title: "Voice recording",
+    icon: "Mic",
+    component: UtterancePanel,
+  });
+  app.slots.messageAction({
+    id: "recording",
+    title: "Recording and transcription details",
+    icon: "AudioLines",
+    run: async ({ threadId, message, openPanel }) => {
+      const result = (await rpcCall("utteranceForMessage", { threadId, text: message.text })) as { utterance: RecentUtterance | null };
+      openPanel({ actionId: "utterance", title: "Voice recording", params: result.utterance ? { id: result.utterance.id } : {} });
     },
   });
   app.slots.messageAction({
