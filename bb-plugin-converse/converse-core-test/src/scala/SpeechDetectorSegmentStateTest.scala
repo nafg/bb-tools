@@ -36,13 +36,4 @@ class SpeechDetectorSegmentStateTest extends munit.FunSuite:
     val _ = state.processFrame(0.9, 0.2)
     (1 to 93).foreach(_ => state.processFrame(0.1, 0.01))
 
-    assertEquals(state.submittedSampleEndExclusive(60000, forcedBoundary = false), 17504)
-
-  test("forced boundary keeps audio through the flush point"):
-    val state = newState()
-    state.beginCandidate()
-    state.confirmSpeech()
-    val _ = state.processFrame(0.9, 0.2)
-    (1 to 10).foreach(_ => state.processFrame(0.1, 0.01))
-
-    assertEquals(state.submittedSampleEndExclusive(60000, forcedBoundary = true), 60000)
+    assertEquals(state.submittedSampleEndExclusive(60000), 17504)

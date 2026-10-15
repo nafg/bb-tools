@@ -2,7 +2,7 @@ package converseapp
 
 import conversecore.*
 
-import scala.concurrent.{ExecutionContext, Future, Promise}
+import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.js
 import scala.scalajs.js.typedarray.Float32Array
 
@@ -19,32 +19,8 @@ final case class SpeechDetectorFrame(rms: Double, speechProbability: Double)
   * state. TypeScript only supplies the npm package constructor and WAV encoder
   * at the frontend entry point.
   */
-final class SpeechDetector private (
-    vad: js.Dynamic
-)(using ExecutionContext):
-  private var destroyed       = false
-  private var forcedBoundary  = false
-  private var flushInFlight: Future[Unit] = null
-
-  def flush(): Future[Unit] =
-    if destroyed then Future.unit
-    else if flushInFlight != null then flushInFlight
-    else
-      forcedBoundary = true
-      val _ = vad.setOptions(js.Dynamic.literal("submitUserSpeechOnPause" -> true))
-      val flushing = vad.pause().asInstanceOf[js.Promise[Unit]].toFuture.flatMap { _ =>
-        val _ = vad.setOptions(js.Dynamic.literal("submitUserSpeechOnPause" -> false))
-        if destroyed then Future.unit
-        else vad.start().asInstanceOf[js.Promise[Unit]].toFuture
-      }
-      val completion = Promise[Unit]()
-      flushInFlight = completion.future
-      flushing.onComplete { outcome =>
-        forcedBoundary = false
-        flushInFlight = null
-        val _ = completion.complete(outcome)
-      }
-      flushInFlight
+final class SpeechDetector private (vad: js.Dynamic):
+  private var destroyed = false
 
   def destroy(): Future[Unit] =
     if destroyed then Future.unit
@@ -54,7 +30,6 @@ final class SpeechDetector private (
       vad.destroy().asInstanceOf[js.Promise[Unit]].toFuture
 
   private[converseapp] def isDestroyed: Boolean = destroyed
-  private[converseapp] def isForcedBoundary: Boolean = forcedBoundary
 
 object SpeechDetector:
   private val SampleRate                 = 16000
@@ -141,8 +116,7 @@ object SpeechDetector:
       },
       "onSpeechEnd" -> js.Any.fromFunction1 { (audio: Float32Array) =>
         if acceptingCallbacks then
-          val forcedBoundary = detector != null && detector.isForcedBoundary
-          val submittedEnd = state.submittedSampleEndExclusive(audio.length, forcedBoundary)
+          val submittedEnd = state.submittedSampleEndExclusive(audio.length)
           val wav = encodeWav(audio.subarray(0, submittedEnd))
           val recording = js.Dynamic.newInstance(js.Dynamic.global.Blob)(
             js.Array(wav),

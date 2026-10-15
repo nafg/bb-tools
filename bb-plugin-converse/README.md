@@ -59,7 +59,5 @@ bb plugin install .    # from this directory
   while you navigate around the app in the same tab; other threads' composers
   show that voice is active elsewhere. It does not follow pane focus (the
   plugin SDK has no focused-pane signal yet).
-- Utterances are capped at 60 seconds (forced boundary, then listening
-  resumes).
 - Replies are spoken only when the thread reaches idle (no incremental
   speech), matching how Converse's Claude/Pi adapters behave.

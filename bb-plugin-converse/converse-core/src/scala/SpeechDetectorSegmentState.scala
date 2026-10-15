@@ -70,14 +70,12 @@ final class SpeechDetectorSegmentState(config: SpeechDetectorSegmentStateConfig)
         if shouldPreview then previewPointEmitted = true
         shouldPreview
 
-  def submittedSampleEndExclusive(totalSampleCount: Int, forcedBoundary: Boolean): Int =
-    if forcedBoundary then totalSampleCount
-    else
-      val trailingContextSamples = math.round(
-        config.trailingContextMilliseconds.toDouble * config.sampleRate / 1000.0
-      ).toInt
-      val excessTrailingSamples = math.max(0, samplesSinceLastSpeech - trailingContextSamples)
-      math.max(0, totalSampleCount - excessTrailingSamples)
+  def submittedSampleEndExclusive(totalSampleCount: Int): Int =
+    val trailingContextSamples = math.round(
+      config.trailingContextMilliseconds.toDouble * config.sampleRate / 1000.0
+    ).toInt
+    val excessTrailingSamples = math.max(0, samplesSinceLastSpeech - trailingContextSamples)
+    math.max(0, totalSampleCount - excessTrailingSamples)
 
   def evidence: SpeechDetectorEvidence =
     SpeechDetectorEvidence(

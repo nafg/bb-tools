@@ -7,7 +7,7 @@ import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.annotation.JSExportTopLevel
-import scala.scalajs.js.timers.{SetTimeoutHandle, clearTimeout, setTimeout}
+import scala.scalajs.js.timers.setTimeout
 import scala.scalajs.js.typedarray.Float32Array
 import scala.util.{Failure, Success}
 
@@ -38,7 +38,6 @@ final class Controller(
   private val PreRollMs         = 1000.0
   // Speech transcribes fine at this Opus rate; the browser default is about four times it.
   private val UploadBitsPerSecond = 32_000
-  private val MaxUtteranceMs    = 60_000.0
   private val AudioStartGraceMs = 1000.0
 
   // Session
@@ -69,12 +68,10 @@ final class Controller(
 
   // Recording
   private var captureActive: Boolean              = false
-  private var maxUtteranceTimer: SetTimeoutHandle = null
   private var previewRecorder: MediaRecorder      = null
   // Records the utterance itself as compressed audio while Silero captures
   // it as samples; the compressed file is what gets uploaded when it exists.
   private var utteranceRecorder: MediaRecorder    = null
-  private var utteranceChunks: js.Array[js.Any]   = js.Array()
   private var utteranceRecording: Promise[Option[js.Dynamic]] = null
   // Uploads go up one at a time in capture order; a failed upload is retried
   // before the recording is given up on.
@@ -459,7 +456,6 @@ final class Controller(
       ctx.close().toFuture.failed.foreach(_ => ())
 
   private def stopInternal(end: VoiceSessionRestore.SessionEnd): Unit =
-    if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
     player.stop()
     replyHeld = false
     abandonCapture()
@@ -527,8 +523,7 @@ final class Controller(
       case SpeechDetectorEvent.SpeechEnd(recording, evidence) =>
         if captureActive then
           captureActive = false
-          if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
-          stopPreviewRecorder()
+                stopPreviewRecorder()
           debug(s"utterance captured (${recording.size.asInstanceOf[Double]} bytes)")
           finishUtteranceRecorder().foreach { compressed =>
             enqueueUpload(compressed.getOrElse(recording), evidenceToJs(evidence))
@@ -557,20 +552,10 @@ final class Controller(
           startPreviewRecorder()
           startUtteranceRecorder()
           debug("capture started")
-          maxUtteranceTimer = setTimeout(MaxUtteranceMs + PreRollMs) {
-            maxUtteranceTimer = null
-            if captureActive && speechDetector != null then
-              debug("utterance length cap reached; flushing")
-              speechDetector.flush().failed.foreach { e =>
-                notice = s"could not split long utterance: ${e.getMessage}"
-                refreshSnapshot()
-              }
-          }
 
   private def abandonCapture(): Unit =
     if captureActive then noteCapture(active = false)
     captureActive = false
-    if maxUtteranceTimer != null then { clearTimeout(maxUtteranceTimer); maxUtteranceTimer = null }
     stopPreviewRecorder()
     discardUtteranceRecorder()
     captureInterrupted = None
@@ -765,7 +750,6 @@ final class Controller(
         r.onerror = { _ => val _ = finished.trySuccess(None) }
         r.start()
         utteranceRecorder = r
-        utteranceChunks = chunks
         utteranceRecording = finished
       catch
         case e: Throwable => debug(s"utterance recorder unavailable, uploading samples instead: ${e.getMessage}")
