@@ -529,17 +529,21 @@ def plugin(bb: BbApi): Unit =
     js.Dynamic.literal(
       "name" -> "converse_wait_for_more_speech",
       "description" ->
-        ("Wait briefly for the user to continue the current voice-transcribed message. " +
-          "Call this only when whether to act depends on whether more speech immediately follows."),
+        ("Wait briefly for the user to continue the current voice-transcribed message, and learn whether " +
+          "they did and what they said. Use it when what you do next depends on that."),
       "instructions" ->
-        ("Voice messages are enclosed in agent-only [heard] tags and introduced with Transcribed:. " +
+        ("Voice messages are enclosed in agent-only [heard] tags. " +
           "Treat their contents as speech recognition that may contain filler words, homophones, " +
           "punctuation errors, or spoken phrasing. " +
-          "If the latest voice message appears unfinished or genuinely ambiguous, call " +
-          "converse_wait_for_more_speech before replying or taking action. Do not silently stop and " +
-          "wait without the tool: it has a bounded timeout and tells you whether speech arrived. " +
-          "If the native tool is not available in this provider instance, run `bb converse wait` " +
-          "instead; it invokes the same bounded waiter."),
+          "Call converse_wait_for_more_speech when your next reply or action depends on whether the user " +
+          "says more and on what they say, so you can decide with that in hand. " +
+          "That is the only reason to call it. An unfinished-sounding message is not by itself a reason: " +
+          "if you are sure more is coming, or you have nothing to say yet, end your turn without replying " +
+          "and the next utterance arrives as a new message. " +
+          "Never wait by other means, such as sleeping: the tool has a bounded timeout and reports whether " +
+          "speech arrived. " +
+          "Prefer the tool over `bb converse wait`; the CLI exists for providers without native tools and, " +
+          "under a sandboxed shell, cannot reach the bb server."),
       "presentation" -> js.Dynamic.literal(
         "label" -> js.Dynamic.literal(
           "pending"   -> "Listening for continued speech",
@@ -565,7 +569,7 @@ def plugin(bb: BbApi): Unit =
       "commands" -> js.Array(
         js.Dynamic.literal(
           "name"    -> "wait",
-          "summary" -> "Wait briefly for continued speech in the current thread",
+          "summary" -> "Wait briefly for continued speech in the current thread (prefer the converse_wait_for_more_speech tool when it is available)",
           "usage"   -> "bb converse wait"
         ),
         js.Dynamic.literal(
