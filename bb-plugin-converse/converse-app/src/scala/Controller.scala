@@ -815,25 +815,18 @@ final class Controller(
     submitted.onComplete {
       case _ if sessionId != sess => ()
       case Success(result) =>
+        if attempt > 1 then notice = null
         uploaded(result)
         uploading = false
         if pendingUploads.nonEmpty then uploadNext()
       case Failure(e) =>
-        UtteranceUploadRetry.delayBeforeRetry(attempt, transcriptionFailure(e)) match
-          case Some(delayMs) =>
-            debug(s"upload failed (attempt $attempt, retrying in ${delayMs}ms): ${e.getMessage}")
-            notice = s"voice message upload failed, retrying…"
-            refreshSnapshot()
-            val _ = setTimeout(delayMs.toDouble) { if sessionId == sess then attemptUpload(upload, attempt + 1) }
-          case None =>
-            debug(s"upload given up after $attempt attempts: ${e.getMessage}")
-            // Covers the whole submit pipeline (reading the recording,
-            // transcription, and the thread send), so don't blame transcription.
-            notice = s"voice message failed: ${e.getMessage}"
-            uploading = false
-            if pendingUploads.nonEmpty then uploadNext()
-            else if state == On(SessionPhase.Transcribing) then enter(SessionPhase.Listening)
-            else refreshSnapshot()
+        val delayMs = UtteranceUploadRetry.delayBeforeRetry(attempt)
+        debug(s"upload failed (attempt $attempt, retrying in ${delayMs}ms): ${e.getMessage}")
+        // Covers the whole submit pipeline (reading the recording,
+        // transcription, and the thread send), so don't blame transcription.
+        notice = s"voice message not sent yet, retrying: ${e.getMessage}"
+        refreshSnapshot()
+        val _ = setTimeout(delayMs.toDouble) { if sessionId == sess then attemptUpload(upload, attempt + 1) }
     }
 
   private def uploaded(result: js.Dynamic): Unit =

@@ -1,17 +1,6 @@
 package conversecore
 
-import TranscriptionFailure.*
-
 class UtteranceUploadRetryTest extends munit.FunSuite:
-  test("a failed upload is retried three times with growing delays, then given up"):
-    assertEquals(UtteranceUploadRetry.delayBeforeRetry(1, Other), Some(1000))
-    assertEquals(UtteranceUploadRetry.delayBeforeRetry(2, Other), Some(3000))
-    assertEquals(UtteranceUploadRetry.delayBeforeRetry(3, Other), Some(8000))
-    assertEquals(UtteranceUploadRetry.delayBeforeRetry(4, Other), None)
-    assertEquals(UtteranceUploadRetry.MaxAttempts, 4)
-
-  test("a rate limit is retried on the same schedule"):
-    assertEquals(UtteranceUploadRetry.delayBeforeRetry(1, RateLimited), Some(1000))
-
-  test("a forgotten session is not a retry case: it is re-registered instead"):
-    assertEquals(UtteranceUploadRetry.delayBeforeRetry(1, SessionForgotten), None)
+  test("a failed upload is retried sooner at first, then every 30 seconds without end"):
+    assertEquals((1 to 6).map(UtteranceUploadRetry.delayBeforeRetry).toList, List(1000, 3000, 8000, 15000, 30000, 30000))
+    assertEquals(UtteranceUploadRetry.delayBeforeRetry(1000), 30000)
