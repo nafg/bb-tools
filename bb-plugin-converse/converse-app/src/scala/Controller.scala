@@ -523,7 +523,7 @@ final class Controller(
       case SpeechDetectorEvent.SpeechEnd(recording, evidence) =>
         if captureActive then
           captureActive = false
-                stopPreviewRecorder()
+          stopPreviewRecorder()
           debug(s"utterance captured (${recording.size.asInstanceOf[Double]} bytes)")
           finishUtteranceRecorder().foreach { compressed =>
             enqueueUpload(compressed.getOrElse(recording), evidenceToJs(evidence))

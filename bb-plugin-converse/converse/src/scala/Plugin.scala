@@ -772,25 +772,25 @@ def plugin(bb: BbApi): Unit =
         // with low average log-probability means the segment is not speech.
         val segments = payload.segments.asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]]
         segments.fold(Transcription(str(payload.text).trim, None)) { segs =>
-          val evidence = segs.zipWithIndex.map { (seg, index) =>
-            val start    = seg.start.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
-            val end      = seg.end.asInstanceOf[js.UndefOr[Double]].getOrElse(start)
-            val noSpeech = seg.no_speech_prob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
-            val logProb  = seg.avg_logprob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
-            val chars    = str(seg.text).trim.length
-            f"$index%d:${end - start}%.2fs,noSpeech=$noSpeech%.3f,avgLogProb=$logProb%.3f,chars=$chars%d"
-          }.mkString("[", "; ", "]")
-          bb.log.info(s"transcription segment evidence ($diagnosticContext): $evidence")
           val reported = segs.toList.map { seg =>
             val start = seg.start.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
             TranscriptSegment(
-              durationSec = seg.end.asInstanceOf[js.UndefOr[Double]].getOrElse(start) - start,
+              startSec = start,
+              endSec = seg.end.asInstanceOf[js.UndefOr[Double]].getOrElse(start),
               noSpeechProbability = seg.no_speech_prob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0),
               avgLogProb = seg.avg_logprob.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0),
               text = str(seg.text).trim
             )
           }
-          val kept = TranscriptSegments.keep(reported)
+          val audioDurationSec = payload.duration.asInstanceOf[js.UndefOr[Double]].toOption
+          val evidence =
+            audioDurationSec.fold("")(d => f"audio=$d%.2fs ") +
+              reported.zipWithIndex.map { (seg, index) =>
+                f"$index%d:${seg.startSec}%.2f-${seg.endSec}%.2fs,noSpeech=${seg.noSpeechProbability}%.3f," +
+                  f"avgLogProb=${seg.avgLogProb}%.3f,chars=${seg.text.length}%d"
+              }.mkString("[", "; ", "]")
+          bb.log.info(s"transcription segment evidence ($diagnosticContext): $evidence")
+          val kept = TranscriptSegments.keep(reported, audioDurationSec)
           if kept.length < reported.length then
             bb.log.info(s"dropped ${reported.length - kept.length} segment(s) as not speech ($diagnosticContext): " +
               reported.filterNot(kept.contains).map(_.text).mkString(" | "))
