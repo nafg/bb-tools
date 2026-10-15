@@ -1133,9 +1133,12 @@ def plugin(bb: BbApi): Unit =
                 .filter(i => i != null && !js.isUndefined(i))
                 .map(i => ReplyInterruption.SpeakingReply(str(i.threadId), str(i.sentence)))
               // Unheard: the thread is still answering an earlier utterance, or
-              // its answer arrived while the user spoke and is held unplayed.
+              // its answer is queued unplayed. An agent waiting for more speech
+              // gets this as the rest of the same message, so no reply exists.
               val targetReplyUnheard =
-                state.awaiting.contains(threadId) || heardContext.exists(_.targetReplyHeld.asInstanceOf[Any] == true)
+                !state.continuationWaiters.isWaiting(threadId) &&
+                  (state.awaiting.contains(threadId) ||
+                    heardContext.exists(_.targetReplyUnplayed.asInstanceOf[Any] == true))
               val notes = ReplyInterruption.notes(threadId, speaking, targetReplyUnheard)
               notes.filter(_.threadId != threadId).foreach { note =>
                 state.pendingNotes.updateWith(note.threadId)(prior => Some(prior.getOrElse(Nil) :+ note.text))

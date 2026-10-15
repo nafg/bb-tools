@@ -54,6 +54,9 @@ final class Player(
     held = value
     if !held then startNextQueuedSpeech()
 
+  /** The threads with speech queued that has not started playing. */
+  def queuedThreads: Set[String] = queuedSpeech.iterator.map(_.sourceThread).toSet
+
   /** The thread whose text is playing, or null when nothing is. */
   def speakingThread: String = currentThread
 

@@ -13,6 +13,8 @@ final class ContinuationWaiters:
   def begin(threadId: String): Future[Option[String]] =
     pending.getOrElseUpdate(threadId, Promise[Option[String]]()).future
 
+  def isWaiting(threadId: String): Boolean = pending.contains(threadId)
+
   def deliver(threadId: String, text: String): Boolean =
     pending.remove(threadId).exists(_.trySuccess(Some(text)))
 
