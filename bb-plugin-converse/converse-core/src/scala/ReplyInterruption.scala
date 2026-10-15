@@ -12,10 +12,10 @@ object ReplyInterruption:
   final case class Note(threadId: String, text: String)
 
   /** The notes an utterance to `utteranceThreadId` produces. `speaking` is the
-    * reply playing when the utterance began, if any; `targetStillThinking`
+    * reply playing when the utterance began, if any; `targetReplyUnheard`
     * says the utterance's own thread had not yet spoken its last reply.
     */
-  def notes(utteranceThreadId: String, speaking: Option[SpeakingReply], targetStillThinking: Boolean): List[Note] =
+  def notes(utteranceThreadId: String, speaking: Option[SpeakingReply], targetReplyUnheard: Boolean): List[Note] =
     val interrupted = speaking.map { reply =>
       val sentence = reply.sentence.trim
       Note(
@@ -25,7 +25,7 @@ object ReplyInterruption:
       )
     }
     val beforeHearing =
-      Option.when(targetStillThinking && !speaking.exists(_.threadId == utteranceThreadId))(
+      Option.when(targetReplyUnheard && !speaking.exists(_.threadId == utteranceThreadId))(
         Note(utteranceThreadId, "Spoken before the previous reply was read aloud.")
       )
     interrupted.toList ++ beforeHearing

@@ -24,8 +24,7 @@ private final case class PendingUpload(
     route: UtteranceRoute,
     blob: js.Dynamic,
     evidence: js.Dynamic,
-    interrupted: Option[ReplyInterruption.SpeakingReply],
-    beforeHearingReply: Boolean
+    interrupted: Option[ReplyInterruption.SpeakingReply]
 )
 
 final class Controller(
@@ -85,10 +84,8 @@ final class Controller(
   private var previewRateLimitPauseMs: Option[Double] = None
   private var utteranceSeq: Int                   = 0
   private var utteranceRoute: UtteranceRoute      = null
-  // What the user was hearing when this capture began: a reply they cut off,
-  // or none yet from the thread they are speaking to.
+  // The reply the user cut off by starting this capture, if any.
   private var captureInterrupted: Option[ReplyInterruption.SpeakingReply] = None
-  private var captureBeforeReply: Boolean         = false
   private var interimText: String                 = null
   private var interimSegments: List[String]       = Nil
 
@@ -111,7 +108,9 @@ final class Controller(
   // Playback is tab-wide rather than part of the voice-session state machine.
   private val player = new Player(rpcCall, () => refreshSnapshot())
   private val cues   = new SoundCuePlayer
-  private var replyHeld: Boolean = false
+  // Threads whose replies arrived while the user was speaking or being
+  // transcribed, and wait unplayed until the hold lifts.
+  private var heldReplyThreads: Set[String] = Set.empty
 
   // React 18 external-store contract: a stable snapshot object per change.
   private var listeners: List[js.Function0[Unit]] = Nil
@@ -195,8 +194,8 @@ final class Controller(
     val hold = ReplySpeechHold.holds(captureActive, state)
     if hold != player.isHeld then
       player.setHeld(hold)
-      if !hold && replyHeld then
-        replyHeld = false
+      if !hold && heldReplyThreads.nonEmpty then
+        heldReplyThreads = Set.empty
         if player.isSpeaking then enter(SessionPhase.Speaking)
 
   def subscribe(cb: js.Function0[Unit]): js.Function0[Unit] =
@@ -457,7 +456,7 @@ final class Controller(
 
   private def stopInternal(end: VoiceSessionRestore.SessionEnd): Unit =
     player.stop()
-    replyHeld = false
+    heldReplyThreads = Set.empty
     abandonCapture()
     pendingUploads.clear()
     uploading = false
@@ -542,7 +541,6 @@ final class Controller(
         case Some(route) =>
           utteranceRoute = route
           captureInterrupted = None
-          captureBeforeReply = route.existingThreadId.contains(threadId) && (state == On(SessionPhase.Waiting) || replyHeld)
           captureActive = true
           syncReplyHold()
           noteCapture(active = true)
@@ -559,7 +557,6 @@ final class Controller(
     stopPreviewRecorder()
     discardUtteranceRecorder()
     captureInterrupted = None
-    captureBeforeReply = false
     debug("capture discarded")
     syncReplyHold()
 
@@ -782,7 +779,7 @@ final class Controller(
       refreshSnapshot()
     else if sessionId != null then
       val route = if utteranceRoute != null then utteranceRoute else UtteranceRoute.ToThread(threadId)
-      pendingUploads.enqueue(PendingUpload(sessionId, route, blob, evidence, captureInterrupted, captureBeforeReply))
+      pendingUploads.enqueue(PendingUpload(sessionId, route, blob, evidence, captureInterrupted))
       uploadNext()
 
   private def uploadNext(): Unit =
@@ -808,7 +805,7 @@ final class Controller(
                         "interrupted" -> upload.interrupted.fold(null: js.Any)(r =>
                           js.Dynamic.literal("threadId" -> r.threadId, "sentence" -> r.sentence)
                         ),
-                        "beforeHearingReply" -> upload.beforeHearingReply
+                        "targetReplyHeld" -> (tid != null && heldReplyThreads.contains(tid))
                       )
                     )
                     upload.route match
@@ -916,7 +913,7 @@ final class Controller(
       // Replay replaces session-driven speech, so release that session from
       // its speaking phase before the Player supersedes the old playback.
       backToListening(SessionPhase.Speaking)
-      replyHeld = false
+      heldReplyThreads = Set.empty
       ensureAudioContext()
       player.play(text, sourceThread).map(_ => ())
 
@@ -926,7 +923,7 @@ final class Controller(
     else
       if player.isHeld then
         debug("reply held until the current utterance is submitted")
-        replyHeld = true
+        heldReplyThreads ++= Option(sourceThread)
       else enter(SessionPhase.Speaking)
       player.enqueue(text, sourceThread).onComplete {
         case Success(completed) if completed && !player.isSpeaking =>

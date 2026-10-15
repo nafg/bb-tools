@@ -1132,8 +1132,11 @@ def plugin(bb: BbApi): Unit =
                 .map(_.interrupted)
                 .filter(i => i != null && !js.isUndefined(i))
                 .map(i => ReplyInterruption.SpeakingReply(str(i.threadId), str(i.sentence)))
-              val beforeHearing = heardContext.exists(_.beforeHearingReply.asInstanceOf[Any] == true)
-              val notes = ReplyInterruption.notes(threadId, speaking, beforeHearing)
+              // Unheard: the thread is still answering an earlier utterance, or
+              // its answer arrived while the user spoke and is held unplayed.
+              val targetReplyUnheard =
+                state.awaiting.contains(threadId) || heardContext.exists(_.targetReplyHeld.asInstanceOf[Any] == true)
+              val notes = ReplyInterruption.notes(threadId, speaking, targetReplyUnheard)
               notes.filter(_.threadId != threadId).foreach { note =>
                 state.pendingNotes.updateWith(note.threadId)(prior => Some(prior.getOrElse(Nil) :+ note.text))
               }

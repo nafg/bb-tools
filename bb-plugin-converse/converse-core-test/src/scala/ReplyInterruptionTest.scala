@@ -4,30 +4,30 @@ import ReplyInterruption.*
 
 class ReplyInterruptionTest extends munit.FunSuite:
   test("interrupting your own thread's reply tells that thread where it was cut off"):
-    val notes = ReplyInterruption.notes("a", Some(SpeakingReply("a", " Second sentence. ")), targetStillThinking = false)
+    val notes = ReplyInterruption.notes("a", Some(SpeakingReply("a", " Second sentence. ")), targetReplyUnheard = false)
     assertEquals(notes.map(_.threadId), List("a"))
     assert(notes.head.text.contains("“Second sentence.”"), notes.head.text)
     assert(notes.head.text.contains("not read aloud"))
 
   test("interrupting before the first sentence had started says none of it was read"):
-    val notes = ReplyInterruption.notes("a", Some(SpeakingReply("a", "")), targetStillThinking = false)
+    val notes = ReplyInterruption.notes("a", Some(SpeakingReply("a", "")), targetReplyUnheard = false)
     assertEquals(notes.map(_.text), List("The user interrupted this reply as it was about to be read aloud; none of it was read aloud."))
 
   test("speaking before the reply was read aloud is noted on the utterance's thread"):
     assertEquals(
-      ReplyInterruption.notes("a", None, targetStillThinking = true),
+      ReplyInterruption.notes("a", None, targetReplyUnheard = true),
       List(Note("a", "Spoken before the previous reply was read aloud."))
     )
 
   test("speaking after the reply finished adds nothing"):
-    assertEquals(ReplyInterruption.notes("a", None, targetStillThinking = false), Nil)
+    assertEquals(ReplyInterruption.notes("a", None, targetReplyUnheard = false), Nil)
 
   test("interrupting another thread's reply notes the interrupted thread, not the utterance's"):
-    val notes = ReplyInterruption.notes("b", Some(SpeakingReply("a", "Still talking.")), targetStillThinking = false)
+    val notes = ReplyInterruption.notes("b", Some(SpeakingReply("a", "Still talking.")), targetReplyUnheard = false)
     assertEquals(notes.map(_.threadId), List("a"))
 
   test("interrupting another thread's reply while your own is still thinking produces both notes"):
-    val notes = ReplyInterruption.notes("b", Some(SpeakingReply("a", "Still talking.")), targetStillThinking = true)
+    val notes = ReplyInterruption.notes("b", Some(SpeakingReply("a", "Still talking.")), targetReplyUnheard = true)
     assertEquals(notes.map(_.threadId), List("a", "b"))
 
   test("notes come before the transcript, in the order things happened"):
