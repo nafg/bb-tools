@@ -169,7 +169,8 @@ private final class State:
   // Stored recordings are transcribed and delivered one at a time, in the
   // order they were stored, so messages reach threads in the order spoken.
   var recordingQueue: Future[Unit] = Future.unit
-  // Managed services being started, by key, so concurrent callers share one start.
+  // Managed-service checks in progress, by key, so concurrent callers share
+  // one check and a replacement starts once.
   val servicesStarting: mutable.Map[String, Future[Either[String, String]]] = mutable.Map.empty
   private var eventCounter              = 0
   def nextEventId(): String =
@@ -1083,13 +1084,30 @@ def plugin(bb: BbApi): Unit =
       terminalId <- bb.storage.kv.get(s"${service.key}.terminalId").toFuture
       _ <- str(terminalId) match
         case "" => Future.unit
-        case tid => bb.sdk.terminals.close(js.Dynamic.literal("terminalId" -> tid)).toFuture.map(_ => ()).recover(_ => ())
+        case tid =>
+          bb.sdk.terminals
+            .close(js.Dynamic.literal("terminalId" -> tid, "mode" -> "force"))
+            .toFuture
+            .map(_ => ())
+            .recover { case e => bb.log.warn(s"could not close the ${service.label} terminal $tid: ${e.getMessage}") }
       _ <- bb.storage.kv.delete(s"${service.key}.terminalId").toFuture
       _ <- bb.storage.kv.delete(s"${service.key}.lastUseAt").toFuture
     yield ()
 
-  /** The service's URL once it answers, starting it first if it is down. */
+  /** The service's URL once it answers, starting it first if it is down.
+    * Concurrent callers share one check, so a replacement starts once.
+    */
   def ensureService(service: ManagedService): Future[Either[String, String]] =
+    state.servicesStarting.getOrElse(
+      service.key, {
+        val ensured = ensureServiceNow(service)
+        state.servicesStarting.update(service.key, ensured)
+        ensured.onComplete(_ => state.servicesStarting.remove(service.key))
+        ensured
+      }
+    )
+
+  def ensureServiceNow(service: ManagedService): Future[Either[String, String]] =
     val url = service.probeUrl
     def awaitDown(attempt: Int): Future[Unit] =
       probeService(url).flatMap {
@@ -1121,59 +1139,53 @@ def plugin(bb: BbApi): Unit =
           touchServiceUse(service)
           Future.successful(Right(url))
         case Right(false) =>
-          state.servicesStarting.getOrElse(
-            service.key, {
-              val home    = homeDirectory
-              val command = service.startCommand(home)
-              bb.log.info(s"starting managed ${service.label}: $command")
-              state.active.foreach { a =>
-                publishSignal("status", a.sessionId, a.threadId, "text" -> s"Starting ${service.label}…")
+          val home    = homeDirectory
+          val command = service.startCommand(home)
+          bb.log.info(s"starting managed ${service.label}: $command")
+          state.active.foreach { a =>
+            publishSignal("status", a.sessionId, a.threadId, "text" -> s"Starting ${service.label}…")
+          }
+          val started =
+            connectedHostId()
+              .flatMap {
+                case None => Future.successful(Left(s"no connected host to start ${service.label} on"))
+                case Some(hostId) =>
+                  writeServiceFiles(service)
+                  bb.sdk.terminals
+                    .create(
+                      js.Dynamic.literal(
+                        "cols"  -> 120,
+                        "rows"  -> 30,
+                        "scope" -> js.Dynamic.literal("kind" -> "host_path", "hostId" -> hostId, "cwd" -> home),
+                        "title" -> s"${service.key} (converse)",
+                        "start" -> js.Dynamic.literal("mode" -> "command", "command" -> command)
+                      )
+                    )
+                    .toFuture
+                    .flatMap { result =>
+                      val terminal =
+                        result.terminal.asInstanceOf[js.UndefOr[js.Dynamic]].getOrElse(result)
+                      val terminalId = str(terminal.id)
+                      bb.storage.kv.set(s"${service.key}.terminalId", terminalId).toFuture.map(_ => terminalId)
+                    }
+                    .flatMap { terminalId =>
+                      def awaitReady(attempt: Int): Future[Either[String, String]] =
+                        probeService(url).flatMap(up => if up then serviceCurrent(service) else Future.successful(false)).flatMap {
+                          case true =>
+                            bb.log.info(s"${service.label} is up (terminal $terminalId)")
+                            touchServiceUse(service)
+                            Future.successful(Right(url))
+                          case false if attempt >= service.readyWithinSeconds =>
+                            Future.successful(
+                              Left(s"${service.label} did not become ready within ${service.readyWithinSeconds}s")
+                            )
+                          case false => delayMs(1000).flatMap(_ => awaitReady(attempt + 1))
+                        }
+                      awaitReady(0)
+                    }
               }
-              val started =
-                connectedHostId()
-                  .flatMap {
-                    case None => Future.successful(Left(s"no connected host to start ${service.label} on"))
-                    case Some(hostId) =>
-                      writeServiceFiles(service)
-                      bb.sdk.terminals
-                        .create(
-                          js.Dynamic.literal(
-                            "cols"  -> 120,
-                            "rows"  -> 30,
-                            "scope" -> js.Dynamic.literal("kind" -> "host_path", "hostId" -> hostId, "cwd" -> home),
-                            "title" -> s"${service.key} (converse)",
-                            "start" -> js.Dynamic.literal("mode" -> "command", "command" -> command)
-                          )
-                        )
-                        .toFuture
-                        .flatMap { result =>
-                          val terminal =
-                            result.terminal.asInstanceOf[js.UndefOr[js.Dynamic]].getOrElse(result)
-                          val terminalId = str(terminal.id)
-                          bb.storage.kv.set(s"${service.key}.terminalId", terminalId).toFuture.map(_ => terminalId)
-                        }
-                        .flatMap { terminalId =>
-                          def awaitReady(attempt: Int): Future[Either[String, String]] =
-                            probeService(url).flatMap(up => if up then serviceCurrent(service) else Future.successful(false)).flatMap {
-                              case true =>
-                                bb.log.info(s"${service.label} is up (terminal $terminalId)")
-                                touchServiceUse(service)
-                                Future.successful(Right(url))
-                              case false if attempt >= service.readyWithinSeconds =>
-                                Future.successful(
-                                  Left(s"${service.label} did not become ready within ${service.readyWithinSeconds}s")
-                                )
-                              case false => delayMs(1000).flatMap(_ => awaitReady(attempt + 1))
-                            }
-                          awaitReady(0)
-                        }
-                  }
-                  .recover { case e => Left(s"could not start ${service.label}: ${e.getMessage}") }
-              state.servicesStarting.update(service.key, started)
-              started.onComplete(_ => state.servicesStarting.remove(service.key))
-              started
-            }
-          )
+              .recover { case e => Left(s"could not start ${service.label}: ${e.getMessage}") }
+          started
     }
 
   bb.background.schedule(
