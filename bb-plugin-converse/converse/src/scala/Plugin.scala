@@ -989,10 +989,25 @@ def plugin(bb: BbApi): Unit =
                 diagnosticContext,
                 signal
               ).recoverWith { case e: TranscriberRejectedLength =>
-                // Long recordings are mostly continuous speech, where bb's
-                // Whisper-based transcriber seldom invents words.
-                bb.log.info(s"too long for Parakeet ($diagnosticContext); transcribing with bb instead: ${e.getMessage}")
-                viaBb
+                // Long recordings are mostly continuous speech, where Whisper
+                // seldom invents words: Groq's when a key is set, else bb's.
+                val groqKey = str(s.groqApiKey)
+                bb.log.info(s"too long for Parakeet ($diagnosticContext): ${e.getMessage}")
+                if groqKey.isEmpty then viaBb
+                else
+                  viaBbWhenRateLimited(
+                    transcribeViaEndpoint(
+                      "groq",
+                      "https://api.groq.com/openai/v1/audio/transcriptions",
+                      str(s.groqModel),
+                      groqKey,
+                      language,
+                      file,
+                      precedingTranscript,
+                      diagnosticContext,
+                      signal
+                    )
+                  )
               }
           }
         case _ => viaBb

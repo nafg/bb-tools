@@ -6,9 +6,11 @@ package converse
   * never split into chunks: splitting made Parakeet invent words in testing.
   * It uses the GPU when the CUDA runtime loads, otherwise the CPU.
   *
-  * It refuses audio longer than `MaxSeconds` with a 413. Measured on an 8 GB
-  * RTX 3070: 210 seconds fit in GPU memory and 240 did not; and this ONNX
-  * export fails outright on 10 minutes even on the CPU.
+  * It answers 413 for audio it cannot take whole: longer than `MaxSeconds`,
+  * or more than its GPU memory cap allows at the moment. Measured on an 8 GB
+  * RTX 3070 without a cap: 210 seconds fit in GPU memory and 240 did not; and
+  * this ONNX export fails outright on 10 minutes even on the CPU. The cap
+  * keeps a long recording from leaving gigabytes reserved after it is done.
   */
 private object ParakeetServer:
   val Port  = 8790
@@ -59,13 +61,19 @@ private object ParakeetServer:
       |# onnxruntime refuses to load.
       |model_dir = os.path.expanduser(f"~/.cache/bb-converse/models/{args.model}")
       |snapshot_download(REPOSITORIES[args.model], local_dir=model_dir)
+      |GPU_MEMORY_LIMIT = 4 * 1024**3
       |providers = (
-      |    ["CUDAExecutionProvider", "CPUExecutionProvider"]
+      |    [("CUDAExecutionProvider", {"gpu_mem_limit": GPU_MEMORY_LIMIT, "arena_extend_strategy": "kSameAsRequested"}),
+      |     "CPUExecutionProvider"]
       |    if "CUDAExecutionProvider" in ort.get_available_providers()
       |    else ["CPUExecutionProvider"]
       |)
       |model = onnx_asr.load_model(args.model, model_dir, providers=providers)
       |print(f"loaded {args.model} with {providers[0]}", flush=True)
+      |
+      |
+      |def out_of_memory(error):
+      |    return "BFCArena" in str(error) or "Failed to allocate" in str(error)
       |
       |SAMPLE_RATE = 16000
       |app = FastAPI()
@@ -85,7 +93,12 @@ private object ParakeetServer:
       |    seconds = len(audio) / SAMPLE_RATE
       |    if seconds > args.max_seconds:
       |        raise HTTPException(413, f"{seconds:.0f} s is longer than the {args.max_seconds:.0f} s this server transcribes")
-      |    text = model.recognize(audio, sample_rate=SAMPLE_RATE) if len(audio) else ""
+      |    try:
+      |        text = model.recognize(audio, sample_rate=SAMPLE_RATE) if len(audio) else ""
+      |    except Exception as error:
+      |        if out_of_memory(error):
+      |            raise HTTPException(413, f"not enough GPU memory for {seconds:.0f} s of audio") from error
+      |        raise
       |    return {"text": text, "duration": seconds}
       |
       |
