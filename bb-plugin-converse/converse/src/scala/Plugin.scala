@@ -86,6 +86,11 @@ private final case class ManagedService(
 /** `url` answers GET with JSON `{"version": ...}`, expected to be `expected`. */
 private final case class ServiceVersionCheck(url: String, expected: String)
 
+/** How long a managed service may leave its version check unanswered before
+  * it is taken to be hung rather than busy.
+  */
+private val ServiceHungAfterMs = 60_000.0
+
 private val PocketService = ManagedService(
   key = "pocket",
   label = "Pocket TTS",
@@ -172,6 +177,8 @@ private final class State:
   // Managed-service checks in progress, by key, so concurrent callers share
   // one check and a replacement starts once.
   val servicesStarting: mutable.Map[String, Future[Either[String, String]]] = mutable.Map.empty
+  // When each managed service's version checks began timing out, if they are.
+  val serviceBusySince: mutable.Map[String, Double] = mutable.Map.empty
   private var eventCounter              = 0
   def nextEventId(): String =
     eventCounter += 1
@@ -1010,6 +1017,13 @@ def plugin(bb: BbApi): Unit =
               bb.log.warn(s"Parakeet unavailable ($diagnosticContext): $message")
               viaWhisper
             case Right(url) =>
+              // Parakeet's own deadline, inside the caller's: when it passes
+              // first, the recording goes to Whisper instead of waiting on a
+              // server that may have hung.
+              val parakeetDeadline = js.Dynamic.global.AbortSignal.timeout(ParakeetServer.AnswerWithinMs)
+              val parakeetSignal =
+                if js.isUndefined(signal) then parakeetDeadline
+                else js.Dynamic.global.AbortSignal.any(js.Array(signal, parakeetDeadline))
               transcribeViaEndpoint(
                 "parakeet",
                 url,
@@ -1019,10 +1033,18 @@ def plugin(bb: BbApi): Unit =
                 file,
                 precedingTranscript = "",
                 diagnosticContext,
-                signal
-              ).recoverWith { case e: TranscriberRejectedLength =>
-                bb.log.info(s"too long for Parakeet ($diagnosticContext): ${e.getMessage}")
-                viaWhisper
+                parakeetSignal
+              ).recoverWith {
+                case e: TranscriberRejectedLength =>
+                  bb.log.info(s"too long for Parakeet ($diagnosticContext): ${e.getMessage}")
+                  viaWhisper
+                case _ if parakeetDeadline.aborted.asInstanceOf[Boolean] &&
+                    !signal.toOption.exists(_.aborted.asInstanceOf[Boolean]) =>
+                  bb.log.warn(
+                    s"Parakeet did not answer within ${ParakeetServer.AnswerWithinMs.toInt / 1000} s ($diagnosticContext); " +
+                      "transcribing with Whisper instead"
+                  )
+                  viaWhisper
               }
           }
         case _ => viaBb
@@ -1068,11 +1090,13 @@ def plugin(bb: BbApi): Unit =
     }
 
   /** What a check of a managed service found. Stale needs positive evidence:
-    * a different version, or none reported by a server too old to have one.
-    * A version check that times out means the service is busy, not stale.
+    * a different version, none reported by a server too old to have one, or
+    * no answer for longer than any real job keeps it busy. A version check
+    * that times out otherwise means the service is busy. Unverified: it
+    * answered, but not with a version.
     */
   enum ServiceState:
-    case Down, Busy, Stale, Current
+    case Down, Busy, Unverified, Stale, Current
 
   def serviceState(service: ManagedService): Future[ServiceState] =
     service.versionCheck match
@@ -1084,7 +1108,7 @@ def plugin(bb: BbApi): Unit =
           .toFuture
           .flatMap { response =>
             if str(response.status) == "404" then Future.successful(ServiceState.Stale)
-            else if !response.ok.asInstanceOf[Boolean] then Future.successful(ServiceState.Current)
+            else if !response.ok.asInstanceOf[Boolean] then Future.successful(ServiceState.Unverified)
             else
               response.json().asInstanceOf[js.Promise[js.Dynamic]].toFuture.map { body =>
                 if str(body.version) == check.expected then ServiceState.Current else ServiceState.Stale
@@ -1094,6 +1118,17 @@ def plugin(bb: BbApi): Unit =
             case js.JavaScriptException(error) if str(error.asInstanceOf[js.Dynamic].name) == "TimeoutError" =>
               ServiceState.Busy
             case _ => ServiceState.Down
+          }
+          .map {
+            case ServiceState.Busy =>
+              val since = state.serviceBusySince.getOrElseUpdate(service.key, js.Date.now())
+              if js.Date.now() - since > ServiceHungAfterMs then
+                bb.log.warn(s"${service.label} has not answered its version check for a minute; taking it to be hung")
+                ServiceState.Stale
+              else ServiceState.Busy
+            case other =>
+              val _ = state.serviceBusySince.remove(service.key)
+              other
           }
 
   def stopService(service: ManagedService): Future[Unit] =
@@ -1137,7 +1172,7 @@ def plugin(bb: BbApi): Unit =
     val running: Future[Either[String, Boolean]] =
       serviceState(service).flatMap {
         case ServiceState.Down                        => Future.successful(Right(false))
-        case ServiceState.Current | ServiceState.Busy => Future.successful(Right(true))
+        case ServiceState.Current | ServiceState.Busy | ServiceState.Unverified => Future.successful(Right(true))
         case ServiceState.Stale =>
           bb.log.info(s"replacing managed ${service.label}: the running instance is not the current version")
           stopService(service).flatMap(_ => awaitDown(0)).flatMap(_ => serviceState(service)).map {

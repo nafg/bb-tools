@@ -19,6 +19,11 @@ private object ParakeetServer:
   val Model = "nemo-parakeet-tdt-0.6b-v3"
   val MaxSeconds = 120
 
+  /** Parakeet transcribed two minutes of audio in under a second on the GPU,
+    * so a request still unanswered after this has hung.
+    */
+  val AnswerWithinMs = 30_000.0
+
   /** Where the script is written on the host before it is started. */
   val ScriptRelativePath = ".cache/bb-converse/parakeet_server.py"
 
