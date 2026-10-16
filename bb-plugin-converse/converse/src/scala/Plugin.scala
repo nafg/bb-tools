@@ -9,6 +9,7 @@ import conversecore.{
   TranscriptSegments,
   AssistantMessage,
   AssistantReply,
+  IdleOutcome,
   ContinuationWaiters,
   ReplyInterruption,
   SoundCue,
@@ -121,6 +122,11 @@ private def ttsConfigKey(provider: String): String = s"tts.config.$provider"
 
 private final case class ActiveSession(sessionId: String, threadId: String)
 private final case class AwaitingReply(sessionId: String, previousAssistantMessageId: Option[String])
+
+/** How long after a turn ends without answering the user's latest message a
+  * turn answering it may take to begin (one began 4 s later in practice).
+  */
+private val FollowUpTurnWithinMs = 20_000.0
 
 /** What the browser's speech detector reported for an upload. */
 private final case class DetectorEvidence(frames: Int, speechFrames: Int, peakSpeechProbability: Double, peakRms: Double)
@@ -783,28 +789,24 @@ def plugin(bb: BbApi): Unit =
     )
   )
 
-  def assistantMessagesFromTimeline(timeline: js.Dynamic): Vector[AssistantMessage] =
+  /** Every conversation row of a timeline, nested ones included. */
+  def conversationRows(timeline: js.Dynamic): Vector[js.Dynamic] =
     def array(value: js.Dynamic): Vector[js.Dynamic] =
       if value == null || js.isUndefined(value) || !js.Array.isArray(value) then Vector.empty
       else value.asInstanceOf[js.Array[js.Dynamic]].toVector
+    def rows(row: js.Dynamic): Vector[js.Dynamic] =
+      (if str(row.kind) == "conversation" then Vector(row) else Vector.empty) ++ array(row.children).flatMap(rows)
+    array(timeline.rows).flatMap(rows)
 
-    def messages(row: js.Dynamic): Vector[AssistantMessage] =
-      val current =
-        if str(row.kind) == "conversation" && str(row.role) == "assistant" then
-          val id = str(row.id)
-          if id.isEmpty then Vector.empty
-          else
-            Vector(
-              AssistantMessage(
-                id,
-                str(row.text),
-                str(row.sourceSeqEnd).toDoubleOption.fold(0L)(_.toLong)
-              )
-            )
-        else Vector.empty
-      current ++ array(row.children).flatMap(messages)
+  def rowSeq(row: js.Dynamic): Long = str(row.sourceSeqEnd).toDoubleOption.fold(0L)(_.toLong)
 
-    array(timeline.rows).flatMap(messages)
+  def assistantMessagesFromTimeline(timeline: js.Dynamic): Vector[AssistantMessage] =
+    conversationRows(timeline)
+      .filter(row => str(row.role) == "assistant" && str(row.id).nonEmpty)
+      .map(row => AssistantMessage(str(row.id), str(row.text), rowSeq(row)))
+
+  def latestUserMessageSeq(timeline: js.Dynamic): Option[Long] =
+    conversationRows(timeline).filter(row => str(row.role) == "user").map(rowSeq).maxOption
 
   /** A spoken utterance as thread input: the transcript between agent-only
     * markers so the agent knows it was heard, not typed.
@@ -820,7 +822,7 @@ def plugin(bb: BbApi): Unit =
       js.Dynamic.literal("type" -> "text", "text" -> "[/heard]", "visibility" -> "agent-only")
     )
 
-  def latestAssistantMessage(threadId: String): Future[Option[AssistantMessage]] =
+  def recentTimeline(threadId: String): Future[js.Dynamic] =
     bb.sdk.threads
       .timeline(
         js.Dynamic.literal(
@@ -830,7 +832,9 @@ def plugin(bb: BbApi): Unit =
         )
       )
       .toFuture
-      .map(timeline => AssistantReply.freshSince(None, assistantMessagesFromTimeline(timeline)))
+
+  def latestAssistantMessage(threadId: String): Future[Option[AssistantMessage]] =
+    recentTimeline(threadId).map(timeline => AssistantReply.freshSince(None, assistantMessagesFromTimeline(timeline)))
 
   def audioFile(mimeType: String, audioBase64: String): js.Dynamic =
     val bytes = js.Dynamic.global.Buffer.from(audioBase64, "base64")
@@ -1856,34 +1860,55 @@ def plugin(bb: BbApi): Unit =
     "thread.idle",
     { payload =>
       val threadId = str(payload.thread.id)
-      state.awaiting.remove(threadId).foreach { awaitedReply =>
-        latestAssistantMessage(threadId).onComplete {
-          case scala.util.Success(currentAssistantMessage) =>
-            AssistantReply.freshSince(
+      state.awaiting.get(threadId).foreach { awaitedReply =>
+        def finish(error: String): Unit =
+          state.awaiting.remove(threadId)
+          publishSignal("agent-failed", awaitedReply.sessionId, threadId, "error" -> error)
+        recentTimeline(threadId).onComplete {
+          case scala.util.Success(timeline) =>
+            AssistantReply.afterIdle(
               awaitedReply.previousAssistantMessageId,
-              currentAssistantMessage
+              assistantMessagesFromTimeline(timeline),
+              latestUserMessageSeq(timeline)
             ) match
-              case Some(reply) => publishSignal("speak", awaitedReply.sessionId, threadId, "text" -> reply.text)
-              case None =>
-                publishSignal(
-                  "agent-failed",
-                  awaitedReply.sessionId,
-                  threadId,
-                  "error" -> "the agent finished without a response"
-                )
+              case IdleOutcome.Reply(reply, latestUnanswered) =>
+                if latestUnanswered then
+                  // The reply is heard now; the user's later message is
+                  // answered in a turn of its own, awaited from this reply on.
+                  val next = awaitedReply.copy(previousAssistantMessageId = Some(reply.id))
+                  state.awaiting.update(threadId, next)
+                  expectFollowUpTurn(threadId, next)
+                else state.awaiting.remove(threadId)
+                publishSignal("speak", awaitedReply.sessionId, threadId, "text" -> reply.text)
+              case IdleOutcome.Unanswered => expectFollowUpTurn(threadId, awaitedReply)
+              case IdleOutcome.NoReply    => finish("the agent finished without a response")
           case scala.util.Failure(error) =>
             bb.log.error(s"could not read the assistant reply for thread $threadId: ${error.getMessage}")
-            publishSignal(
-              "agent-failed",
-              awaitedReply.sessionId,
-              threadId,
-              "error" -> "could not read the agent response"
-            )
+            finish("could not read the agent response")
         }
       }
       ()
     }
   )
+
+  /** A message of the user's was left unanswered when the turn ended; the
+    * agent answers it in a turn of its own, whose end is handled like any
+    * other. If none has begun after a while, the user is told.
+    */
+  def expectFollowUpTurn(threadId: String, awaited: AwaitingReply): Unit =
+    delayMs(FollowUpTurnWithinMs).foreach { _ =>
+      if state.awaiting.get(threadId).contains(awaited) then
+        bb.sdk.threads.get(js.Dynamic.literal("threadId" -> threadId)).toFuture.foreach { thread =>
+          if str(thread.status) == "idle" && state.awaiting.get(threadId).contains(awaited) then
+            state.awaiting.remove(threadId)
+            publishSignal(
+              "agent-failed",
+              awaited.sessionId,
+              threadId,
+              "error" -> "the agent finished without answering your latest message"
+            )
+        }
+    }
 
   bb.events.on(
     "thread.failed",
