@@ -1053,6 +1053,7 @@ def plugin(bb: BbApi): Unit =
     * failed and left for a manual retry.
     */
   val DeliveryAttempts = 6
+  val TranscriptionTimeoutMs = 90_000.0
 
   def enqueueRecording(id: String): Unit =
     state.recordingQueue = state.recordingQueue.transformWith { _ =>
@@ -1120,7 +1121,15 @@ def plugin(bb: BbApi): Unit =
       context: String,
       attempt: Int
   ): Future[Either[String, Transcription]] =
-    transcribeAudio(mimeType, audioBase64, isFinal = true, precedingTranscript = "", diagnosticContext = context)
+    val transcribed =
+      transcribeAudio(mimeType, audioBase64, isFinal = true, precedingTranscript = "", diagnosticContext = context)
+    // A transcriber that never answers would otherwise hold every later
+    // recording behind this one; the abandoned request is left to finish.
+    val timedOut = delayMs(TranscriptionTimeoutMs).flatMap(_ =>
+      Future.failed(new RuntimeException(s"no answer from the transcriber within ${TranscriptionTimeoutMs.toInt / 1000} s"))
+    )
+    Future
+      .firstCompletedOf(List(transcribed, timedOut))
       .map(Right(_))
       .recoverWith {
         case e: TranscriberRejectedRequest => Future.successful(Left(e.getMessage))
