@@ -123,6 +123,41 @@ private def ttsConfigKey(provider: String): String = s"tts.config.$provider"
 private final case class ActiveSession(sessionId: String, threadId: String)
 private final case class AwaitingReply(sessionId: String, previousAssistantMessageId: Option[String])
 
+/** The threads whose next reply is to be read aloud, by thread, for the
+  * session that will speak it. Kept in the database as well, so a backend
+  * reload does not forget a reply it was waiting for.
+  */
+private final class AwaitingReplies(db: SqliteDb):
+  private val byThread = mutable.Map.empty[String, AwaitingReply]
+  db.prepare("SELECT thread_id, session_id, previous_assistant_message_id FROM awaiting_replies").all().foreach { row =>
+    byThread.update(
+      str(row.thread_id),
+      AwaitingReply(str(row.session_id), Option(str(row.previous_assistant_message_id)).filter(_.nonEmpty))
+    )
+  }
+
+  def get(threadId: String): Option[AwaitingReply] = byThread.get(threadId)
+  def contains(threadId: String): Boolean           = byThread.contains(threadId)
+  def threads: Iterable[String]                     = byThread.keys
+  def bySession(sessionId: String): List[String]    = byThread.collect { case (t, r) if r.sessionId == sessionId => t }.toList
+
+  def put(threadId: String, reply: AwaitingReply): Unit =
+    byThread.update(threadId, reply)
+    val _ = db
+      .prepare(
+        "INSERT OR REPLACE INTO awaiting_replies (thread_id, session_id, previous_assistant_message_id) VALUES (?, ?, ?)"
+      )
+      .run(threadId, reply.sessionId, reply.previousAssistantMessageId.orNull)
+
+  def remove(threadId: String): Option[AwaitingReply] =
+    val removed = byThread.remove(threadId)
+    if removed.isDefined then { val _ = db.prepare("DELETE FROM awaiting_replies WHERE thread_id = ?").run(threadId) }
+    removed
+
+  /** Keeps only the replies awaited for sessions `keep` accepts. */
+  def retainSessions(keep: String => Boolean): Unit =
+    byThread.collect { case (t, r) if !keep(r.sessionId) => t }.toList.foreach(remove)
+
 /** How long after a turn ends without answering the user's latest message a
   * turn answering it may take to begin (one began 4 s later in practice).
   */
@@ -169,7 +204,6 @@ private final case class Transcription(text: String, transcriber: String, segmen
   */
 private final class State:
   var active: Option[ActiveSession]     = None
-  val awaiting: mutable.Map[String, AwaitingReply] = mutable.Map.empty // threadId -> pending voice reply
   // The thread an utterance is currently being captured or submitted for;
   // "" while it will start a new thread.
   var capturingFor: Option[String] = None
@@ -279,9 +313,15 @@ def plugin(bb: BbApi): Unit =
       "ALTER TABLE utterances ADD COLUMN last_error TEXT",
       "ALTER TABLE utterances ADD COLUMN session_id TEXT",
       "ALTER TABLE utterances ADD COLUMN project_id TEXT",
-      "ALTER TABLE utterances ADD COLUMN notes TEXT"
+      "ALTER TABLE utterances ADD COLUMN notes TEXT",
+      """CREATE TABLE IF NOT EXISTS awaiting_replies (
+        |  thread_id TEXT PRIMARY KEY,
+        |  session_id TEXT NOT NULL,
+        |  previous_assistant_message_id TEXT
+        |)""".stripMargin
     )
   )
+  val awaitingReplies = AwaitingReplies(db)
 
   // Recordings are stored before anything else is done with them, and kept
   // with their transcripts so a wrong ending can be checked against the audio
@@ -658,7 +698,7 @@ def plugin(bb: BbApi): Unit =
   val StoredRecordingWaitMs = 3 * 60_000.0
 
   def waitForMoreSpeech(threadId: String): Future[String] =
-    state.awaiting.get(threadId) match
+    awaitingReplies.get(threadId) match
       case None =>
         Future.successful(
           "No active voice turn is awaiting a response. Continue normally without waiting for speech."
@@ -774,7 +814,7 @@ def plugin(bb: BbApi): Unit =
               "active"    -> state.active.isDefined,
               "threadId"  -> state.active.map(_.threadId).orNull,
               "capturing" -> state.capturingFor.isDefined,
-              "awaiting"  -> state.awaiting.keys.toJSArray
+              "awaiting"  -> awaitingReplies.threads.toJSArray
             )
             Future.successful(js.Dynamic.literal("exitCode" -> 0, "stdout" -> js.JSON.stringify(status)))
           case _ =>
@@ -1436,7 +1476,7 @@ def plugin(bb: BbApi): Unit =
           bb.log.info(s"started thread $newThreadId in project $projectId by voice")
           setRecordingThread(id, newThreadId)
           if state.active.exists(_.sessionId == sessionId) then activate(state.active.map(_.copy(threadId = newThreadId)))
-          state.awaiting.update(newThreadId, AwaitingReply(sessionId, None))
+          awaitingReplies.put(newThreadId, AwaitingReply(sessionId, None))
           Some(newThreadId)
         }
     else if state.continuationWaiters.deliver(
@@ -1455,10 +1495,12 @@ def plugin(bb: BbApi): Unit =
         // An utterance sent while an earlier one still awaits its reply keeps
         // the earlier baseline: the reply already written to the earlier one
         // has not been read aloud yet, and must not count as old.
-        state.awaiting.updateWith(threadId) {
-          case Some(earlier) => Some(earlier.copy(sessionId = sessionId))
-          case None          => Some(AwaitingReply(sessionId, previousAssistantMessage.map(_.id)))
-        }
+        awaitingReplies.put(
+          threadId,
+          awaitingReplies.get(threadId) match
+            case Some(earlier) => earlier.copy(sessionId = sessionId)
+            case None          => AwaitingReply(sessionId, previousAssistantMessage.map(_.id))
+        )
         send("steer-if-active")
           .recoverWith {
             // steer-if-active 409s ("Thread is not active") when the
@@ -1469,7 +1511,7 @@ def plugin(bb: BbApi): Unit =
           }
           .map(_ => None)
           .recoverWith { case e =>
-            val _ = state.awaiting.remove(threadId)
+            val _ = awaitingReplies.remove(threadId)
             Future.failed(e)
           }
       }
@@ -1559,7 +1601,14 @@ def plugin(bb: BbApi): Unit =
           if old.sessionId != sessionId then publishSignal("revoked", old.sessionId, old.threadId)
         }
         activate(Some(ActiveSession(sessionId, threadId)))
-        state.awaiting.filterInPlace((_, reply) => reply.sessionId == sessionId)
+        awaitingReplies.retainSessions(_ == sessionId)
+        // Turns that ended while this session was not registered, as across a
+        // backend reload: their replies are read aloud now.
+        awaitingReplies.bySession(sessionId).foreach { awaitedThread =>
+          bb.sdk.threads.get(js.Dynamic.literal("threadId" -> awaitedThread)).toFuture.foreach { thread =>
+            if str(thread.status) == "idle" then replyOnceIdle(awaitedThread)
+          }
+        }
         state.continuationWaiters.expireAll()
         val how =
           Option(str(input.how)).filter(_.nonEmpty).getOrElse("unspecified") +
@@ -1591,7 +1640,7 @@ def plugin(bb: BbApi): Unit =
         if state.active.exists(_.sessionId == sessionId) then
           activate(None)
           state.capturingFor = None
-        state.awaiting.filterInPlace((_, reply) => reply.sessionId != sessionId)
+        awaitingReplies.retainSessions(_ != sessionId)
         state.continuationWaiters.expireAll()
         js.Dynamic.literal("ok" -> true)
       },
@@ -1634,7 +1683,7 @@ def plugin(bb: BbApi): Unit =
             // still answering an earlier utterance, has one not yet delivered
             // to it, or its answer is queued unplayed.
             val targetReplyUnheard =
-              state.awaiting.contains(threadId) || recordingInProgressFor(threadId) ||
+              awaitingReplies.contains(threadId) || recordingInProgressFor(threadId) ||
                 heardContext.exists(_.targetReplyUnplayed.asInstanceOf[Any] == true)
             val notes = ReplyInterruption.notes(threadId, speaking, targetReplyUnheard)
             notes.filter(_.threadId != threadId).foreach { note =>
@@ -1859,10 +1908,18 @@ def plugin(bb: BbApi): Unit =
   bb.events.on(
     "thread.idle",
     { payload =>
-      val threadId = str(payload.thread.id)
-      state.awaiting.get(threadId).foreach { awaitedReply =>
+      replyOnceIdle(str(payload.thread.id))
+      ()
+    }
+  )
+
+  /** Handles the end of a thread's turn for a reply the user is waiting for:
+    * reads aloud what it wrote, or waits for the turn that answers them.
+    */
+  def replyOnceIdle(threadId: String): Unit =
+      awaitingReplies.get(threadId).foreach { awaitedReply =>
         def finish(error: String): Unit =
-          state.awaiting.remove(threadId)
+          awaitingReplies.remove(threadId)
           publishSignal("agent-failed", awaitedReply.sessionId, threadId, "error" -> error)
         recentTimeline(threadId).onComplete {
           case scala.util.Success(timeline) =>
@@ -1876,24 +1933,21 @@ def plugin(bb: BbApi): Unit =
                   // The reply is heard now; the user's later message is
                   // answered in a turn of its own, awaited from this reply on.
                   val next = awaitedReply.copy(previousAssistantMessageId = Some(reply.id))
-                  state.awaiting.update(threadId, next)
+                  awaitingReplies.put(threadId, next)
                   expectFollowUpTurn(threadId, next)
-                else state.awaiting.remove(threadId)
+                else awaitingReplies.remove(threadId)
                 publishSignal("speak", awaitedReply.sessionId, threadId, "text" -> reply.text)
               case IdleOutcome.Unanswered => expectFollowUpTurn(threadId, awaitedReply)
               case IdleOutcome.NoReply =>
                 // The agent may end a turn silently on purpose, so this is
                 // not reported as a failure.
-                state.awaiting.remove(threadId)
+                awaitingReplies.remove(threadId)
                 publishSignal("turn-ended", awaitedReply.sessionId, threadId)
           case scala.util.Failure(error) =>
             bb.log.error(s"could not read the assistant reply for thread $threadId: ${error.getMessage}")
             finish("could not read the agent response")
         }
       }
-      ()
-    }
-  )
 
   /** A message of the user's was left unanswered when the turn ended; the
     * agent answers it in a turn of its own, whose end is handled like any
@@ -1901,10 +1955,10 @@ def plugin(bb: BbApi): Unit =
     */
   def expectFollowUpTurn(threadId: String, awaited: AwaitingReply): Unit =
     delayMs(FollowUpTurnWithinMs).foreach { _ =>
-      if state.awaiting.get(threadId).contains(awaited) then
+      if awaitingReplies.get(threadId).contains(awaited) then
         bb.sdk.threads.get(js.Dynamic.literal("threadId" -> threadId)).toFuture.foreach { thread =>
-          if str(thread.status) == "idle" && state.awaiting.get(threadId).contains(awaited) then
-            state.awaiting.remove(threadId)
+          if str(thread.status) == "idle" && awaitingReplies.get(threadId).contains(awaited) then
+            awaitingReplies.remove(threadId)
             publishSignal("turn-ended", awaited.sessionId, threadId)
         }
     }
@@ -1913,7 +1967,7 @@ def plugin(bb: BbApi): Unit =
     "thread.failed",
     { payload =>
       val threadId = str(payload.thread.id)
-      state.awaiting.remove(threadId).foreach { awaitedReply =>
+      awaitingReplies.remove(threadId).foreach { awaitedReply =>
         val error = str(payload.error)
         publishSignal(
           "agent-failed",
@@ -2058,7 +2112,6 @@ def plugin(bb: BbApi): Unit =
       )
     )
     activate(None)
-    state.awaiting.clear()
     state.continuationWaiters.expireAll()
     ()
   }
