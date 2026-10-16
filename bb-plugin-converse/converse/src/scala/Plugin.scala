@@ -796,9 +796,9 @@ def plugin(bb: BbApi): Unit =
     val _ = js.Dynamic.global.setTimeout(js.Any.fromFunction0(() => { val _ = p.success(()) }), ms)
     p.future
 
-  def transcribeViaBb(file: js.Dynamic): Future[Transcription] =
+  def transcribeViaBb(file: js.Dynamic, signal: js.UndefOr[js.Dynamic]): Future[Transcription] =
     bb.sdk.system
-      .transcribeVoice(js.Dynamic.literal("file" -> file))
+      .transcribeVoice(js.Dynamic.literal("file" -> file, "signal" -> signal))
       .toFuture
       .map(result => Transcription(str(result.text).trim, "bb", None))
 
@@ -810,7 +810,8 @@ def plugin(bb: BbApi): Unit =
       language: String,
       file: js.Dynamic,
       precedingTranscript: String,
-      diagnosticContext: String
+      diagnosticContext: String,
+      signal: js.UndefOr[js.Dynamic]
   ): Future[Transcription] =
     val form = js.Dynamic.newInstance(js.Dynamic.global.FormData)()
     val _    = form.set("file", file)
@@ -818,7 +819,7 @@ def plugin(bb: BbApi): Unit =
     if language.nonEmpty then { val _ = form.set("language", language) }
     if precedingTranscript.nonEmpty then { val _ = form.set("prompt", precedingTranscript) }
     val _    = form.set("response_format", "verbose_json")
-    val init = js.Dynamic.literal("method" -> "POST", "body" -> form)
+    val init = js.Dynamic.literal("method" -> "POST", "body" -> form, "signal" -> signal)
     if apiKey.nonEmpty then
       init.updateDynamic("headers")(js.Dynamic.literal("Authorization" -> s"Bearer $apiKey"))
     js.Dynamic.global
@@ -880,14 +881,15 @@ def plugin(bb: BbApi): Unit =
       audioBase64: String,
       isFinal: Boolean,
       precedingTranscript: String,
-      diagnosticContext: String
+      diagnosticContext: String,
+      signal: js.UndefOr[js.Dynamic] = js.undefined
   ): Future[Transcription] =
     val file = audioFile(mimeType, audioBase64)
     def viaBb: Future[Transcription] =
-      transcribeViaBb(file).recoverWith {
+      transcribeViaBb(file, signal).recoverWith {
         case e if isFinal && e.getMessage != null && e.getMessage.contains("503") =>
           bb.log.warn(s"transcription unavailable; retrying once: ${e.getMessage}")
-          delayMs(1500).flatMap(_ => transcribeViaBb(file))
+          delayMs(1500).flatMap(_ => transcribeViaBb(file, signal))
       }
     // A provider's quota refills slowly, so retrying it would lose the
     // utterance; bb's own transcriber has a separate allowance.
@@ -899,6 +901,7 @@ def plugin(bb: BbApi): Unit =
       }
     settings.get().toFuture.flatMap { s =>
       val language = str(s.sttLanguage)
+      if isFinal then bb.log.info(s"transcribing with ${str(s.sttProvider)} ($diagnosticContext)")
       str(s.sttProvider) match
         case "groq" =>
           viaBbWhenRateLimited(
@@ -910,7 +913,8 @@ def plugin(bb: BbApi): Unit =
               language,
               file,
               precedingTranscript,
-              diagnosticContext
+              diagnosticContext,
+              signal
             )
           )
         case "openai-compatible" =>
@@ -926,7 +930,8 @@ def plugin(bb: BbApi): Unit =
                 language,
                 file,
                 precedingTranscript,
-                diagnosticContext
+                diagnosticContext,
+                signal
               )
             )
         case _ => viaBb
@@ -1046,7 +1051,10 @@ def plugin(bb: BbApi): Unit =
   enum RecordingOutcome:
     case Delivered(text: String, createdThreadId: Option[String])
     case NothingSaid
-    case NotDelivered(reason: String)
+    /** `sayingAgainHelps` is false when the same words would meet the same
+      * obstacle, so the user should not be asked to repeat them.
+      */
+    case NotDelivered(reason: String, sayingAgainHelps: Boolean)
 
   /** Delivery errors carry no type to tell a passing fault from a lasting one,
     * so delivery is tried this many times before the recording is marked
@@ -1085,7 +1093,7 @@ def plugin(bb: BbApi): Unit =
             })
         transcribed
           .flatMap {
-            case Left(reason)                => Future.successful(RecordingOutcome.NotDelivered(reason))
+            case Left(reason)                => Future.successful(RecordingOutcome.NotDelivered(reason, sayingAgainHelps = true))
             case Right(text) if text.isEmpty => Future.successful(RecordingOutcome.NothingSaid)
             case Right(text) =>
               deliverUntilDone(id, sessionId, threadId, projectId, text, notes, attempt = 1)
@@ -1096,7 +1104,7 @@ def plugin(bb: BbApi): Unit =
               outcome match
                 case RecordingOutcome.Delivered(_, _)      => RecordingStatus.Sent
                 case RecordingOutcome.NothingSaid          => RecordingStatus.Empty
-                case RecordingOutcome.NotDelivered(reason) => RecordingStatus.Failed(reason)
+                case RecordingOutcome.NotDelivered(reason, _) => RecordingStatus.Failed(reason)
             )
             val signalThread = outcome match
               case RecordingOutcome.Delivered(_, Some(created)) => created
@@ -1105,7 +1113,8 @@ def plugin(bb: BbApi): Unit =
               case RecordingOutcome.Delivered(text, created) =>
                 Seq("outcome" -> "sent", "text" -> text, "createdThreadId" -> created.orNull)
               case RecordingOutcome.NothingSaid          => Seq("outcome" -> "empty")
-              case RecordingOutcome.NotDelivered(reason) => Seq("outcome" -> "failed", "error" -> reason)
+              case RecordingOutcome.NotDelivered(reason, sayingAgainHelps) =>
+                Seq("outcome" -> "failed", "error" -> reason, "sayAgain" -> sayingAgainHelps)
             publishSignal("utterance-processed", sessionId, signalThread, (("recordingId" -> (id: js.Any)) +: details)*)
           }
       case _ => Future.unit
@@ -1121,15 +1130,11 @@ def plugin(bb: BbApi): Unit =
       context: String,
       attempt: Int
   ): Future[Either[String, Transcription]] =
-    val transcribed =
-      transcribeAudio(mimeType, audioBase64, isFinal = true, precedingTranscript = "", diagnosticContext = context)
+    bb.log.info(s"transcription attempt $attempt started ($context): ${audioBase64.length} b64 chars")
     // A transcriber that never answers would otherwise hold every later
-    // recording behind this one; the abandoned request is left to finish.
-    val timedOut = delayMs(TranscriptionTimeoutMs).flatMap(_ =>
-      Future.failed(new RuntimeException(s"no answer from the transcriber within ${TranscriptionTimeoutMs.toInt / 1000} s"))
-    )
-    Future
-      .firstCompletedOf(List(transcribed, timedOut))
+    // recording behind this one; the request is cancelled and retried.
+    val signal = js.Dynamic.global.AbortSignal.timeout(TranscriptionTimeoutMs)
+    transcribeAudio(mimeType, audioBase64, isFinal = true, precedingTranscript = "", diagnosticContext = context, signal = signal)
       .map(Right(_))
       .recoverWith {
         case e: TranscriberRejectedRequest => Future.successful(Left(e.getMessage))
@@ -1140,6 +1145,12 @@ def plugin(bb: BbApi): Unit =
           delayMs(delay).flatMap(_ => transcribeUntilDone(id, mimeType, audioBase64, context, attempt + 1))
       }
 
+  /** The `code` bb puts on the errors its API answers with, if `e` is one. */
+  def bbErrorCode(e: Throwable): Option[String] = e match
+    case js.JavaScriptException(error) =>
+      error.asInstanceOf[js.Dynamic].code.asInstanceOf[js.UndefOr[String]].toOption
+    case _ => None
+
   def deliverUntilDone(
       id: String,
       sessionId: String,
@@ -1149,14 +1160,29 @@ def plugin(bb: BbApi): Unit =
       notes: List[ReplyInterruption.Note],
       attempt: Int
   ): Future[RecordingOutcome] =
+    bb.log.info(s"delivering recording $id (attempt $attempt)")
     setRecordingStatus(id, RecordingStatus.Sending)
     deliver(id, sessionId, threadId, projectId, text, notes)
       .map(created => RecordingOutcome.Delivered(text, created))
       .recoverWith { case e =>
         setRecordingStatus(id, RecordingStatus.Received)
         noteRecordingError(id, e.getMessage)
-        if attempt >= DeliveryAttempts then
-          Future.successful(RecordingOutcome.NotDelivered(s"could not be delivered after $attempt attempts: ${e.getMessage}"))
+        if bbErrorCode(e).contains("thread_environment_unavailable") then
+          // The thread's workspace was destroyed or never attached; nothing
+          // reaches it until the workspace is restored.
+          Future.successful(
+            RecordingOutcome.NotDelivered(
+              s"the thread's workspace is unavailable, so it cannot take messages (${e.getMessage})",
+              sayingAgainHelps = false
+            )
+          )
+        else if attempt >= DeliveryAttempts then
+          Future.successful(
+            RecordingOutcome.NotDelivered(
+              s"could not be delivered after $attempt attempts: ${e.getMessage}",
+              sayingAgainHelps = true
+            )
+          )
         else
           val delay = RetryBackoff.delayBeforeRetry(attempt)
           bb.log.warn(s"delivery of recording $id failed (attempt $attempt; retrying in ${delay}ms): ${e.getMessage}")

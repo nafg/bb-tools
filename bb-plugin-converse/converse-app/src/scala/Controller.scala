@@ -871,7 +871,9 @@ final class Controller(
         if outcome == "failed" then
           notice = s"a voice message could not be delivered (${p.error.asInstanceOf[js.UndefOr[String]].getOrElse("")}); " +
             "it is kept in the recent recordings, where it can be retried"
-        val _ = cues.play(SoundCue.SayAgain)
+        // Asked only when the same words could get through on another try.
+        if p.sayAgain.asInstanceOf[js.UndefOr[Boolean]].getOrElse(true) then
+          val _ = cues.play(SoundCue.SayAgain)
         if moreComing then refreshSnapshot() else backToListening(SessionPhase.Transcribing)
 
   // ---------------------------------------------------------------- signals
