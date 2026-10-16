@@ -331,6 +331,9 @@ final class Controller(
       startSession(intent.sessionId, intent.threadId.orNull, js.JSON.parse(intent.startOptionsJson))
     }
 
+  // With RetryBackoff's delays, about a minute of attempts.
+  private val SessionRegistrationAttempts = 6
+
   private def startSession(sess: String, newThreadId: String, opts: js.Dynamic): Unit =
     stopInternal(VoiceSessionRestore.SessionEnd.Superseded)
     // Created synchronously inside the click's user gesture: an AudioContext
@@ -361,9 +364,21 @@ final class Controller(
         s"(tts=$ttsMode speechProbabilityThreshold=$speechProbabilityThreshold " +
         s"endSilenceMs=$endOfSpeechSilenceMs)"
     )
+    // Right after a plugin reload the reloaded page can call the backend
+    // before it has registered its handlers again, so registering is retried
+    // for a while before the start counts as failed.
+    def register(attempt: Int): Future[js.Dynamic] =
+      rpcCall("startSession", js.Dynamic.literal("sessionId" -> sess, "threadId" -> newThreadId)).toFuture.recoverWith {
+        case e if attempt < SessionRegistrationAttempts && sessionId == sess =>
+          val delayMs = RetryBackoff.delayBeforeRetry(attempt)
+          debug(s"startSession failed (attempt $attempt, retrying in ${delayMs}ms): ${e.getMessage}")
+          val retried = Promise[js.Dynamic]()
+          val _ = setTimeout(delayMs.toDouble) { retried.completeWith(register(attempt + 1)) }
+          retried.future
+      }
     val started =
       for
-        _      <- rpcCall("startSession", js.Dynamic.literal("sessionId" -> sess, "threadId" -> newThreadId)).toFuture
+        _      <- register(attempt = 1)
         stream <- js.Dynamic.global.navigator.mediaDevices
                     .getUserMedia(
                       js.Dynamic.literal(
