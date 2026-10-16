@@ -1539,7 +1539,10 @@ def plugin(bb: BbApi): Unit =
         activate(Some(ActiveSession(sessionId, threadId)))
         state.awaiting.filterInPlace((_, reply) => reply.sessionId == sessionId)
         state.continuationWaiters.expireAll()
-        bb.log.info(s"voice session $sessionId started for thread $threadId")
+        val how =
+          (if input.restore.asInstanceOf[js.UndefOr[Boolean]].getOrElse(false) then "restore" else "start") +
+            input.attempt.asInstanceOf[js.UndefOr[Int]].toOption.fold("")(n => s", attempt $n")
+        bb.log.info(s"voice session $sessionId started for thread $threadId ($how)")
         // Warm the managed services while the user starts talking so the first
         // transcription and spoken reply are not delayed by service startup.
         settings.get().toFuture.foreach { s =>

@@ -328,13 +328,13 @@ final class Controller(
   def resumeInterruptedSession(): Unit =
     storedRestoreIntent.foreach { intent =>
       debug(s"resuming session ${intent.sessionId} after the frontend was reloaded")
-      startSession(intent.sessionId, intent.threadId.orNull, js.JSON.parse(intent.startOptionsJson))
+      startSession(intent.sessionId, intent.threadId.orNull, js.JSON.parse(intent.startOptionsJson), restoring = true)
     }
 
   // With RetryBackoff's delays, about a minute of attempts.
   private val SessionRegistrationAttempts = 6
 
-  private def startSession(sess: String, newThreadId: String, opts: js.Dynamic): Unit =
+  private def startSession(sess: String, newThreadId: String, opts: js.Dynamic, restoring: Boolean = false): Unit =
     stopInternal(VoiceSessionRestore.SessionEnd.Superseded)
     // Created synchronously inside the click's user gesture: an AudioContext
     // created after an await can start (and stay) suspended under autoplay
@@ -368,7 +368,12 @@ final class Controller(
     // before it has registered its handlers again, so registering is retried
     // for a while before the start counts as failed.
     def register(attempt: Int): Future[js.Dynamic] =
-      rpcCall("startSession", js.Dynamic.literal("sessionId" -> sess, "threadId" -> newThreadId)).toFuture.recoverWith {
+      // `restore` and `attempt` are only logged, to show whether a restore
+      // needed the retries.
+      rpcCall(
+        "startSession",
+        js.Dynamic.literal("sessionId" -> sess, "threadId" -> newThreadId, "restore" -> restoring, "attempt" -> attempt)
+      ).toFuture.recoverWith {
         case e if attempt < SessionRegistrationAttempts && sessionId == sess =>
           val delayMs = RetryBackoff.delayBeforeRetry(attempt)
           debug(s"startSession failed (attempt $attempt, retrying in ${delayMs}ms): ${e.getMessage}")
