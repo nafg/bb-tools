@@ -1448,7 +1448,13 @@ def plugin(bb: BbApi): Unit =
           .send(js.Dynamic.literal("threadId" -> threadId, "mode" -> mode, "input" -> heardInput(text, notes)))
           .toFuture
       latestAssistantMessage(threadId).flatMap { previousAssistantMessage =>
-        state.awaiting.update(threadId, AwaitingReply(sessionId, previousAssistantMessage.map(_.id)))
+        // An utterance sent while an earlier one still awaits its reply keeps
+        // the earlier baseline: the reply already written to the earlier one
+        // has not been read aloud yet, and must not count as old.
+        state.awaiting.updateWith(threadId) {
+          case Some(earlier) => Some(earlier.copy(sessionId = sessionId))
+          case None          => Some(AwaitingReply(sessionId, previousAssistantMessage.map(_.id)))
+        }
         send("steer-if-active")
           .recoverWith {
             // steer-if-active 409s ("Thread is not active") when the
