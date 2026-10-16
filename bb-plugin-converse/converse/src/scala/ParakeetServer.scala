@@ -7,15 +7,17 @@ package converse
   * It uses the GPU when the CUDA runtime loads, otherwise the CPU.
   *
   * It answers 413 for audio it cannot take whole: longer than `MaxSeconds`,
-  * or more than its GPU memory cap allows at the moment. Measured on an 8 GB
-  * RTX 3070 without a cap: 210 seconds fit in GPU memory and 240 did not; and
-  * this ONNX export fails outright on 10 minutes even on the CPU. The cap
-  * keeps a long recording from leaving gigabytes reserved after it is done.
+  * or more than its GPU memory cap allows at the moment. The cap keeps a long
+  * recording from leaving gigabytes reserved after it is done. Measured on an
+  * 8 GB RTX 3070 under the 4 GB cap: 120 seconds fit and 135 did not, so
+  * `MaxSeconds` spares longer recordings an attempt that would fail. (Without
+  * the cap, 210 fit and 240 did not; and this ONNX export fails outright on
+  * 10 minutes even on the CPU.)
   */
 private object ParakeetServer:
   val Port  = 8790
   val Model = "nemo-parakeet-tdt-0.6b-v3"
-  val MaxSeconds = 180
+  val MaxSeconds = 120
 
   /** Where the script is written on the host before it is started. */
   val ScriptRelativePath = ".cache/bb-converse/parakeet_server.py"
