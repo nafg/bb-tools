@@ -40,6 +40,7 @@ private object ParakeetServer:
       |import argparse
       |import os
       |import subprocess
+      |import threading
       |
       |import numpy as np
       |import onnxruntime as ort
@@ -80,14 +81,17 @@ private object ParakeetServer:
       |
       |SAMPLE_RATE = 16000
       |app = FastAPI()
+      |# One recording on the GPU at a time, so two cannot exhaust its memory together.
+      |recognizing = threading.Lock()
       |
       |
+      |# A plain def runs in a worker thread, so /version answers during a long job.
       |@app.post("/v1/audio/transcriptions")
-      |async def transcribe(file: UploadFile):
+      |def transcribe(file: UploadFile):
       |    decoded = subprocess.run(
       |        ["ffmpeg", "-nostdin", "-loglevel", "error", "-i", "pipe:0",
       |         "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "f32le", "pipe:1"],
-      |        input=await file.read(),
+      |        input=file.file.read(),
       |        capture_output=True,
       |    )
       |    if decoded.returncode != 0:
@@ -97,7 +101,8 @@ private object ParakeetServer:
       |    if seconds > args.max_seconds:
       |        raise HTTPException(413, f"{seconds:.0f} s is longer than the {args.max_seconds:.0f} s this server transcribes")
       |    try:
-      |        text = model.recognize(audio, sample_rate=SAMPLE_RATE) if len(audio) else ""
+      |        with recognizing:
+      |            text = model.recognize(audio, sample_rate=SAMPLE_RATE) if len(audio) else ""
       |    except Exception as error:
       |        if out_of_memory(error):
       |            raise HTTPException(413, f"not enough GPU memory for {seconds:.0f} s of audio") from error

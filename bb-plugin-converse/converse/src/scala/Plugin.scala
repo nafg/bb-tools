@@ -1050,7 +1050,9 @@ def plugin(bb: BbApi): Unit =
     }
 
   def touchServiceUse(service: ManagedService): Unit =
-    bb.storage.kv.set(s"${service.key}.lastUseAt", js.Date.now()).toFuture.failed.foreach(_ => ())
+    bb.storage.kv.set(s"${service.key}.lastUseAt", js.Date.now()).toFuture.failed.foreach { e =>
+      bb.log.warn(s"could not record when ${service.label} was last used: ${e.getMessage}")
+    }
 
   def homeDirectory: String = str(js.Dynamic.global.process.env.HOME) match
     case "" => "/tmp"
@@ -1065,19 +1067,34 @@ def plugin(bb: BbApi): Unit =
       val _    = fs.writeFileSync(file, content)
     }
 
-  /** Whether a running instance reports the version the service expects;
-    * true for a service without a version check.
+  /** What a check of a managed service found. Stale needs positive evidence:
+    * a different version, or none reported by a server too old to have one.
+    * A version check that times out means the service is busy, not stale.
     */
-  def serviceCurrent(service: ManagedService): Future[Boolean] =
-    service.versionCheck.fold(Future.successful(true)) { check =>
-      js.Dynamic.global
-        .fetch(check.url, js.Dynamic.literal("signal" -> js.Dynamic.global.AbortSignal.timeout(1500)))
-        .asInstanceOf[js.Promise[js.Dynamic]]
-        .toFuture
-        .flatMap(response => response.json().asInstanceOf[js.Promise[js.Dynamic]].toFuture)
-        .map(body => str(body.version) == check.expected)
-        .recover(_ => false)
-    }
+  enum ServiceState:
+    case Down, Busy, Stale, Current
+
+  def serviceState(service: ManagedService): Future[ServiceState] =
+    service.versionCheck match
+      case None => probeService(service.probeUrl).map(up => if up then ServiceState.Current else ServiceState.Down)
+      case Some(check) =>
+        js.Dynamic.global
+          .fetch(check.url, js.Dynamic.literal("signal" -> js.Dynamic.global.AbortSignal.timeout(1500)))
+          .asInstanceOf[js.Promise[js.Dynamic]]
+          .toFuture
+          .flatMap { response =>
+            if str(response.status) == "404" then Future.successful(ServiceState.Stale)
+            else if !response.ok.asInstanceOf[Boolean] then Future.successful(ServiceState.Current)
+            else
+              response.json().asInstanceOf[js.Promise[js.Dynamic]].toFuture.map { body =>
+                if str(body.version) == check.expected then ServiceState.Current else ServiceState.Stale
+              }
+          }
+          .recover {
+            case js.JavaScriptException(error) if str(error.asInstanceOf[js.Dynamic].name) == "TimeoutError" =>
+              ServiceState.Busy
+            case _ => ServiceState.Down
+          }
 
   def stopService(service: ManagedService): Future[Unit] =
     for
@@ -1110,24 +1127,22 @@ def plugin(bb: BbApi): Unit =
   def ensureServiceNow(service: ManagedService): Future[Either[String, String]] =
     val url = service.probeUrl
     def awaitDown(attempt: Int): Future[Unit] =
-      probeService(url).flatMap {
-        case true if attempt < 30 => delayMs(1000).flatMap(_ => awaitDown(attempt + 1))
-        case _                    => Future.unit
+      serviceState(service).flatMap {
+        case ServiceState.Down => Future.unit
+        case _ if attempt < 30 => delayMs(1000).flatMap(_ => awaitDown(attempt + 1))
+        case _                 => Future.unit
       }
-    // Right(running): whether the current version is already up; Left: the
-    // port is held by an instance this plugin cannot stop.
+    // Right(running): whether a usable instance is already up; Left: the port
+    // is held by an instance this plugin cannot stop.
     val running: Future[Either[String, Boolean]] =
-      probeService(url).flatMap {
-        case false => Future.successful(Right(false))
-        case true =>
-          serviceCurrent(service).flatMap {
-            case true => Future.successful(Right(true))
-            case false =>
-              bb.log.info(s"replacing managed ${service.label}: the running instance is not the current version")
-              stopService(service).flatMap(_ => awaitDown(0)).flatMap(_ => probeService(url)).map {
-                case true  => Left(s"the port of ${service.label} is held by an instance this plugin did not start")
-                case false => Right(false)
-              }
+      serviceState(service).flatMap {
+        case ServiceState.Down                        => Future.successful(Right(false))
+        case ServiceState.Current | ServiceState.Busy => Future.successful(Right(true))
+        case ServiceState.Stale =>
+          bb.log.info(s"replacing managed ${service.label}: the running instance is not the current version")
+          stopService(service).flatMap(_ => awaitDown(0)).flatMap(_ => serviceState(service)).map {
+            case ServiceState.Down => Right(false)
+            case _                 => Left(s"the port of ${service.label} is held by an instance this plugin did not start")
           }
       }
     running
@@ -1170,7 +1185,7 @@ def plugin(bb: BbApi): Unit =
                     }
                     .flatMap { terminalId =>
                       def awaitReady(attempt: Int): Future[Either[String, String]] =
-                        probeService(url).flatMap(up => if up then serviceCurrent(service) else Future.successful(false)).flatMap {
+                        serviceState(service).map(_ == ServiceState.Current).flatMap {
                           case true =>
                             bb.log.info(s"${service.label} is up (terminal $terminalId)")
                             touchServiceUse(service)

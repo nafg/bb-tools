@@ -121,6 +121,9 @@ final class Controller(
   private def debug(message: String): Unit =
     val _ = js.Dynamic.global.console.debug(s"[converse] $message")
 
+  private def warn(message: String): Unit =
+    val _ = js.Dynamic.global.console.warn(s"[converse] $message")
+
   private def refreshSnapshot(): Unit =
     // While an utterance is being captured or transcribed, the banner belongs
     // on the thread it is latched to, not the thread currently in view.
@@ -490,7 +493,9 @@ final class Controller(
       sessionId = null
       threadId = null
       if end.notifiesServer then
-        rpcCall("stopSession", js.Dynamic.literal("sessionId" -> sess)).toFuture.failed.foreach(_ => ())
+        rpcCall("stopSession", js.Dynamic.literal("sessionId" -> sess)).toFuture.failed.foreach { e =>
+          warn(s"stopSession failed: ${e.getMessage}")
+        }
       if !end.keepsIntent then forgetRestore()
 
   // ------------------------------------------------------- speech detection
@@ -584,7 +589,10 @@ final class Controller(
           "threadId"  -> (if utteranceRoute != null then utteranceRoute.existingThreadId.orNull else null),
           "active"    -> active
         )
-      ).toFuture.failed.foreach(_ => ())
+      ).toFuture.failed.foreach { e =>
+        // The backend then cannot hold a waiting agent's wait open for this speech.
+        warn(s"captureState failed: ${e.getMessage}")
+      }
 
   private def evidenceToJs(evidence: SpeechDetectorEvidence): js.Dynamic =
     js.Dynamic.literal(
@@ -606,7 +614,7 @@ final class Controller(
           "threadId"  -> currentTarget,
           "evidence"  -> evidenceToJs(evidence)
         )
-      ).toFuture.failed.foreach(_ => ())
+      ).toFuture.failed.foreach(e => warn(s"reportDiscardedCapture failed: ${e.getMessage}"))
 
   /** A separate recorder exists only for interim previews. Silero owns final
     * utterance audio; this recorder is stopped at each preview point to yield
