@@ -54,3 +54,11 @@ class AssistantReplyTest extends munit.FunSuite:
       AssistantReply.afterIdle(Some(heard.id), Vector(heard), latestUserMessageSeq = Some(2900)),
       IdleOutcome.NoReply
     )
+
+  test("when the steered message was answered within the same turn, nothing is left waiting"):
+    val reply = AssistantMessage("assistant-2", "Answering both questions.", sourceSeqEnd = 2920)
+
+    assertEquals(
+      AssistantReply.afterIdle(Some("assistant-1"), Vector(reply), latestUserMessageSeq = Some(2915)),
+      IdleOutcome.Reply(reply, latestUnanswered = false)
+    )

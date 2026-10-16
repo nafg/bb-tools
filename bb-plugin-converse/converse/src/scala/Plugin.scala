@@ -1562,7 +1562,7 @@ def plugin(bb: BbApi): Unit =
         state.awaiting.filterInPlace((_, reply) => reply.sessionId == sessionId)
         state.continuationWaiters.expireAll()
         val how =
-          (if input.restore.asInstanceOf[js.UndefOr[Boolean]].getOrElse(false) then "restore" else "start") +
+          Option(str(input.how)).filter(_.nonEmpty).getOrElse("unspecified") +
             input.attempt.asInstanceOf[js.UndefOr[Int]].toOption.fold("")(n => s", attempt $n")
         bb.log.info(s"voice session $sessionId started for thread $threadId ($how)")
         // Warm the managed services while the user starts talking so the first
@@ -1881,7 +1881,11 @@ def plugin(bb: BbApi): Unit =
                 else state.awaiting.remove(threadId)
                 publishSignal("speak", awaitedReply.sessionId, threadId, "text" -> reply.text)
               case IdleOutcome.Unanswered => expectFollowUpTurn(threadId, awaitedReply)
-              case IdleOutcome.NoReply    => finish("the agent finished without a response")
+              case IdleOutcome.NoReply =>
+                // The agent may end a turn silently on purpose, so this is
+                // not reported as a failure.
+                state.awaiting.remove(threadId)
+                publishSignal("turn-ended", awaitedReply.sessionId, threadId)
           case scala.util.Failure(error) =>
             bb.log.error(s"could not read the assistant reply for thread $threadId: ${error.getMessage}")
             finish("could not read the agent response")
@@ -1893,7 +1897,7 @@ def plugin(bb: BbApi): Unit =
 
   /** A message of the user's was left unanswered when the turn ended; the
     * agent answers it in a turn of its own, whose end is handled like any
-    * other. If none has begun after a while, the user is told.
+    * other. If none has begun after a while, the agent has chosen not to.
     */
   def expectFollowUpTurn(threadId: String, awaited: AwaitingReply): Unit =
     delayMs(FollowUpTurnWithinMs).foreach { _ =>
@@ -1901,12 +1905,7 @@ def plugin(bb: BbApi): Unit =
         bb.sdk.threads.get(js.Dynamic.literal("threadId" -> threadId)).toFuture.foreach { thread =>
           if str(thread.status) == "idle" && state.awaiting.get(threadId).contains(awaited) then
             state.awaiting.remove(threadId)
-            publishSignal(
-              "agent-failed",
-              awaited.sessionId,
-              threadId,
-              "error" -> "the agent finished without answering your latest message"
-            )
+            publishSignal("turn-ended", awaited.sessionId, threadId)
         }
     }
 
@@ -2047,6 +2046,10 @@ def plugin(bb: BbApi): Unit =
         case Some(other)                    => setRecordingStatus(id, other)
         case None                           => ()
     }
+
+  // A page that was not reloaded along with this backend still holds a session
+  // this backend has forgotten; this tells it to register again.
+  bb.realtime.publish("converse", js.Dynamic.literal("type" -> "backend-started", "eventId" -> js.Date.now().toString))
 
   bb.onDispose { () =>
     bb.log.info(

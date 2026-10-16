@@ -114,6 +114,9 @@ final class Controller(
   private val player = new Player(rpcCall, () => refreshSnapshot())
   private val cues   = new SoundCuePlayer
   private var replyHeld: Boolean = false
+  // Every mounted converse component forwards every signal, so a backend
+  // start is acted on once.
+  private var lastBackendStart: String = null
 
   // React 18 external-store contract: a stable snapshot object per change.
   private var listeners: List[js.Function0[Unit]] = Nil
@@ -370,11 +373,16 @@ final class Controller(
     // before it has registered its handlers again, so registering is retried
     // for a while before the start counts as failed.
     def register(attempt: Int): Future[js.Dynamic] =
-      // `restore` and `attempt` are only logged, to show whether a restore
-      // needed the retries.
+      // `how` and `attempt` are only logged, to show whether a restore needed
+      // the retries.
       rpcCall(
         "startSession",
-        js.Dynamic.literal("sessionId" -> sess, "threadId" -> newThreadId, "restore" -> restoring, "attempt" -> attempt)
+        js.Dynamic.literal(
+          "sessionId" -> sess,
+          "threadId"  -> newThreadId,
+          "how"       -> (if restoring then "restore" else "start"),
+          "attempt"   -> attempt
+        )
       ).toFuture.recoverWith {
         case e if attempt < SessionRegistrationAttempts && sessionId == sess =>
           val delayMs = RetryBackoff.delayBeforeRetry(attempt)
@@ -755,7 +763,8 @@ final class Controller(
     call().recoverWith {
       case e if transcriptionFailure(e) == TranscriptionFailure.SessionForgotten =>
         debug("backend forgot the session; re-registering")
-        rpcCall("startSession", js.Dynamic.literal("sessionId" -> sess, "threadId" -> tid)).toFuture
+        rpcCall("startSession", js.Dynamic.literal("sessionId" -> sess, "threadId" -> tid, "how" -> "re-register on use"))
+          .toFuture
           .flatMap(_ => call())
     }
 
@@ -916,7 +925,8 @@ final class Controller(
   def handleSignal(payload: js.Any): Unit =
     val p    = payload.asInstanceOf[js.Dynamic]
     val sess = p.sessionId.asInstanceOf[js.UndefOr[String]].getOrElse(null)
-    if sessionId != null && sess == sessionId then
+    if p.`type`.asInstanceOf[js.UndefOr[String]].contains("backend-started") then backendStarted(p)
+    else if sessionId != null && sess == sessionId then
       // Every mounted converse component forwards every signal; dedup by event id.
       val eventId = p.eventId.asInstanceOf[js.UndefOr[String]].getOrElse(null)
       if eventId == null || eventId != lastEventId then
@@ -935,6 +945,10 @@ final class Controller(
             // shown as interim text and naturally replaced by later updates.
             interimText = p.text.asInstanceOf[js.UndefOr[String]].getOrElse("")
             refreshSnapshot()
+          case "turn-ended" =>
+            // The agent ended its turn without a reply to read aloud, which
+            // it may do on purpose (when the user is clearly mid-thought).
+            enter(idlePhase)
           case "agent-failed" =>
             notice = p.error.asInstanceOf[js.UndefOr[String]].getOrElse("the agent failed")
             enter(idlePhase)
@@ -954,6 +968,20 @@ final class Controller(
             stopInternal(VoiceSessionRestore.SessionEnd.TakenOverByAnotherWindow)
             turnOff(VoiceSessionRestore.SessionEnd.TakenOverByAnotherWindow)
           case _ => ()
+
+  /** A reloaded backend has forgotten every session; this page was not
+    * reloaded with it, so it registers its session again at once rather than
+    * at its next upload, or replies would go unread until then.
+    */
+  private def backendStarted(p: js.Dynamic): Unit =
+    val eventId = p.eventId.asInstanceOf[js.UndefOr[String]].getOrElse(null)
+    if eventId != lastBackendStart && sessionId != null then
+      lastBackendStart = eventId
+      val sess = sessionId
+      rpcCall("startSession", js.Dynamic.literal("sessionId" -> sess, "threadId" -> threadId, "how" -> "backend restarted"))
+        .toFuture
+        .failed
+        .foreach(e => warn(s"re-registering after the backend restarted failed: ${e.getMessage}"))
 
   // --------------------------------------------------------------- playback
 
