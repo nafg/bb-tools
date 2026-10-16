@@ -1090,13 +1090,13 @@ def plugin(bb: BbApi): Unit =
     }
 
   /** What a check of a managed service found. Stale needs positive evidence:
-    * a different version, none reported by a server too old to have one, or
-    * no answer for longer than any real job keeps it busy. A version check
-    * that times out otherwise means the service is busy. Unverified: it
-    * answered, but not with a version.
+    * a different version, or none reported by a server too old to have one.
+    * A version check that times out means the service is busy, unless it has
+    * gone unanswered for longer than any real job keeps it busy, when it is
+    * unresponsive. Unverified: it answered, but not with a version.
     */
   enum ServiceState:
-    case Down, Busy, Unverified, Stale, Current
+    case Down, Busy, Unverified, Unresponsive, Stale, Current
 
   def serviceState(service: ManagedService): Future[ServiceState] =
     service.versionCheck match
@@ -1122,9 +1122,7 @@ def plugin(bb: BbApi): Unit =
           .map {
             case ServiceState.Busy =>
               val since = state.serviceBusySince.getOrElseUpdate(service.key, js.Date.now())
-              if js.Date.now() - since > ServiceHungAfterMs then
-                bb.log.warn(s"${service.label} has not answered its version check for a minute; taking it to be hung")
-                ServiceState.Stale
+              if js.Date.now() - since > ServiceHungAfterMs then ServiceState.Unresponsive
               else ServiceState.Busy
             case other =>
               val _ = state.serviceBusySince.remove(service.key)
@@ -1173,8 +1171,11 @@ def plugin(bb: BbApi): Unit =
       serviceState(service).flatMap {
         case ServiceState.Down                        => Future.successful(Right(false))
         case ServiceState.Current | ServiceState.Busy | ServiceState.Unverified => Future.successful(Right(true))
-        case ServiceState.Stale =>
-          bb.log.info(s"replacing managed ${service.label}: the running instance is not the current version")
+        case found @ (ServiceState.Stale | ServiceState.Unresponsive) =>
+          val reason =
+            if found == ServiceState.Stale then "the running instance is not the current version"
+            else s"the running instance has not answered for over ${(ServiceHungAfterMs / 1000).toInt} s"
+          bb.log.warn(s"replacing managed ${service.label}: $reason")
           stopService(service).flatMap(_ => awaitDown(0)).flatMap(_ => serviceState(service)).map {
             case ServiceState.Down => Right(false)
             case _                 => Left(s"the port of ${service.label} is held by an instance this plugin did not start")
