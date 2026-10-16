@@ -21,7 +21,7 @@ private object ParakeetServer:
   val ScriptRelativePath = ".cache/bb-converse/parakeet_server.py"
 
   def startCommand(home: String): String =
-    s"uv run --script $home/$ScriptRelativePath --port $Port --model $Model --max-seconds $MaxSeconds"
+    s"uv run --script $home/$ScriptRelativePath --port $Port --model $Model --max-seconds $MaxSeconds --version $Version"
 
   val Script: String =
     """# /// script
@@ -51,6 +51,7 @@ private object ParakeetServer:
       |parser.add_argument("--port", type=int, required=True)
       |parser.add_argument("--model", required=True)
       |parser.add_argument("--max-seconds", type=float, required=True)
+      |parser.add_argument("--version", required=True)
       |args = parser.parse_args()
       |
       |# Loads the CUDA and cuDNN libraries the onnxruntime-gpu extras installed.
@@ -102,5 +103,15 @@ private object ParakeetServer:
       |    return {"text": text, "duration": seconds}
       |
       |
+      |@app.get("/version")
+      |def version():
+      |    return {"version": args.version}
+      |
+      |
       |uvicorn.run(app, host="127.0.0.1", port=args.port)
       |""".stripMargin
+
+  /** Identifies this script and its start command, so a running server
+    * started from an earlier one can be recognized and replaced.
+    */
+  lazy val Version: String = (Script, Model, MaxSeconds).hashCode.toHexString

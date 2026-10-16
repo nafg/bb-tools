@@ -67,7 +67,10 @@ private val SoundCuesKey           = "soundCues"
 /** A local service the plugin starts in a bb terminal when it is first needed
   * and stops once it has gone unused for `idleMinutes`. `key` names its stored
   * terminal and last use; `files` (paths relative to the home directory) are
-  * written before it starts; it is up once `probeUrl` answers at all.
+  * written before it starts; it is up once `probeUrl` answers at all. With a
+  * `versionCheck`, a running instance reporting another version is stopped
+  * and started afresh, so a changed service takes effect without waiting for
+  * it to go idle.
   */
 private final case class ManagedService(
     key: String,
@@ -76,8 +79,12 @@ private final case class ManagedService(
     startCommand: String => String,
     readyWithinSeconds: Int,
     idleMinutes: Int,
-    files: Map[String, String] = Map.empty
+    files: Map[String, String] = Map.empty,
+    versionCheck: Option[ServiceVersionCheck] = None
 )
+
+/** `url` answers GET with JSON `{"version": ...}`, expected to be `expected`. */
+private final case class ServiceVersionCheck(url: String, expected: String)
 
 private val PocketService = ManagedService(
   key = "pocket",
@@ -97,7 +104,10 @@ private val ParakeetService = ManagedService(
   readyWithinSeconds = 900,
   // Starting again loads the model, which delays the next transcription.
   idleMinutes = 60,
-  files = Map(ParakeetServer.ScriptRelativePath -> ParakeetServer.Script)
+  files = Map(ParakeetServer.ScriptRelativePath -> ParakeetServer.Script),
+  versionCheck = Some(
+    ServiceVersionCheck(s"http://127.0.0.1:${ParakeetServer.Port}/version", ParakeetServer.Version)
+  )
 )
 
 private val ManagedServices = List(PocketService, ParakeetService)
@@ -1050,10 +1060,50 @@ def plugin(bb: BbApi): Unit =
       val _    = fs.writeFileSync(file, content)
     }
 
+  /** Whether a running instance reports the version the service expects;
+    * true for a service without a version check.
+    */
+  def serviceCurrent(service: ManagedService): Future[Boolean] =
+    service.versionCheck.fold(Future.successful(true)) { check =>
+      js.Dynamic.global
+        .fetch(check.url, js.Dynamic.literal("signal" -> js.Dynamic.global.AbortSignal.timeout(1500)))
+        .asInstanceOf[js.Promise[js.Dynamic]]
+        .toFuture
+        .flatMap(response => response.json().asInstanceOf[js.Promise[js.Dynamic]].toFuture)
+        .map(body => str(body.version) == check.expected)
+        .recover(_ => false)
+    }
+
+  def stopService(service: ManagedService): Future[Unit] =
+    for
+      terminalId <- bb.storage.kv.get(s"${service.key}.terminalId").toFuture
+      _ <- str(terminalId) match
+        case "" => Future.unit
+        case tid => bb.sdk.terminals.close(js.Dynamic.literal("terminalId" -> tid)).toFuture.map(_ => ()).recover(_ => ())
+      _ <- bb.storage.kv.delete(s"${service.key}.terminalId").toFuture
+      _ <- bb.storage.kv.delete(s"${service.key}.lastUseAt").toFuture
+    yield ()
+
   /** The service's URL once it answers, starting it first if it is down. */
   def ensureService(service: ManagedService): Future[Either[String, String]] =
     val url = service.probeUrl
-    probeService(url).flatMap {
+    def awaitDown(attempt: Int): Future[Unit] =
+      probeService(url).flatMap {
+        case true if attempt < 30 => delayMs(1000).flatMap(_ => awaitDown(attempt + 1))
+        case _                    => Future.unit
+      }
+    probeService(url)
+      .flatMap {
+        case false => Future.successful(false)
+        case true =>
+          serviceCurrent(service).flatMap {
+            case true => Future.successful(true)
+            case false =>
+              bb.log.info(s"replacing managed ${service.label}: the running instance is not the current version")
+              stopService(service).flatMap(_ => awaitDown(0)).map(_ => false)
+          }
+      }
+      .flatMap {
         case true =>
           touchServiceUse(service)
           Future.successful(Right(url))
@@ -1127,11 +1177,7 @@ def plugin(bb: BbApi): Unit =
               val last = lastUse.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
               if tid.nonEmpty && last > 0 && js.Date.now() - last > service.idleMinutes * 60_000.0 then
                 bb.log.info(s"stopping managed ${service.label} after ${service.idleMinutes} idle minutes")
-                for
-                  _ <- bb.sdk.terminals.close(js.Dynamic.literal("terminalId" -> tid)).toFuture.recover(_ => ())
-                  _ <- bb.storage.kv.delete(s"${service.key}.terminalId").toFuture
-                  _ <- bb.storage.kv.delete(s"${service.key}.lastUseAt").toFuture
-                yield ()
+                stopService(service)
               else Future.unit
             }
           yield ()
