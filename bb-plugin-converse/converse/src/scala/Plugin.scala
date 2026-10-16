@@ -132,7 +132,10 @@ private final case class ReceivedRecording(
   * same answer. Other client errors (a bad key, a wrong URL or model) are
   * configuration, which can be fixed while the recording waits.
   */
-private final class TranscriberRejectedRequest(message: String) extends RuntimeException(message)
+private class TranscriberRejectedRequest(message: String) extends RuntimeException(message)
+
+/** The transcriber refused the audio as too long or too large (413). */
+private final class TranscriberRejectedLength(message: String) extends TranscriberRejectedRequest(message)
 
 /** A transcript, which service produced it, and, when the service reports
   * them, its per-segment timing, silence and confidence figures as one
@@ -870,7 +873,8 @@ def plugin(bb: BbApi): Unit =
             val status = str(response.status)
             Future.failed(
               if status == "429" then new RuntimeException(s"${TranscriptionFailure.RateLimitedMessage}: $detail")
-              else if Set("400", "413", "415", "422").contains(status) then new TranscriberRejectedRequest(s"transcription endpoint returned $status: $detail")
+              else if status == "413" then new TranscriberRejectedLength(s"transcription endpoint returned $status: $detail")
+              else if Set("400", "415", "422").contains(status) then new TranscriberRejectedRequest(s"transcription endpoint returned $status: $detail")
               else new RuntimeException(s"transcription endpoint returned $status: $detail")
             )
           }
@@ -984,7 +988,12 @@ def plugin(bb: BbApi): Unit =
                 precedingTranscript = "",
                 diagnosticContext,
                 signal
-              )
+              ).recoverWith { case e: TranscriberRejectedLength =>
+                // Long recordings are mostly continuous speech, where bb's
+                // Whisper-based transcriber seldom invents words.
+                bb.log.info(s"too long for Parakeet ($diagnosticContext); transcribing with bb instead: ${e.getMessage}")
+                viaBb
+              }
           }
         case _ => viaBb
     }

@@ -5,16 +5,21 @@ package converse
   * dependencies declared inline (PEP 723). It transcribes each upload whole,
   * never split into chunks: splitting made Parakeet invent words in testing.
   * It uses the GPU when the CUDA runtime loads, otherwise the CPU.
+  *
+  * It refuses audio longer than `MaxSeconds` with a 413. Measured on an 8 GB
+  * RTX 3070: 210 seconds fit in GPU memory and 240 did not; and this ONNX
+  * export fails outright on 10 minutes even on the CPU.
   */
 private object ParakeetServer:
   val Port  = 8790
   val Model = "nemo-parakeet-tdt-0.6b-v3"
+  val MaxSeconds = 180
 
   /** Where the script is written on the host before it is started. */
   val ScriptRelativePath = ".cache/bb-converse/parakeet_server.py"
 
   def startCommand(home: String): String =
-    s"uv run --script $home/$ScriptRelativePath --port $Port --model $Model"
+    s"uv run --script $home/$ScriptRelativePath --port $Port --model $Model --max-seconds $MaxSeconds"
 
   val Script: String =
     """# /// script
@@ -43,6 +48,7 @@ private object ParakeetServer:
       |parser = argparse.ArgumentParser()
       |parser.add_argument("--port", type=int, required=True)
       |parser.add_argument("--model", required=True)
+      |parser.add_argument("--max-seconds", type=float, required=True)
       |args = parser.parse_args()
       |
       |# Loads the CUDA and cuDNN libraries the onnxruntime-gpu extras installed.
@@ -76,8 +82,11 @@ private object ParakeetServer:
       |    if decoded.returncode != 0:
       |        raise HTTPException(400, f"could not decode the audio: {decoded.stderr.decode().strip()}")
       |    audio = np.frombuffer(decoded.stdout, dtype=np.float32)
+      |    seconds = len(audio) / SAMPLE_RATE
+      |    if seconds > args.max_seconds:
+      |        raise HTTPException(413, f"{seconds:.0f} s is longer than the {args.max_seconds:.0f} s this server transcribes")
       |    text = model.recognize(audio, sample_rate=SAMPLE_RATE) if len(audio) else ""
-      |    return {"text": text, "duration": len(audio) / SAMPLE_RATE}
+      |    return {"text": text, "duration": seconds}
       |
       |
       |uvicorn.run(app, host="127.0.0.1", port=args.port)
