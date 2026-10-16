@@ -402,7 +402,7 @@ final class Controller(
       case Success(stream)        => beginListening(stream, sess)
       case Failure(e)             =>
         debug(s"start failed: ${e.getMessage}")
-        endSession(VoiceSessionRestore.SessionEnd.Failed)
+        endSession(VoiceSessionRestore.SessionEnd.Failed, Some(s"start failed: ${e.getMessage}"))
         closeAudioContext()
         turnOff(VoiceSessionRestore.SessionEnd.Failed, s"could not start voice: ${e.getMessage}")
     }
@@ -454,7 +454,7 @@ final class Controller(
           detector.destroy().failed.foreach(_ => ())
         case Failure(e) if sessionId == sess =>
           debug(s"speech detector failed to start: ${e.getMessage}")
-          stopInternal(VoiceSessionRestore.SessionEnd.Failed)
+          stopInternal(VoiceSessionRestore.SessionEnd.Failed, Some(s"speech detection failed to start: ${e.getMessage}"))
           turnOff(VoiceSessionRestore.SessionEnd.Failed, s"could not start speech detection: ${e.getMessage}")
         case Failure(_) => ()
       }
@@ -486,7 +486,7 @@ final class Controller(
       player.setAudioContext(null)
       ctx.close().toFuture.failed.foreach(_ => ())
 
-  private def stopInternal(end: VoiceSessionRestore.SessionEnd): Unit =
+  private def stopInternal(end: VoiceSessionRestore.SessionEnd, detail: Option[String] = None): Unit =
     player.stop()
     replyHeld = false
     abandonCapture()
@@ -505,17 +505,22 @@ final class Controller(
     interimText = null
     utteranceRoute = null
     currentSpeechProbability = 0.0
-    endSession(end)
+    endSession(end, detail)
 
-  private def endSession(end: VoiceSessionRestore.SessionEnd): Unit =
+  /** Ends the session here and tells the backend why, so every ending is in
+    * its log: one that stops the server's session too, or one it is only told
+    * about.
+    */
+  private def endSession(end: VoiceSessionRestore.SessionEnd, detail: Option[String] = None): Unit =
     if sessionId != null then
       val sess = sessionId
       sessionId = null
       threadId = null
-      if end.notifiesServer then
-        rpcCall("stopSession", js.Dynamic.literal("sessionId" -> sess)).toFuture.failed.foreach { e =>
-          warn(s"stopSession failed: ${e.getMessage}")
-        }
+      val call = if end.notifiesServer then "stopSession" else "reportSessionEnd"
+      rpcCall(call, js.Dynamic.literal("sessionId" -> sess, "end" -> end.toString, "detail" -> detail.orNull))
+        .toFuture
+        .failed
+        .foreach(e => warn(s"$call failed: ${e.getMessage}"))
       if !end.keepsIntent then forgetRestore()
 
   // ------------------------------------------------------- speech detection

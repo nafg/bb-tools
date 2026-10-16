@@ -1464,11 +1464,23 @@ def plugin(bb: BbApi): Unit =
           }
       }
 
+  /** Logs why a browser session ended; `stopped` says the server's session
+    * was stopped with it, rather than kept for the browser to resume.
+    */
+  def logSessionEnd(input: js.Dynamic, stopped: Boolean): Unit =
+    val end    = Option(str(input.end)).filter(_.nonEmpty).getOrElse("unknown")
+    val detail = Option(str(input.detail)).filter(_.nonEmpty).fold("")(d => s": $d")
+    bb.log.info(s"voice session ${str(input.sessionId)} ended in the browser ($end$detail)" + (if stopped then "" else "; kept on the server"))
+
   bb.rpc.register(
     js.Dynamic.literal(
       // threadId is empty while the New thread screen is in view.
       "startSession" -> js.Dynamic.literal(
         "input"  -> Schema.stringsWithOptional(Seq("sessionId" -> 100), Seq("threadId" -> 100)),
+        "output" -> Schema.passthrough
+      ),
+      "reportSessionEnd" -> js.Dynamic.literal(
+        "input"  -> Schema.strings("sessionId" -> 100),
         "output" -> Schema.passthrough
       ),
       "stopSession" -> js.Dynamic.literal(
@@ -1559,8 +1571,13 @@ def plugin(bb: BbApi): Unit =
         }
         js.Dynamic.literal("ok" -> true)
       },
+      "reportSessionEnd" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        logSessionEnd(input, stopped = false)
+        js.Dynamic.literal("ok" -> true)
+      },
       "stopSession" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val sessionId = str(input.sessionId)
+        logSessionEnd(input, stopped = true)
         if state.active.exists(_.sessionId == sessionId) then
           activate(None)
           state.capturingFor = None
