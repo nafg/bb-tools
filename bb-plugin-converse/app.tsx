@@ -763,7 +763,7 @@ function RecordingStatus({ u }: { u: RecentUtterance }) {
           <button type="button" className="rounded border px-2 text-xs hover:bg-muted" onClick={() => void retry()}>
             Retry
           </button>
-          <span className="text-muted-foreground">You were asked to say it again; if you did, retrying sends it twice.</span>
+          <span className="text-muted-foreground">If you already said it again, retrying sends it twice. It fails again until whatever stopped it is fixed.</span>
         </>
       )}
       {retryError && <span className="text-destructive">{retryError}</span>}
