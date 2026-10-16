@@ -30,6 +30,8 @@ private final case class PendingUpload(
 
 final class Controller(
     rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynamic]],
+    // For a small call that must still land when the page is closing.
+    rpcCallOutlivingPage: js.Function2[String, js.Any, js.Promise[js.Dynamic]],
     createMicVad: js.Function1[js.Dynamic, js.Promise[js.Dynamic]],
     encodeWav: js.Function1[Float32Array, js.Any]
 ):
@@ -517,7 +519,7 @@ final class Controller(
       sessionId = null
       threadId = null
       val call = if end.notifiesServer then "stopSession" else "reportSessionEnd"
-      rpcCall(call, js.Dynamic.literal("sessionId" -> sess, "end" -> end.toString, "detail" -> detail.orNull))
+      rpcCallOutlivingPage(call, js.Dynamic.literal("sessionId" -> sess, "end" -> end.toString, "detail" -> detail.orNull))
         .toFuture
         .failed
         .foreach(e => warn(s"$call failed: ${e.getMessage}"))
@@ -988,8 +990,10 @@ final class Controller(
 
 @JSExportTopLevel("createController")
 def createController(deps: js.Dynamic): js.Dynamic =
+  val rpcCallWithOptions = deps.rpcCall.asInstanceOf[js.Function3[String, js.Any, js.Any, js.Promise[js.Dynamic]]]
   val ctl = new Controller(
     deps.rpcCall.asInstanceOf[js.Function2[String, js.Any, js.Promise[js.Dynamic]]],
+    (method: String, input: js.Any) => rpcCallWithOptions(method, input, js.Dynamic.literal("keepalive" -> true)),
     deps.createMicVad.asInstanceOf[js.Function1[js.Dynamic, js.Promise[js.Dynamic]]],
     deps.encodeWav.asInstanceOf[js.Function1[Float32Array, js.Any]]
   )

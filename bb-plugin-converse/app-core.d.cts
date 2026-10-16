@@ -121,7 +121,7 @@ export interface ConverseController {
 }
 
 export function createController(deps: {
-  rpcCall: (method: string, input: unknown) => Promise<unknown>;
+  rpcCall: (method: string, input: unknown, options?: { keepalive?: boolean }) => Promise<unknown>;
   createMicVad: (options: Record<string, unknown>) => Promise<unknown>;
   encodeWav: (audio: Float32Array) => ArrayBuffer;
 }): ConverseController;

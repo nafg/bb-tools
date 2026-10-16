@@ -22,11 +22,14 @@ import {
 } from "./app-core.cjs";
 
 // Plain-fetch RPC so the controller exists independently of React.
-async function rpcCall(method: string, input: unknown): Promise<unknown> {
+// `keepalive` lets a small call finish after the page goes away; the browser
+// limits such a body to 64 KB, so it is not for uploads.
+async function rpcCall(method: string, input: unknown, options?: { keepalive?: boolean }): Promise<unknown> {
   const response = await fetch(`/api/v1/plugins/converse/rpc/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
+    keepalive: options?.keepalive ?? false,
   });
   const envelope = (await response.json()) as
     | { ok: true; result: unknown }
