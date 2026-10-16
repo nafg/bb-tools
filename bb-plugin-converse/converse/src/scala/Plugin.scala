@@ -64,9 +64,43 @@ private val ThreadVoicesEnabledKey = "voices.byThreadEnabled"
 private val EnabledPocketVoicesKey = "voices.pocket.enabled"
 private val SoundCuesKey           = "soundCues"
 
-private val ManagedPocketPort         = 8000
-private val ManagedPocketStartCommand = "uvx pocket-tts serve --host localhost --port 8000"
-private val ManagedPocketIdleMinutes  = 15
+/** A local service the plugin starts in a bb terminal when it is first needed
+  * and stops once it has gone unused for `idleMinutes`. `key` names its stored
+  * terminal and last use; `files` (paths relative to the home directory) are
+  * written before it starts; it is up once `probeUrl` answers at all.
+  */
+private final case class ManagedService(
+    key: String,
+    label: String,
+    probeUrl: String,
+    startCommand: String => String,
+    readyWithinSeconds: Int,
+    idleMinutes: Int,
+    files: Map[String, String] = Map.empty
+)
+
+private val PocketService = ManagedService(
+  key = "pocket",
+  label = "Pocket TTS",
+  probeUrl = "http://127.0.0.1:8000/tts",
+  startCommand = _ => "uvx pocket-tts serve --host localhost --port 8000",
+  readyWithinSeconds = 90,
+  idleMinutes = 15
+)
+
+private val ParakeetService = ManagedService(
+  key = "parakeet",
+  label = "Parakeet",
+  probeUrl = s"http://127.0.0.1:${ParakeetServer.Port}/v1/audio/transcriptions",
+  startCommand = ParakeetServer.startCommand,
+  // The first start downloads the CUDA libraries and the model, about 3 GB.
+  readyWithinSeconds = 900,
+  // Starting again loads the model, which delays the next transcription.
+  idleMinutes = 60,
+  files = Map(ParakeetServer.ScriptRelativePath -> ParakeetServer.Script)
+)
+
+private val ManagedServices = List(PocketService, ParakeetService)
 
 private def ttsConfigKey(provider: String): String = s"tts.config.$provider"
 
@@ -122,6 +156,8 @@ private final class State:
   // Stored recordings are transcribed and delivered one at a time, in the
   // order they were stored, so messages reach threads in the order spoken.
   var recordingQueue: Future[Unit] = Future.unit
+  // Managed services being started, by key, so concurrent callers share one start.
+  val servicesStarting: mutable.Map[String, Future[Either[String, String]]] = mutable.Map.empty
   private var eventCounter              = 0
   def nextEventId(): String =
     eventCounter += 1
@@ -329,7 +365,7 @@ def plugin(bb: BbApi): Unit =
       "sttProvider" -> js.Dynamic.literal(
         "type"    -> "select",
         "label"   -> "SPEECH-TO-TEXT PROVIDER",
-        "options" -> js.Array("bb", "groq", "openai-compatible"),
+        "options" -> js.Array("bb", "groq", "openai-compatible", "parakeet"),
         "default" -> "bb"
       ),
       "groqApiKey" -> js.Dynamic.literal(
@@ -934,6 +970,22 @@ def plugin(bb: BbApi): Unit =
                 signal
               )
             )
+        case "parakeet" =>
+          ensureService(ParakeetService).flatMap {
+            case Left(message) => Future.failed(new RuntimeException(message))
+            case Right(url) =>
+              transcribeViaEndpoint(
+                "parakeet",
+                url,
+                ParakeetServer.Model,
+                apiKey = "",
+                language = "",
+                file,
+                precedingTranscript = "",
+                diagnosticContext,
+                signal
+              )
+          }
         case _ => viaBb
     }
 
@@ -958,91 +1010,110 @@ def plugin(bb: BbApi): Unit =
       rows.find(h => str(h.status) == "connected").map(h => str(h.id))
     }
 
-  def touchPocketUse(): Unit =
-    bb.storage.kv.set("pocket.lastUseAt", js.Date.now()).toFuture.failed.foreach(_ => ())
+  def touchServiceUse(service: ManagedService): Unit =
+    bb.storage.kv.set(s"${service.key}.lastUseAt", js.Date.now()).toFuture.failed.foreach(_ => ())
 
-  var pocketStarting: Future[Either[String, String]] = null
+  def homeDirectory: String = str(js.Dynamic.global.process.env.HOME) match
+    case "" => "/tmp"
+    case h  => h
 
-  /** Resolve Pocket TTS, always managing its local lifecycle. */
-  def ensurePocket(): Future[Either[String, String]] =
-    val url = s"http://127.0.0.1:$ManagedPocketPort/tts"
+  def writeServiceFiles(service: ManagedService): Unit =
+    val fs   = js.Dynamic.global.process.getBuiltinModule("node:fs")
+    val path = js.Dynamic.global.process.getBuiltinModule("node:path")
+    service.files.foreach { (relative, content) =>
+      val file = path.join(homeDirectory, relative)
+      val _    = fs.mkdirSync(path.dirname(file), js.Dynamic.literal("recursive" -> true))
+      val _    = fs.writeFileSync(file, content)
+    }
+
+  /** The service's URL once it answers, starting it first if it is down. */
+  def ensureService(service: ManagedService): Future[Either[String, String]] =
+    val url = service.probeUrl
     probeService(url).flatMap {
         case true =>
-          touchPocketUse()
+          touchServiceUse(service)
           Future.successful(Right(url))
         case false =>
-          if pocketStarting != null then pocketStarting
-          else
-            bb.log.info(s"starting managed Pocket TTS: $ManagedPocketStartCommand")
-            state.active.foreach { a =>
-              publishSignal("status", a.sessionId, a.threadId, "text" -> "Starting Pocket TTS…")
-            }
-            val started =
-              connectedHostId()
-                .flatMap {
-                  case None => Future.successful(Left("no connected host to start Pocket TTS on"))
-                  case Some(hostId) =>
-                    val home = str(js.Dynamic.global.process.env.HOME) match
-                      case "" => "/tmp"
-                      case h  => h
-                    bb.sdk.terminals
-                      .create(
-                        js.Dynamic.literal(
-                          "cols"  -> 120,
-                          "rows"  -> 30,
-                          "scope" -> js.Dynamic.literal("kind" -> "host_path", "hostId" -> hostId, "cwd" -> home),
-                          "title" -> "pocket-tts (converse)",
-                          "start" -> js.Dynamic.literal("mode" -> "command", "command" -> ManagedPocketStartCommand)
+          state.servicesStarting.getOrElse(
+            service.key, {
+              val home    = homeDirectory
+              val command = service.startCommand(home)
+              bb.log.info(s"starting managed ${service.label}: $command")
+              state.active.foreach { a =>
+                publishSignal("status", a.sessionId, a.threadId, "text" -> s"Starting ${service.label}…")
+              }
+              val started =
+                connectedHostId()
+                  .flatMap {
+                    case None => Future.successful(Left(s"no connected host to start ${service.label} on"))
+                    case Some(hostId) =>
+                      writeServiceFiles(service)
+                      bb.sdk.terminals
+                        .create(
+                          js.Dynamic.literal(
+                            "cols"  -> 120,
+                            "rows"  -> 30,
+                            "scope" -> js.Dynamic.literal("kind" -> "host_path", "hostId" -> hostId, "cwd" -> home),
+                            "title" -> s"${service.key} (converse)",
+                            "start" -> js.Dynamic.literal("mode" -> "command", "command" -> command)
+                          )
                         )
-                      )
-                      .toFuture
-                      .flatMap { result =>
-                        val terminal =
-                          result.terminal.asInstanceOf[js.UndefOr[js.Dynamic]].getOrElse(result)
-                        val terminalId = str(terminal.id)
-                        bb.storage.kv.set("pocket.terminalId", terminalId).toFuture.map(_ => terminalId)
-                      }
-                      .flatMap { terminalId =>
-                        def awaitReady(attempt: Int): Future[Either[String, String]] =
-                          probeService(url).flatMap {
-                            case true =>
-                              bb.log.info(s"Pocket TTS is up (terminal $terminalId)")
-                              touchPocketUse()
-                              Future.successful(Right(url))
-                            case false if attempt >= 90 =>
-                              Future.successful(Left("Pocket TTS did not become ready within 90s"))
-                            case false => delayMs(1000).flatMap(_ => awaitReady(attempt + 1))
-                          }
-                        awaitReady(0)
-                      }
-                }
-                .recover { case e => Left(s"could not start Pocket TTS: ${e.getMessage}") }
-            pocketStarting = started
-            started.onComplete(_ => pocketStarting = null)
-            started
+                        .toFuture
+                        .flatMap { result =>
+                          val terminal =
+                            result.terminal.asInstanceOf[js.UndefOr[js.Dynamic]].getOrElse(result)
+                          val terminalId = str(terminal.id)
+                          bb.storage.kv.set(s"${service.key}.terminalId", terminalId).toFuture.map(_ => terminalId)
+                        }
+                        .flatMap { terminalId =>
+                          def awaitReady(attempt: Int): Future[Either[String, String]] =
+                            probeService(url).flatMap {
+                              case true =>
+                                bb.log.info(s"${service.label} is up (terminal $terminalId)")
+                                touchServiceUse(service)
+                                Future.successful(Right(url))
+                              case false if attempt >= service.readyWithinSeconds =>
+                                Future.successful(
+                                  Left(s"${service.label} did not become ready within ${service.readyWithinSeconds}s")
+                                )
+                              case false => delayMs(1000).flatMap(_ => awaitReady(attempt + 1))
+                            }
+                          awaitReady(0)
+                        }
+                  }
+                  .recover { case e => Left(s"could not start ${service.label}: ${e.getMessage}") }
+              state.servicesStarting.update(service.key, started)
+              started.onComplete(_ => state.servicesStarting.remove(service.key))
+              started
+            }
+          )
     }
 
   bb.background.schedule(
     "service-idle",
     "*/5 * * * *",
     () =>
-      (for
-        terminalId <- bb.storage.kv.get("pocket.terminalId").toFuture
-        lastUse    <- bb.storage.kv.get("pocket.lastUseAt").toFuture
-        _ <- {
-          val idleMinutes = ManagedPocketIdleMinutes
-          val tid         = str(terminalId)
-          val last        = lastUse.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
-          if tid.nonEmpty && last > 0 && js.Date.now() - last > idleMinutes * 60_000.0 then
-            bb.log.info(s"stopping managed Pocket TTS after $idleMinutes idle minutes")
-            for
-              _ <- bb.sdk.terminals.close(js.Dynamic.literal("terminalId" -> tid)).toFuture.recover(_ => ())
-              _ <- bb.storage.kv.delete("pocket.terminalId").toFuture
-              _ <- bb.storage.kv.delete("pocket.lastUseAt").toFuture
-            yield ()
-          else Future.unit
+      Future
+        .traverse(ManagedServices) { service =>
+          for
+            terminalId <- bb.storage.kv.get(s"${service.key}.terminalId").toFuture
+            lastUse    <- bb.storage.kv.get(s"${service.key}.lastUseAt").toFuture
+            _ <- {
+              val tid  = str(terminalId)
+              val last = lastUse.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
+              if tid.nonEmpty && last > 0 && js.Date.now() - last > service.idleMinutes * 60_000.0 then
+                bb.log.info(s"stopping managed ${service.label} after ${service.idleMinutes} idle minutes")
+                for
+                  _ <- bb.sdk.terminals.close(js.Dynamic.literal("terminalId" -> tid)).toFuture.recover(_ => ())
+                  _ <- bb.storage.kv.delete(s"${service.key}.terminalId").toFuture
+                  _ <- bb.storage.kv.delete(s"${service.key}.lastUseAt").toFuture
+                yield ()
+              else Future.unit
+            }
+          yield ()
         }
-      yield ()).toJSPromise
+        .map(_ => ())
+        .toJSPromise
   )
 
   // ------------------------------------------------------ stored recordings
@@ -1323,12 +1394,17 @@ def plugin(bb: BbApi): Unit =
         state.awaiting.filterInPlace((_, reply) => reply.sessionId == sessionId)
         state.continuationWaiters.expireAll()
         bb.log.info(s"voice session $sessionId started for thread $threadId")
-        // Warm the managed TTS service while the user starts talking so the
-        // first spoken reply is not delayed by service startup.
+        // Warm the managed services while the user starts talking so the first
+        // transcription and spoken reply are not delayed by service startup.
         settings.get().toFuture.foreach { s =>
           if str(s.ttsProvider) == "pocket-tts" then
-            ensurePocket().foreach {
+            ensureService(PocketService).foreach {
               case Left(message) => bb.log.warn(s"TTS warm-up: $message")
+              case Right(_)      => ()
+            }
+          if str(s.sttProvider) == "parakeet" then
+            ensureService(ParakeetService).foreach {
+              case Left(message) => bb.log.warn(s"transcriber warm-up: $message")
               case Right(_)      => ()
             }
         }
@@ -1692,8 +1768,7 @@ def plugin(bb: BbApi): Unit =
                 else str(config.defaultVoice)
               val requestF: Future[Either[String, (String, js.Dynamic)]] = provider match
                 case "pocket-tts" =>
-                  ensurePocket().map(_.map { url =>
-                    touchPocketUse()
+                  ensureService(PocketService).map(_.map { url =>
                     val form = js.Dynamic.newInstance(js.Dynamic.global.FormData)()
                     val _    = form.set("text", text)
                     if voice.nonEmpty then { val _ = form.set("voice_url", voice) }
