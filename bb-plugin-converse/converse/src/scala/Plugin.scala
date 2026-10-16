@@ -2018,6 +2018,11 @@ def plugin(bb: BbApi): Unit =
     }
 
   bb.onDispose { () =>
+    bb.log.info(
+      state.active.fold("plugin unloading with no voice session active")(a =>
+        s"plugin unloading with voice session ${a.sessionId} active for thread ${a.threadId}"
+      )
+    )
     activate(None)
     state.awaiting.clear()
     state.continuationWaiters.expireAll()
