@@ -985,8 +985,29 @@ def plugin(bb: BbApi): Unit =
               )
             )
         case "parakeet" =>
+          // When Parakeet cannot take a recording: Groq's Whisper when a key is
+          // set, else bb's. Whisper seldom invents words in long speech.
+          def viaWhisper: Future[Transcription] =
+            val groqKey = str(s.groqApiKey)
+            if groqKey.isEmpty then viaBb
+            else
+              viaBbWhenRateLimited(
+                transcribeViaEndpoint(
+                  "groq",
+                  "https://api.groq.com/openai/v1/audio/transcriptions",
+                  str(s.groqModel),
+                  groqKey,
+                  language,
+                  file,
+                  precedingTranscript,
+                  diagnosticContext,
+                  signal
+                )
+              )
           ensureService(ParakeetService).flatMap {
-            case Left(message) => Future.failed(new RuntimeException(message))
+            case Left(message) =>
+              bb.log.warn(s"Parakeet unavailable ($diagnosticContext): $message")
+              viaWhisper
             case Right(url) =>
               transcribeViaEndpoint(
                 "parakeet",
@@ -999,25 +1020,8 @@ def plugin(bb: BbApi): Unit =
                 diagnosticContext,
                 signal
               ).recoverWith { case e: TranscriberRejectedLength =>
-                // Long recordings are mostly continuous speech, where Whisper
-                // seldom invents words: Groq's when a key is set, else bb's.
-                val groqKey = str(s.groqApiKey)
                 bb.log.info(s"too long for Parakeet ($diagnosticContext): ${e.getMessage}")
-                if groqKey.isEmpty then viaBb
-                else
-                  viaBbWhenRateLimited(
-                    transcribeViaEndpoint(
-                      "groq",
-                      "https://api.groq.com/openai/v1/audio/transcriptions",
-                      str(s.groqModel),
-                      groqKey,
-                      language,
-                      file,
-                      precedingTranscript,
-                      diagnosticContext,
-                      signal
-                    )
-                  )
+                viaWhisper
               }
           }
         case _ => viaBb
@@ -1092,22 +1096,31 @@ def plugin(bb: BbApi): Unit =
         case true if attempt < 30 => delayMs(1000).flatMap(_ => awaitDown(attempt + 1))
         case _                    => Future.unit
       }
-    probeService(url)
-      .flatMap {
-        case false => Future.successful(false)
+    // Right(running): whether the current version is already up; Left: the
+    // port is held by an instance this plugin cannot stop.
+    val running: Future[Either[String, Boolean]] =
+      probeService(url).flatMap {
+        case false => Future.successful(Right(false))
         case true =>
           serviceCurrent(service).flatMap {
-            case true => Future.successful(true)
+            case true => Future.successful(Right(true))
             case false =>
               bb.log.info(s"replacing managed ${service.label}: the running instance is not the current version")
-              stopService(service).flatMap(_ => awaitDown(0)).map(_ => false)
+              stopService(service).flatMap(_ => awaitDown(0)).flatMap(_ => probeService(url)).map {
+                case true  => Left(s"the port of ${service.label} is held by an instance this plugin did not start")
+                case false => Right(false)
+              }
           }
       }
+    running
       .flatMap {
-        case true =>
+        case Left(message) =>
+          bb.log.error(s"$message; stop that process so the plugin can start its own")
+          Future.successful(Left(message))
+        case Right(true) =>
           touchServiceUse(service)
           Future.successful(Right(url))
-        case false =>
+        case Right(false) =>
           state.servicesStarting.getOrElse(
             service.key, {
               val home    = homeDirectory
@@ -1141,7 +1154,7 @@ def plugin(bb: BbApi): Unit =
                         }
                         .flatMap { terminalId =>
                           def awaitReady(attempt: Int): Future[Either[String, String]] =
-                            probeService(url).flatMap {
+                            probeService(url).flatMap(up => if up then serviceCurrent(service) else Future.successful(false)).flatMap {
                               case true =>
                                 bb.log.info(s"${service.label} is up (terminal $terminalId)")
                                 touchServiceUse(service)
