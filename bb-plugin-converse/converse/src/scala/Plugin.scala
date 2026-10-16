@@ -1922,6 +1922,8 @@ def plugin(bb: BbApi): Unit =
           awaitingReplies.remove(threadId)
           publishSignal("agent-failed", awaitedReply.sessionId, threadId, "error" -> error)
         recentTimeline(threadId).onComplete {
+          // Another check of the same turn's end got there first.
+          case _ if !awaitingReplies.get(threadId).contains(awaitedReply) => ()
           case scala.util.Success(timeline) =>
             AssistantReply.afterIdle(
               awaitedReply.previousAssistantMessageId,
