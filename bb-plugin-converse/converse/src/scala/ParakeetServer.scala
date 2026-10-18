@@ -4,7 +4,8 @@ package converse
   * small OpenAI-compatible HTTP wrapper around onnx-asr, run by `uv` with its
   * dependencies declared inline (PEP 723). It transcribes each upload whole,
   * never split into chunks: splitting made Parakeet invent words in testing.
-  * It uses the GPU when the CUDA runtime loads, otherwise the CPU.
+  * It uses the GPU when the CUDA runtime loads and the model fits in its free
+  * memory, otherwise the CPU (four threads, so bb's window stays responsive).
   *
   * It answers 413 for audio it cannot take whole: longer than `MaxSeconds`,
   * or more than its GPU memory cap allows at the moment. The cap keeps a long
@@ -77,7 +78,17 @@ private object ParakeetServer:
       |    if "CUDAExecutionProvider" in ort.get_available_providers()
       |    else ["CPUExecutionProvider"]
       |)
-      |model = onnx_asr.load_model(args.model, model_dir, providers=providers)
+      |try:
+      |    model = onnx_asr.load_model(args.model, model_dir, providers=providers)
+      |except Exception as error:
+      |    if providers == ["CPUExecutionProvider"]:
+      |        raise
+      |    # Typically too little free GPU memory, with other programs holding it.
+      |    print(f"could not load {args.model} on the GPU ({str(error)[:200]}); using the CPU", flush=True)
+      |    providers = ["CPUExecutionProvider"]
+      |    cpu_options = ort.SessionOptions()
+      |    cpu_options.intra_op_num_threads = 4
+      |    model = onnx_asr.load_model(args.model, model_dir, providers=providers, sess_options=cpu_options)
       |print(f"loaded {args.model} with {providers[0]}", flush=True)
       |
       |

@@ -1291,6 +1291,14 @@ def plugin(bb: BbApi): Unit =
                       bb.storage.kv.set(s"${service.key}.terminalId", terminalId).toFuture.map(_ => terminalId)
                     }
                     .flatMap { terminalId =>
+                      def exited: Future[Boolean] =
+                        bb.sdk.terminals.get(js.Dynamic.literal("terminalId" -> terminalId)).toFuture
+                          .map { result =>
+                            val terminal = result.terminal.asInstanceOf[js.UndefOr[js.Dynamic]].getOrElse(result)
+                            // A terminal that has stopped carries its exit code or the reason it closed.
+                            str(terminal.exitCode).nonEmpty || str(terminal.closeReason).nonEmpty
+                          }
+                          .recover(_ => true)
                       def awaitReady(attempt: Int): Future[Either[String, String]] =
                         serviceState(service).map(_ == ServiceState.Current).flatMap {
                           case true =>
@@ -1301,7 +1309,13 @@ def plugin(bb: BbApi): Unit =
                             Future.successful(
                               Left(s"${service.label} did not become ready within ${service.readyWithinSeconds}s")
                             )
-                          case false => delayMs(1000).flatMap(_ => awaitReady(attempt + 1))
+                          case false =>
+                            exited.flatMap {
+                              case true =>
+                                bb.log.warn(s"${service.label} exited before it was ready (terminal $terminalId)")
+                                Future.successful(Left(s"${service.label} exited before it was ready"))
+                              case false => delayMs(1000).flatMap(_ => awaitReady(attempt + 1))
+                            }
                         }
                       awaitReady(0)
                     }
