@@ -1531,6 +1531,7 @@ def plugin(bb: BbApi): Unit =
         "input"  -> Schema.stringsWithOptional(Seq("sessionId" -> 100), Seq("threadId" -> 100)),
         "output" -> Schema.passthrough
       ),
+      "reportUiStall" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "reportSessionEnd" -> js.Dynamic.literal(
         "input"  -> Schema.strings("sessionId" -> 100),
         "output" -> Schema.passthrough
@@ -1628,6 +1629,14 @@ def plugin(bb: BbApi): Unit =
               case Right(_)      => ()
             }
         }
+        js.Dynamic.literal("ok" -> true)
+      },
+      "reportUiStall" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        bb.log.warn(
+          s"bb's UI thread was blocked for about ${str(input.lateMs).toDoubleOption.fold("?")(ms => f"${ms / 1000}%.1f")} s " +
+            s"(voice ${if input.voice.asInstanceOf[js.UndefOr[Boolean]].getOrElse(false) then "on" else "off"}, " +
+            s"phase ${str(input.phase)}, capturing ${str(input.capturing)})"
+        )
         js.Dynamic.literal("ok" -> true)
       },
       "reportSessionEnd" -> js.Any.fromFunction1 { (input: js.Dynamic) =>

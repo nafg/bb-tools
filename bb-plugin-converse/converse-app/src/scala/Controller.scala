@@ -7,7 +7,7 @@ import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.annotation.JSExportTopLevel
-import scala.scalajs.js.timers.setTimeout
+import scala.scalajs.js.timers.{setInterval, setTimeout}
 import scala.scalajs.js.typedarray.Float32Array
 import scala.util.{Failure, Success}
 
@@ -113,6 +113,32 @@ final class Controller(
   // Playback is tab-wide rather than part of the voice-session state machine.
   private val player = new Player(rpcCall, () => refreshSnapshot())
   private val cues   = new SoundCuePlayer
+
+  // Watches bb's UI thread, which this plugin's speech detector shares: a
+  // one-second timer that fires late means the thread was blocked that long.
+  // The backend logs each stall with what voice was doing, to tell whether
+  // freezes of bb's window coincide with voice. A hidden page's timers are
+  // throttled, so lateness there means nothing.
+  private val StallReportMs = 1000.0
+  private var lastWatchdogTick = js.Date.now()
+  locally {
+    val _ = setInterval(1000) {
+      val now  = js.Date.now()
+      val late = now - lastWatchdogTick - 1000
+      lastWatchdogTick = now
+      val visible = js.Dynamic.global.document.visibilityState.asInstanceOf[String] == "visible"
+      if late > StallReportMs && visible then
+        rpcCall(
+          "reportUiStall",
+          js.Dynamic.literal(
+            "lateMs"    -> late,
+            "voice"     -> state.isOn,
+            "phase"     -> state.runningPhase.fold("off")(_.name),
+            "capturing" -> captureActive
+          )
+        ).toFuture.failed.foreach(e => warn(s"reportUiStall failed: ${e.getMessage}"))
+    }
+  }
   private var replyHeld: Boolean = false
   // Every mounted converse component forwards every signal, so a backend
   // start is acted on once.
