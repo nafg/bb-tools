@@ -697,6 +697,13 @@ def plugin(bb: BbApi): Unit =
 
   val StoredRecordingWaitMs = 3 * 60_000.0
 
+  /** A wait whose tool call can no longer return ends, so the next utterance
+    * goes to the thread as a message instead of into the dead call.
+    */
+  def endWaitForMoreSpeech(threadId: String, because: String): Unit =
+    if state.continuationWaiters.expire(threadId) then
+      bb.log.info(s"wait for more speech on $threadId ended: $because")
+
   def waitForMoreSpeech(threadId: String): Future[String] =
     awaitingReplies.get(threadId) match
       case None =>
@@ -782,8 +789,7 @@ def plugin(bb: BbApi): Unit =
           val _ = signal.addEventListener(
             "abort",
             js.Any.fromFunction0 { () =>
-              if state.continuationWaiters.expire(threadId) then
-                bb.log.info(s"wait for more speech on $threadId ended: its tool call was cancelled")
+              endWaitForMoreSpeech(threadId, "its tool call was cancelled")
             },
             js.Dynamic.literal("once" -> true)
           )
@@ -1930,7 +1936,9 @@ def plugin(bb: BbApi): Unit =
   bb.events.on(
     "thread.idle",
     { payload =>
-      replyOnceIdle(str(payload.thread.id))
+      val threadId = str(payload.thread.id)
+      endWaitForMoreSpeech(threadId, "its turn ended")
+      replyOnceIdle(threadId)
       ()
     }
   )
@@ -1991,6 +1999,7 @@ def plugin(bb: BbApi): Unit =
     "thread.failed",
     { payload =>
       val threadId = str(payload.thread.id)
+      endWaitForMoreSpeech(threadId, "its turn failed")
       awaitingReplies.remove(threadId).foreach { awaitedReply =>
         val error = str(payload.error)
         publishSignal(
