@@ -738,13 +738,13 @@ def plugin(bb: BbApi): Unit =
             val _ = js.Dynamic.global.clearTimeout(timer)
             publishSignal("awaiting-speech-end", awaitedReply.sessionId, threadId)
             continuation match
-              case Some(text) =>
-                ("The user continued speaking. Treat this as part of the preceding voice message:\n" +
-                  "<voice-continuation>\n" + text + "\n</voice-continuation>")
-              case None if recordingInProgressFor(threadId) =>
+              case true =>
+                "The user continued speaking. What they said arrives next as a voice message marked as " +
+                  "continuing this one; treat the two as one message."
+              case false if recordingInProgressFor(threadId) =>
                 "The user said more, and it was recorded, but it has not been transcribed yet. " +
                   "It will arrive as a new message once it is; end your turn rather than waiting for it."
-              case None =>
+              case false =>
                 s"No additional speech arrived within ${waitMs.toInt} milliseconds. " +
                   "Treat the preceding voice message as complete and continue."
           }
@@ -1498,17 +1498,16 @@ def plugin(bb: BbApi): Unit =
           awaitingReplies.put(newThreadId, AwaitingReply(sessionId, None))
           Some(newThreadId)
         }
-    else if state.continuationWaiters.deliver(
-        threadId,
-        ReplyInterruption.heardText(text, ReplyInterruption.forContinuation(notes))
-      )
-    then
-      bb.log.info(s"delivered ${text.length} chars to continuation waiter")
-      Future.successful(None)
     else
+      // An agent waiting for more speech is told it came, and the speech
+      // itself goes to the thread as a message: visible there, and never lost
+      // to a wait whose tool call has ended.
+      val continuing = state.continuationWaiters.continued(threadId)
+      if continuing then bb.log.info(s"ended the wait for more speech on $threadId: the user continued")
+      val notesToSend = if continuing then ReplyInterruption.forContinuation(threadId, notes) else notes
       def send(mode: String): Future[js.Dynamic] =
         bb.sdk.threads
-          .send(js.Dynamic.literal("threadId" -> threadId, "mode" -> mode, "input" -> heardInput(text, notes)))
+          .send(js.Dynamic.literal("threadId" -> threadId, "mode" -> mode, "input" -> heardInput(text, notesToSend)))
           .toFuture
       latestAssistantMessage(threadId).flatMap { previousAssistantMessage =>
         // An utterance sent while an earlier one still awaits its reply keeps

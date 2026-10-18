@@ -32,11 +32,14 @@ object ReplyInterruption:
 
   private val SpokenBeforeReply = "Spoken before the previous reply was read aloud."
 
+  private val ContinuesPrevious = "Continues the previous voice message, which you waited for more of."
+
   /** The notes for speech that continues a message an agent is still waiting
-    * on: being the rest of that message, it comes before no reply.
+    * on: being the rest of that message, it comes before no reply, and says
+    * what it continues.
     */
-  def forContinuation(notesForThread: List[Note]): List[Note] =
-    notesForThread.filterNot(_.text == SpokenBeforeReply)
+  def forContinuation(threadId: String, notesForThread: List[Note]): List[Note] =
+    notesForThread.filterNot(_.text == SpokenBeforeReply) :+ Note(threadId, ContinuesPrevious)
 
   /** The notes as the lines that precede a transcript, in the order things happened. */
   def preface(notesForThread: List[Note]): Option[String] =

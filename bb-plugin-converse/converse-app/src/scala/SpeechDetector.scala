@@ -36,7 +36,10 @@ object SpeechDetector:
   private val FrameSamples               = 512
   val FrameSeconds: Double               = FrameSamples.toDouble / SampleRate
   private val PreSpeechPadMs             = 1000
-  private val MinSpeechMs                = 192
+  // Shorter sounds are not taken as speech: Parakeet turned a 7-frame
+  // (224 ms) sound into an invented "Yeah.", and spoken words are rarely this
+  // short.
+  private val MinSpeechMs                = 256
   private val PreviewPauseMs             = 640
   private val TrailingContextMs          = 320
   private val VadAssetPath               = "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.30/dist/"
