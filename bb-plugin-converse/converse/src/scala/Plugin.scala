@@ -775,6 +775,19 @@ def plugin(bb: BbApi): Unit =
       ),
       "execute" -> js.Any.fromFunction2 { (_: js.Dynamic, toolContext: js.Dynamic) =>
         val threadId = str(toolContext.threadId)
+        // A tool call torn down mid-wait (the turn stopped or interrupted)
+        // can no longer return speech; the wait ends, so the next utterance
+        // goes to the thread as a message instead of into the dead call.
+        toolContext.signal.asInstanceOf[js.UndefOr[js.Dynamic]].toOption.filter(_ != null).foreach { signal =>
+          val _ = signal.addEventListener(
+            "abort",
+            js.Any.fromFunction0 { () =>
+              if state.continuationWaiters.expire(threadId) then
+                bb.log.info(s"wait for more speech on $threadId ended: its tool call was cancelled")
+            },
+            js.Dynamic.literal("once" -> true)
+          )
+        }
         waitForMoreSpeech(threadId).toJSPromise
       }
     )
