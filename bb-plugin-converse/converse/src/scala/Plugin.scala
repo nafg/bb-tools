@@ -379,6 +379,11 @@ def plugin(bb: BbApi): Unit =
     val _ = db.prepare("UPDATE utterances SET thread_id = ? WHERE id = ?").run(threadId, id)
   def recordingStatus(row: js.Dynamic): Option[RecordingStatus] =
     RecordingStatus.fromColumns(row.status.asInstanceOf[String | Null], row.last_error.asInstanceOf[String | Null])
+  /** Whether a recording for this thread is stored but not yet transcribed. */
+  def recordingAwaitingTranscriptionFor(threadId: String): Boolean =
+    db.prepare("SELECT 1 FROM utterances WHERE thread_id = ? AND status IN (?, ?) AND transcriber IS NULL LIMIT 1")
+      .get(threadId, RecordingStatus.Received.code, RecordingStatus.Sending.code)
+      .isDefined
   /** Whether a recording for this thread is stored but not yet delivered. */
   def recordingInProgressFor(threadId: String): Boolean =
     db.prepare("SELECT 1 FROM utterances WHERE thread_id = ? AND status IN (?, ?) LIMIT 1")
@@ -742,7 +747,10 @@ def plugin(bb: BbApi): Unit =
                 "The user continued speaking. What they said arrives with this result or right after it, " +
                   "as a voice message marked as continuing this one; treat the two as one message."
               case false if recordingInProgressFor(threadId) =>
-                "The user said more, and it was recorded, but it has not been transcribed yet. " +
+                val stage =
+                  if recordingAwaitingTranscriptionFor(threadId) then "it has not been transcribed yet"
+                  else "it has been transcribed but not yet delivered"
+                s"The user said more, and it was recorded, but $stage. " +
                   "It will arrive as a new message once it is; end your turn rather than waiting for it."
               case false =>
                 s"No additional speech arrived within ${waitMs.toInt} milliseconds. " +
