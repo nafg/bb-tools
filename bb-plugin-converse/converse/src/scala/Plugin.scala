@@ -739,8 +739,8 @@ def plugin(bb: BbApi): Unit =
             publishSignal("awaiting-speech-end", awaitedReply.sessionId, threadId)
             continuation match
               case true =>
-                "The user continued speaking. What they said arrives next as a voice message marked as " +
-                  "continuing this one; treat the two as one message."
+                "The user continued speaking. What they said arrives with this result or right after it, " +
+                  "as a voice message marked as continuing this one; treat the two as one message."
               case false if recordingInProgressFor(threadId) =>
                 "The user said more, and it was recorded, but it has not been transcribed yet. " +
                   "It will arrive as a new message once it is; end your turn rather than waiting for it."
@@ -1499,11 +1499,11 @@ def plugin(bb: BbApi): Unit =
           Some(newThreadId)
         }
     else
-      // An agent waiting for more speech is told it came, and the speech
-      // itself goes to the thread as a message: visible there, and never lost
-      // to a wait whose tool call has ended.
-      val continuing = state.continuationWaiters.continued(threadId)
-      if continuing then bb.log.info(s"ended the wait for more speech on $threadId: the user continued")
+      // Speech that continues a message an agent is waiting on goes to the
+      // thread as a message, visible there and never lost to a wait whose
+      // tool call has ended. The wait is told only once the message is in, so
+      // the agent never looks for words not yet sent.
+      val continuing = state.continuationWaiters.isWaiting(threadId)
       val notesToSend = if continuing then ReplyInterruption.forContinuation(threadId, notes) else notes
       def send(mode: String): Future[js.Dynamic] =
         bb.sdk.threads
@@ -1527,7 +1527,11 @@ def plugin(bb: BbApi): Unit =
             case e if e.getMessage != null && e.getMessage.contains("Thread is not active") =>
               send("auto")
           }
-          .map(_ => None)
+          .map { _ =>
+            if continuing && state.continuationWaiters.continued(threadId) then
+              bb.log.info(s"ended the wait for more speech on $threadId: the user continued")
+            None
+          }
           .recoverWith { case e =>
             val _ = awaitingReplies.remove(threadId)
             Future.failed(e)
