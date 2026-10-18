@@ -44,7 +44,13 @@ final class Player(
 
   def setTtsMode(mode: String): Unit = ttsMode = mode
 
-  def setAudioContext(ctx: AudioContext): Unit = audioContext = ctx
+  private var output: CallAudioOutput = null
+
+  /** Must be called inside a user gesture, so playback is allowed to start. */
+  def setAudioContext(ctx: AudioContext): Unit =
+    if output != null then output.close()
+    audioContext = ctx
+    output = if ctx == null then null else CallAudioOutput(ctx, debug)
 
   def isSpeaking: Boolean = speakingActive
 
@@ -223,7 +229,7 @@ final class Player(
             val p      = Promise[Unit]()
             val source = ctx.createBufferSource()
             source.buffer = decoded
-            val _ = source.connect(ctx.destination)
+            val _ = source.connect(output.input)
             currentAudio = source
             source.onended = js.Any.fromFunction1 { (_: js.Any) =>
               if currentAudio eq source then currentAudio = null

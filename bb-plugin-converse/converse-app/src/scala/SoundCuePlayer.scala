@@ -3,6 +3,7 @@ package converseapp
 import conversecore.*
 
 import scala.collection.mutable
+import scala.scalajs.js
 import scala.scalajs.js.timers.{SetIntervalHandle, clearInterval, setInterval}
 
 /** Plays the session's sound cues as synthesized sine tones on its own
@@ -69,7 +70,7 @@ final class SoundCuePlayer:
       audioContext = new AudioContext
       master = audioContext.createGain()
       master.gain.value = settings.volume
-      val _ = master.connect(audioContext.destination)
+      val _ = master.connect(CallAudioOutput(audioContext, message => { val _ = js.Dynamic.global.console.debug(s"[converse] $message") }).input)
     val _ = audioContext.resume()
 
   def onStateChange(from: VoiceState, to: VoiceState, activity: Option[AgentActivity]): Unit =
