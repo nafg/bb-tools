@@ -4,8 +4,10 @@ package converse
   * small OpenAI-compatible HTTP wrapper around onnx-asr, run by `uv` with its
   * dependencies declared inline (PEP 723). It transcribes each upload whole,
   * never split into chunks: splitting made Parakeet invent words in testing.
-  * It uses the GPU when the CUDA runtime loads and the model fits in its free
-  * memory, otherwise the CPU (four threads, so bb's window stays responsive).
+  * It uses the GPU when the CUDA runtime loads and loading the model would
+  * still leave a safe margin of free GPU memory (this machine's desktop has
+  * frozen with about 1.45 GB free), otherwise the CPU, on four threads so
+  * bb's window stays responsive.
   *
   * It answers 413 for audio it cannot take whole: longer than `MaxSeconds`,
   * or more than its GPU memory cap allows at the moment. The cap keeps a long
@@ -72,22 +74,42 @@ private object ParakeetServer:
       |model_dir = os.path.expanduser(f"~/.cache/bb-converse/models/{args.model}")
       |snapshot_download(REPOSITORIES[args.model], local_dir=model_dir)
       |GPU_MEMORY_LIMIT = 4 * 1024**3
+      |# The model takes about 3 GB on the GPU; loading it must leave at least 2 GB.
+      |GPU_FREE_NEEDED_MIB = 5000
+      |
+      |
+      |def gpu_free_mib():
+      |    try:
+      |        out = subprocess.run(["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+      |                             capture_output=True, text=True, timeout=10)
+      |        return int(out.stdout.split()[0])
+      |    except Exception:
+      |        return None
+      |
+      |
+      |free = gpu_free_mib()
+      |use_gpu = "CUDAExecutionProvider" in ort.get_available_providers() and free is not None and free >= GPU_FREE_NEEDED_MIB
+      |if not use_gpu:
+      |    print(f"using the CPU (free GPU memory: {free} MiB, need {GPU_FREE_NEEDED_MIB})", flush=True)
       |providers = (
       |    [("CUDAExecutionProvider", {"gpu_mem_limit": GPU_MEMORY_LIMIT, "arena_extend_strategy": "kSameAsRequested"}),
       |     "CPUExecutionProvider"]
-      |    if "CUDAExecutionProvider" in ort.get_available_providers()
+      |    if use_gpu
       |    else ["CPUExecutionProvider"]
       |)
+      |cpu_options = ort.SessionOptions()
+      |cpu_options.intra_op_num_threads = 4
       |try:
-      |    model = onnx_asr.load_model(args.model, model_dir, providers=providers)
+      |    if use_gpu:
+      |        model = onnx_asr.load_model(args.model, model_dir, providers=providers)
+      |    else:
+      |        model = onnx_asr.load_model(args.model, model_dir, providers=providers, sess_options=cpu_options)
       |except Exception as error:
-      |    if providers == ["CPUExecutionProvider"]:
+      |    if not use_gpu:
       |        raise
-      |    # Typically too little free GPU memory, with other programs holding it.
+      |    # Typically other programs took GPU memory after the check.
       |    print(f"could not load {args.model} on the GPU ({str(error)[:200]}); using the CPU", flush=True)
       |    providers = ["CPUExecutionProvider"]
-      |    cpu_options = ort.SessionOptions()
-      |    cpu_options.intra_op_num_threads = 4
       |    model = onnx_asr.load_model(args.model, model_dir, providers=providers, sess_options=cpu_options)
       |print(f"loaded {args.model} with {providers[0]}", flush=True)
       |

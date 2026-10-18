@@ -117,17 +117,29 @@ final class Controller(
   // Watches bb's UI thread, which this plugin's speech detector shares: a
   // one-second timer that fires late means the thread was blocked that long.
   // The backend logs each stall with what voice was doing, to tell whether
-  // freezes of bb's window coincide with voice. A hidden page's timers are
-  // throttled, so lateness there means nothing.
+  // freezes of bb's window coincide with voice.
   private val StallReportMs = 1000.0
   private var lastWatchdogTick = js.Date.now()
+  // Whether the page was hidden at any point since the last tick: the
+  // browser throttles a hidden page's timers, so that tick's lateness is not
+  // a stall.
+  private var hiddenSinceLastTick = false
   locally {
+    val _ = js.Dynamic.global.document.addEventListener(
+      "visibilitychange",
+      js.Any.fromFunction0 { () =>
+        hiddenSinceLastTick = true
+        debug(s"page ${js.Dynamic.global.document.visibilityState}")
+      }
+    )
     val _ = setInterval(1000) {
       val now  = js.Date.now()
       val late = now - lastWatchdogTick - 1000
       lastWatchdogTick = now
-      val visible = js.Dynamic.global.document.visibilityState.asInstanceOf[String] == "visible"
-      if late > StallReportMs && visible then
+      val visibleThroughout =
+        !hiddenSinceLastTick && js.Dynamic.global.document.visibilityState.asInstanceOf[String] == "visible"
+      hiddenSinceLastTick = false
+      if late > StallReportMs && visibleThroughout then
         rpcCall(
           "reportUiStall",
           js.Dynamic.literal(
