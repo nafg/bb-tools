@@ -319,7 +319,9 @@ function MyMoveControl({ threadId, own, onError }: { threadId: string; own: OwnL
   );
 }
 
-function GoalHeaderPicker({ threadId }: { threadId: string }) {
+/** The controls for one thread's labels: goal, value, my move, and what it waits on. Used inline in the Goals pane and inside the
+ * thread-header popover. */
+function LabelEditor({ threadId }: { threadId: string }) {
   const { rows, error } = useLabelState();
   const dark = useDarkMode();
   const row = rows.get(threadId) ?? null;
@@ -331,6 +333,102 @@ function GoalHeaderPicker({ threadId }: { threadId: string }) {
     setWriteError(null);
     setLabels({ threadId, ...input }).catch((cause: unknown) => setWriteError(cause instanceof Error ? cause.message : String(cause)));
   };
+  const inherited = effective?.source.kind === "inherited";
+  return (
+    <div className="space-y-3">
+      <div>
+        <div className="mb-1 text-xs text-muted-foreground">Goal</div>
+        <div className="flex flex-wrap gap-1">
+          {GOALS.map((g) => (
+            <ChoiceButton key={g.letter} title={g.title} selected={own.goal === g.letter} onClick={() => write({ goal: g.letter })}>
+              <span className="mr-1 inline-block h-2 w-2 rounded-sm" style={{ background: dark ? g.dark : g.light }} />
+              {g.letter}
+            </ChoiceButton>
+          ))}
+          <ChoiceButton selected={own.goal === null} onClick={() => write({ goal: "none" })}>
+            None
+          </ChoiceButton>
+        </div>
+        {own.goal ? (
+          <div className="mt-1 text-xs text-muted-foreground">{goalInfo(own.goal)?.title}</div>
+        ) : inherited && effective ? (
+          <div className="mt-1 text-xs text-muted-foreground">
+            Inherited {shortLabel(effective).replace("*", "")} from <ThreadName threadId={effective.source.kind === "inherited" ? effective.source.fromThreadId : ""} />
+          </div>
+        ) : null}
+      </div>
+      <div>
+        <div className="mb-1 text-xs text-muted-foreground">Value within the goal (1 is the biggest lever)</div>
+        <div className="flex gap-1">
+          {[1, 2, 3].map((v) => (
+            <ChoiceButton key={v} selected={own.value === v} onClick={() => write({ value: String(v) })}>
+              {v}
+            </ChoiceButton>
+          ))}
+          <ChoiceButton selected={own.value === null} onClick={() => write({ value: "none" })}>
+            Unvalued
+          </ChoiceButton>
+        </div>
+      </div>
+      <MyMoveControl threadId={threadId} own={own} onError={setWriteError} />
+      <div>
+        <div className="mb-1 text-xs text-muted-foreground">Waiting on</div>
+        <ul className="space-y-1">
+          {own.blockedBy.map((id) => (
+            <li key={id} className="flex items-center justify-between gap-2 text-xs">
+              <span>
+                <ThreadName threadId={id} />
+                {row?.closedBlockers.includes(id) && <span className="ml-1 text-muted-foreground">(closed)</span>}
+              </span>
+              <button type="button" className={buttonClass} aria-label={`Stop waiting on ${id}`} onClick={() => write({ blockedBy: own.blockedBy.filter((b) => b !== id) })}>
+                ×
+              </button>
+            </li>
+          ))}
+        </ul>
+        <form
+          className="mt-1 flex gap-1"
+          onSubmit={(event) => {
+            event.preventDefault();
+            const id = blockerInput.trim();
+            if (!id) return;
+            write({ blockedBy: [...own.blockedBy, id] });
+            setBlockerInput("");
+          }}
+        >
+          <input
+            className="w-full rounded border bg-background px-2 py-0.5 text-xs"
+            placeholder="thr_… this thread waits on"
+            value={blockerInput}
+            onChange={(event) => setBlockerInput(event.target.value)}
+          />
+          <button type="submit" className={buttonClass}>
+            Add
+          </button>
+        </form>
+      </div>
+      {row && row.lent.length > 0 && (
+        <div className="text-xs text-muted-foreground">
+          Lent by blocked threads:{" "}
+          {row.lent.map((l, i) => (
+            <span key={l.fromThreadId}>
+              {i > 0 && ", "}
+              {l.goal}
+              {l.value ?? ""} from <ThreadName threadId={l.fromThreadId} />
+            </span>
+          ))}
+        </div>
+      )}
+      {(writeError ?? error) && <div className="text-xs text-destructive">{writeError ?? error}</div>}
+    </div>
+  );
+}
+
+/** The thread header's control: the current label as a pill, the editor in a popover. */
+function GoalHeaderPicker({ threadId }: { threadId: string }) {
+  const { rows } = useLabelState();
+  const dark = useDarkMode();
+  const effective = rows.get(threadId)?.effective ?? null;
   const color = goalColor(effective?.goal, dark);
   const text = effective ? shortLabel(effective) : "Goal";
   const inherited = effective?.source.kind === "inherited";
@@ -349,92 +447,7 @@ function GoalHeaderPicker({ threadId }: { threadId: string }) {
       </Popover.Trigger>
       <Popover.Portal>
         <Popover.Content align="end" sideOffset={6} className="z-50 w-80 rounded-md border bg-popover p-3 text-sm text-popover-foreground shadow-md">
-          <div className="space-y-3">
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">Goal</div>
-              <div className="flex flex-wrap gap-1">
-                {GOALS.map((g) => (
-                  <ChoiceButton key={g.letter} title={g.title} selected={own.goal === g.letter} onClick={() => write({ goal: g.letter })}>
-                    <span className="mr-1 inline-block h-2 w-2 rounded-sm" style={{ background: dark ? g.dark : g.light }} />
-                    {g.letter}
-                  </ChoiceButton>
-                ))}
-                <ChoiceButton selected={own.goal === null} onClick={() => write({ goal: "none" })}>
-                  None
-                </ChoiceButton>
-              </div>
-              {own.goal ? (
-                <div className="mt-1 text-xs text-muted-foreground">{goalInfo(own.goal)?.title}</div>
-              ) : inherited && effective ? (
-                <div className="mt-1 text-xs text-muted-foreground">
-                  Inherited {shortLabel(effective).replace("*", "")} from <ThreadName threadId={effective.source.kind === "inherited" ? effective.source.fromThreadId : ""} />
-                </div>
-              ) : null}
-            </div>
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">Value within the goal (1 is the biggest lever)</div>
-              <div className="flex gap-1">
-                {[1, 2, 3].map((v) => (
-                  <ChoiceButton key={v} selected={own.value === v} onClick={() => write({ value: String(v) })}>
-                    {v}
-                  </ChoiceButton>
-                ))}
-                <ChoiceButton selected={own.value === null} onClick={() => write({ value: "none" })}>
-                  Unvalued
-                </ChoiceButton>
-              </div>
-            </div>
-            <MyMoveControl threadId={threadId} own={own} onError={setWriteError} />
-            <div>
-              <div className="mb-1 text-xs text-muted-foreground">Waiting on</div>
-              <ul className="space-y-1">
-                {own.blockedBy.map((id) => (
-                  <li key={id} className="flex items-center justify-between gap-2 text-xs">
-                    <span>
-                      <ThreadName threadId={id} />
-                      {row?.closedBlockers.includes(id) && <span className="ml-1 text-muted-foreground">(closed)</span>}
-                    </span>
-                    <button type="button" className={buttonClass} aria-label={`Stop waiting on ${id}`} onClick={() => write({ blockedBy: own.blockedBy.filter((b) => b !== id) })}>
-                      ×
-                    </button>
-                  </li>
-                ))}
-              </ul>
-              <form
-                className="mt-1 flex gap-1"
-                onSubmit={(event) => {
-                  event.preventDefault();
-                  const id = blockerInput.trim();
-                  if (!id) return;
-                  write({ blockedBy: [...own.blockedBy, id] });
-                  setBlockerInput("");
-                }}
-              >
-                <input
-                  className="w-full rounded border bg-background px-2 py-0.5 text-xs"
-                  placeholder="thr_… this thread waits on"
-                  value={blockerInput}
-                  onChange={(event) => setBlockerInput(event.target.value)}
-                />
-                <button type="submit" className={buttonClass}>
-                  Add
-                </button>
-              </form>
-            </div>
-            {row && row.lent.length > 0 && (
-              <div className="text-xs text-muted-foreground">
-                Lent by blocked threads:{" "}
-                {row.lent.map((l, i) => (
-                  <span key={l.fromThreadId}>
-                    {i > 0 && ", "}
-                    {l.goal}
-                    {l.value ?? ""} from <ThreadName threadId={l.fromThreadId} />
-                  </span>
-                ))}
-              </div>
-            )}
-            {(writeError ?? error) && <div className="text-xs text-destructive">{writeError ?? error}</div>}
-          </div>
+          <LabelEditor threadId={threadId} />
         </Popover.Content>
       </Popover.Portal>
     </Popover.Root>
@@ -979,6 +992,9 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
           <button type="button" className={buttonClass} aria-label="Close thread pane" onClick={() => select(null)}>
             ×
           </button>
+        </div>
+        <div className="border-b px-3 py-2 text-sm">
+          <LabelEditor threadId={selectedId} />
         </div>
         <ThreadChat key={selectedId} threadId={selectedId} variant="full" layout="contained" className="min-h-0 flex-1" />
       </aside>
