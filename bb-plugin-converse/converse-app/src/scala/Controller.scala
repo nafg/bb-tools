@@ -220,6 +220,36 @@ final class Controller(
       "speechProbabilityThreshold" -> speechProbabilityThreshold
     )
     listeners.foreach(_())
+    reportBrowserState()
+
+  private var lastReportedState: String = null
+
+  /** Tells the backend what this page's session is doing whenever that
+    * changes, so `bb converse status` can show it: the page's own state
+    * cannot otherwise be seen from outside it.
+    */
+  private def reportBrowserState(): Unit =
+    if sessionId != null then
+      val report = js.Dynamic.literal(
+        "phase"               -> state.runningPhase.map(_.name).orNull,
+        "activity"            -> activity.map(_.signalName).orNull,
+        "threadId"            -> threadId,
+        "capturing"           -> captureActive,
+        "uploading"           -> outbox.uploading.map(_.id).orNull,
+        "waitingUploads"      -> outbox.waiting.map(_.id).toJSArray,
+        "unsettled"           -> outbox.unsettled.toJSArray,
+        "replyHeld"           -> replyHeld,
+        "playerSpeaking"      -> player.isSpeaking,
+        "playerQueued"        -> player.queuedThreads.toJSArray,
+        "notice"              -> notice
+      )
+      val json = js.JSON.stringify(report)
+      if json != lastReportedState then
+        lastReportedState = json
+        rpcCall("reportBrowserState", js.Dynamic.literal("sessionId" -> sessionId, "state" -> report))
+          .toFuture
+          .failed
+          .foreach(e => warn(s"reportBrowserState failed: ${e.getMessage}"))
 
   def voiceState: VoiceState                     = state
   def currentNotice: Option[String]              = Option(notice)

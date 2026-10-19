@@ -227,6 +227,8 @@ private final class State:
   // Managed-service checks in progress, by key, so concurrent callers share
   // one check and a replacement starts once.
   val servicesStarting: mutable.Map[String, Future[Either[String, String]]] = mutable.Map.empty
+  // What each browser session last reported about itself, and when.
+  val browserStates: mutable.Map[String, (js.Dynamic, Double)] = mutable.Map.empty
   // When each managed service's version checks began timing out, if they are.
   val serviceBusySince: mutable.Map[String, Double] = mutable.Map.empty
   private var eventCounter              = 0
@@ -912,7 +914,13 @@ def plugin(bb: BbApi): Unit =
               "active"    -> state.active.isDefined,
               "threadId"  -> state.active.map(_.threadId).orNull,
               "capturing" -> state.capturingFor.isDefined,
-              "awaiting"  -> awaitingReplies.threads.toJSArray
+              "awaiting"  -> awaitingReplies.threads.toJSArray,
+              "browser" -> state.active.flatMap(a => state.browserStates.get(a.sessionId)).fold(null: js.Any) {
+                (reported, at) =>
+                  val copy = js.Object.assign(js.Dynamic.literal(), reported.asInstanceOf[js.Object])
+                  copy.asInstanceOf[js.Dynamic].updateDynamic("reportedAt")(new js.Date(at).toISOString())
+                  copy
+              }
             )
             Future.successful(js.Dynamic.literal("exitCode" -> 0, "stdout" -> js.JSON.stringify(status)))
           case _ =>
@@ -1647,6 +1655,10 @@ def plugin(bb: BbApi): Unit =
         "output" -> Schema.passthrough
       ),
       "reportUiStall" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "reportBrowserState" -> js.Dynamic.literal(
+        "input"  -> Schema.strings("sessionId" -> 100),
+        "output" -> Schema.passthrough
+      ),
       "reportSessionEnd" -> js.Dynamic.literal(
         "input"  -> Schema.strings("sessionId" -> 100),
         "output" -> Schema.passthrough
@@ -1757,6 +1769,11 @@ def plugin(bb: BbApi): Unit =
             s"(voice ${if input.voice.asInstanceOf[js.UndefOr[Boolean]].getOrElse(false) then "on" else "off"}, " +
             s"phase ${str(input.phase)}, capturing ${str(input.capturing)})"
         )
+        js.Dynamic.literal("ok" -> true)
+      },
+      "reportBrowserState" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val sessionId = str(input.sessionId)
+        if sessionId.nonEmpty then state.browserStates.update(sessionId, (input.state, js.Date.now()))
         js.Dynamic.literal("ok" -> true)
       },
       "reportSessionEnd" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
