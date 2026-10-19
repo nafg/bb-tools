@@ -343,6 +343,83 @@ private def untilAborted(signal: js.Dynamic): Future[Unit] =
     val _ = signal.addEventListener("abort", js.Any.fromFunction0(() => done.trySuccess(()): Unit))
   done.future
 
+/** `bb activity-recorder summary` arguments. Dates are `YYYY-MM-DD` in the
+  * bb server's local time; a range runs from the first day's start to the
+  * day after the last.
+  */
+private final case class CliOptions(range: (Long, Long), json: Boolean, touched: Boolean)
+
+private enum WeekStart(val name: String, val dayOfWeek: Int):
+  case Monday extends WeekStart("monday", 1)
+  case Sunday extends WeekStart("sunday", 0)
+
+private object CliArgs:
+  val Usage =
+    "bb activity-recorder summary [--date YYYY-MM-DD | --week [YYYY-MM-DD] [--week-start monday|sunday] | " +
+      "--from YYYY-MM-DD [--to YYYY-MM-DD]] [--touched] [--json]"
+
+  def failure(message: String): js.Dynamic = js.Dynamic.literal("exitCode" -> 1, "stderr" -> message)
+
+  def parse(args: List[String]): Either[String, CliOptions] =
+    def loop(rest: List[String], date: Option[String], week: Option[Option[String]], weekStart: Option[WeekStart], from: Option[String], to: Option[String], json: Boolean, touched: Boolean): Either[String, CliOptions] =
+      rest match
+        case Nil =>
+          val today = startOfDay(new js.Date())
+          val range = (date, week, from, to) match
+            case (Some(d), None, None, None) => parseDay(d).map(day => (day, addDays(day, 1)))
+            case (None, Some(d), None, None) =>
+              d.fold[Either[String, Long]](Right(today))(parseDay).map { day =>
+                val first = addDays(day, -((dayOfWeek(day) - weekStart.getOrElse(WeekStart.Monday).dayOfWeek + 7) % 7))
+                (first, addDays(first, 7))
+              }
+            case _ if weekStart.isDefined => Left("--week-start only applies with --week")
+            case (None, None, Some(f), t) =>
+              for
+                start <- parseDay(f)
+                last  <- t.fold[Either[String, Long]](Right(today))(parseDay)
+                _     <- Either.cond(last >= start, (), "--to must not be before --from")
+              yield (start, addDays(last, 1))
+            case (None, None, None, Some(_)) => Left("--to needs --from")
+            case (None, None, None, None)    => Right((today, addDays(today, 1)))
+            case _                           => Left("use only one of --date, --week, and --from/--to")
+          range.map(CliOptions(_, json, touched))
+        case "--date" :: value :: tail => loop(tail, Some(value), week, weekStart, from, to, json, touched)
+        case "--week" :: value :: tail if !value.startsWith("--") => loop(tail, date, Some(Some(value)), weekStart, from, to, json, touched)
+        case "--week" :: tail          => loop(tail, date, Some(None), weekStart, from, to, json, touched)
+        case "--week-start" :: value :: tail =>
+          WeekStart.values.find(_.name == value) match
+            case Some(start) => loop(tail, date, week, Some(start), from, to, json, touched)
+            case None        => Left(s"--week-start must be monday or sunday, got '$value'")
+        case "--from" :: value :: tail => loop(tail, date, week, weekStart, Some(value), to, json, touched)
+        case "--to" :: value :: tail   => loop(tail, date, week, weekStart, from, Some(value), json, touched)
+        case "--json" :: tail          => loop(tail, date, week, weekStart, from, to, true, touched)
+        case "--touched" :: tail       => loop(tail, date, week, weekStart, from, to, json, true)
+        case other :: _                => Left(s"unknown argument '$other'\nusage: $Usage")
+    loop(args, None, None, None, None, None, false, false)
+
+  private val DayPattern = """(\d{4})-(\d{2})-(\d{2})""".r
+
+  private def parseDay(text: String): Either[String, Long] = text match
+    case DayPattern(y, m, d) =>
+      val date = new js.Date(y.toInt, m.toInt - 1, d.toInt)
+      if date.getFullYear() == y.toInt && date.getMonth() == m.toInt - 1 && date.getDate() == d.toInt then Right(date.getTime().toLong)
+      else Left(s"not a calendar date: $text")
+    case _ => Left(s"expected YYYY-MM-DD, got '$text'")
+
+  private def startOfDay(date: js.Date): Long =
+    new js.Date(date.getFullYear().toInt, date.getMonth().toInt, date.getDate().toInt).getTime().toLong
+
+  private def addDays(dayStart: Long, days: Int): Long =
+    val date = new js.Date(dayStart.toDouble)
+    new js.Date(date.getFullYear().toInt, date.getMonth().toInt, date.getDate().toInt + days).getTime().toLong
+
+  /** 0 for Sunday through 6 for Saturday. */
+  private def dayOfWeek(dayStart: Long): Int = new js.Date(dayStart.toDouble).getDay().toInt
+
+  def formatInstant(ms: Long): String =
+    val date = new js.Date(ms.toDouble)
+    f"${date.getFullYear().toInt}%04d-${date.getMonth().toInt + 1}%02d-${date.getDate().toInt}%02d ${date.getHours().toInt}%02d:${date.getMinutes().toInt}%02d"
+
 @JSExportTopLevel("default")
 def plugin(bb: BbApi): Unit =
   val store    = Store(bb.storage)
@@ -610,5 +687,89 @@ def plugin(bb: BbApi): Unit =
     js.Dynamic.literal(
       "experimental_discoverable" -> true,
       "experimental_description"  -> "Per-thread activity intervals and the raw signals behind them; see ActivityRecorderRpc."
+    )
+  )
+
+  // ------------------------------------------------------------------ CLI
+
+  /** The thread's title for a listing, or its id when it cannot be read. */
+  def threadTitle(threadId: String): Future[String] =
+    bb.sdk.threads
+      .get(js.Dynamic.literal("threadId" -> threadId))
+      .toFuture
+      .map { thread =>
+        val row = if isDefined(thread.thread) then thread.thread else thread
+        Seq(str(row.title), str(row.titleFallback)).find(_.nonEmpty).getOrElse(threadId)
+      }
+      .recover { case _ => threadId }
+
+  def summary(args: List[String]): Future[js.Dynamic] =
+    val options = CliArgs.parse(args) match
+      case Right(options) => options
+      case Left(message)  => return Future.successful(CliArgs.failure(message))
+    val (from, to) = options.range
+    currentSettings.flatMap { s =>
+      val totals = Summary.totals(intervalsWithin(from, to, None, SignalKind.Attention, s.gapMs))
+      totals
+        .foldLeft(Future.successful(Vector.empty[(ThreadTotal, String)])) { (prior, total) =>
+          prior.flatMap(titled => threadTitle(total.threadId).map(title => titled :+ (total, title)))
+        }
+        .map { titled =>
+          val (timed, touched) = titled.partition((total, _) => !total.touchedOnly)
+          val totalMs          = timed.map((total, _) => total.ms).sum
+          val stdout =
+            if options.json then
+              def entry(total: ThreadTotal, title: String) = js.Dynamic.literal(
+                "threadId"  -> total.threadId,
+                "title"     -> title,
+                "ms"        -> total.ms.toDouble,
+                "intervals" -> total.intervals
+              )
+              js.JSON.stringify(
+                js.Dynamic.literal(
+                  "from"    -> from.toDouble,
+                  "to"      -> to.toDouble,
+                  "gapMs"   -> s.gapMs.toDouble,
+                  "threads" -> timed.map(entry).toJSArray,
+                  "touched" -> touched.map(entry).toJSArray,
+                  "totalMs" -> totalMs.toDouble
+                ),
+                null,
+                2
+              )
+            else
+              val lines = Vector.newBuilder[String]
+              lines += s"Attention from ${CliArgs.formatInstant(from)} to ${CliArgs.formatInstant(to)} (gap ${Summary.formatDuration(s.gapMs)})"
+              if timed.isEmpty then lines += "  (no measured time)"
+              timed.foreach((total, title) => lines += f"  ${Summary.formatDuration(total.ms)}%8s  ${total.threadId}  $title")
+              lines += f"  ${Summary.formatDuration(totalMs)}%8s  total, with parallel threads counted in full"
+              if options.touched && touched.nonEmpty then
+                lines += ""
+                lines += "Touched only (a message, but no measured time):"
+                touched.foreach((total, title) => lines += s"            ${total.threadId}  $title")
+              else if touched.nonEmpty then
+                lines += s"  (${touched.size} more thread(s) touched without measured time; --touched lists them)"
+              lines.result().mkString("\n")
+          js.Dynamic.literal("exitCode" -> 0, "stdout" -> stdout)
+        }
+    }
+
+  bb.cli.register(
+    js.Dynamic.literal(
+      "name"    -> "activity-recorder",
+      "summary" -> "Per-thread attention totals from the activity recorder",
+      "commands" -> js.Array(
+        js.Dynamic.literal(
+          "name"    -> "summary",
+          "summary" -> "Attention per thread for today, a date, a week, or a range, most time first; parallel threads count in full",
+          "usage"   -> CliArgs.Usage
+        )
+      ),
+      "run" -> js.Any.fromFunction2 { (argv: js.Array[String], _: js.Dynamic) =>
+        val result = argv.toList match
+          case "summary" :: rest => summary(rest)
+          case _                 => Future.successful(CliArgs.failure(s"usage: ${CliArgs.Usage}"))
+        result.toJSPromise
+      }
     )
   )

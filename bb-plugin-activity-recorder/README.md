@@ -36,6 +36,22 @@ different threads overlap freely. A lone typed message is a zero-length
 interval. The derivation happens at read time, so changing the gap changes
 history.
 
+## Reading hours off
+
+```sh
+bb activity-recorder summary                      # today
+bb activity-recorder summary --date 2026-10-17
+bb activity-recorder summary --week               # Monday to Sunday of this week
+bb activity-recorder summary --week --week-start sunday   # Sunday to Saturday, as billing counts it
+bb activity-recorder summary --from 2026-10-13 --to 2026-10-17
+```
+
+Each thread's attention, most time first, with its title, and a total that
+counts parallel threads in full. Dates are the bb server's local days, and
+a week runs Monday to Sunday unless `--week-start sunday` says otherwise.
+Threads touched by a message but with no measured time are counted
+separately; `--touched` lists them, `--json` gives the same as data.
+
 ## RPC
 
 See `ActivityRecorderRpc` in `activity-core` for the contract: `intervals`,
