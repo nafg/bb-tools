@@ -20,7 +20,6 @@ given ExecutionContext = ExecutionContext.parasitic
   * singleton, which filters by session id.
   */
 private final case class PendingUpload(
-    recordingId: String,
     sessionId: String,
     route: UtteranceRoute,
     blob: js.Dynamic,
@@ -79,12 +78,9 @@ final class Controller(
   // it as samples; the compressed file is what gets uploaded when it exists.
   private var utteranceRecorder: MediaRecorder    = null
   private var utteranceRecording: Promise[Option[js.Dynamic]] = null
-  // Uploads go up one at a time in capture order; a failed upload is retried
-  // before the recording is given up on.
-  private val pendingUploads = scala.collection.mutable.Queue.empty[PendingUpload]
-  private var uploading: Boolean = false
-  // Recordings the backend has stored and is still transcribing or delivering.
-  private val recordingsInProcess = scala.collection.mutable.Set.empty[String]
+  // The session's recordings from capture until their outcome; uploads go up
+  // one at a time in capture order, each retried until stored.
+  private var outbox: Outbox[PendingUpload] = Outbox.empty
   private var previewDiscard: Boolean             = false
   private var previewSegmentStart: Double         = 0
   private var previewInFlight: Boolean            = false
@@ -254,7 +250,7 @@ final class Controller(
     * its repeating tap keeps saying so; otherwise listening.
     */
   private def idlePhase: SessionPhase =
-    if uploading || pendingUploads.nonEmpty || recordingsInProcess.nonEmpty then SessionPhase.Transcribing
+    if outbox.busy then SessionPhase.Transcribing
     else SessionPhase.Listening
 
   private def backToListening(from: SessionPhase): Unit =
@@ -269,7 +265,7 @@ final class Controller(
     refreshSnapshot()
 
   private def syncReplyHold(): Unit =
-    val hold = ReplySpeechHold.holds(captureActive, recordingUnstored = uploading || pendingUploads.nonEmpty)
+    val hold = ReplySpeechHold.holds(captureActive, recordingUnstored = outbox.holdsUnstored)
     if hold != player.isHeld then
       player.setHeld(hold)
       if !hold && replyHeld then
@@ -561,9 +557,7 @@ final class Controller(
     player.stop()
     replyHeld = false
     abandonCapture()
-    pendingUploads.clear()
-    uploading = false
-    recordingsInProcess.clear()
+    outbox = Outbox.empty
     if speechDetector != null then
       val detector = speechDetector
       speechDetector = null
@@ -900,20 +894,22 @@ final class Controller(
     else if sessionId != null then
       val route = if utteranceRoute != null then utteranceRoute else UtteranceRoute.ToThread(threadId)
       val recordingId = js.Dynamic.global.crypto.randomUUID().asInstanceOf[String]
-      pendingUploads.enqueue(
-        PendingUpload(recordingId, sessionId, route, blob, evidence, captureInterrupted, speechStartAt, speechEndAt)
+      outbox = outbox.enqueue(
+        recordingId,
+        PendingUpload(sessionId, route, blob, evidence, captureInterrupted, speechStartAt, speechEndAt)
       )
       uploadNext()
 
   private def uploadNext(): Unit =
-    if !uploading && pendingUploads.nonEmpty then
-      uploading = true
-      val upload = pendingUploads.dequeue()
+    outbox.startNext.foreach { (next, withNextUploading) =>
+      outbox = withNextUploading
       enter(SessionPhase.Transcribing)
-      attemptUpload(upload, attempt = 1)
+      attemptUpload(next, attempt = 1)
+    }
 
-  private def attemptUpload(upload: PendingUpload, attempt: Int): Unit =
-    val sess = upload.sessionId
+  private def attemptUpload(entry: Outbox.Entry[PendingUpload], attempt: Int): Unit =
+    val upload = entry.payload
+    val sess   = upload.sessionId
     val tid  = upload.route.existingThreadId.orNull
     val submitted =
       for
@@ -921,7 +917,7 @@ final class Controller(
         result <- withSessionReregistered(sess, tid) { () =>
                     val request = js.Dynamic.literal(
                       "sessionId"   -> sess,
-                      "recordingId" -> upload.recordingId,
+                      "recordingId" -> entry.id,
                       "speechStartAt" -> upload.speechStartAt,
                       "speechEndAt"   -> upload.speechEndAt,
                       "mimeType"    -> upload.blob.`type`.asInstanceOf[String],
@@ -946,16 +942,16 @@ final class Controller(
         // Stored: the backend transcribes and delivers it from here, and
         // announces the outcome with an utterance-processed signal.
         if attempt > 1 then notice = null
-        uploading = false
-        recordingsInProcess += upload.recordingId
+        outbox = outbox.stored(entry.id)
         syncReplyHold()
-        if pendingUploads.nonEmpty then uploadNext() else refreshSnapshot()
+        uploadNext()
+        refreshSnapshot()
       case Failure(e) =>
         val delayMs = RetryBackoff.delayBeforeRetry(attempt)
         debug(s"upload failed (attempt $attempt, retrying in ${delayMs}ms): ${e.getMessage}")
         notice = s"voice message not sent yet, retrying: ${e.getMessage}"
         refreshSnapshot()
-        val _ = setTimeout(delayMs.toDouble) { if sessionId == sess then attemptUpload(upload, attempt + 1) }
+        val _ = setTimeout(delayMs.toDouble) { if sessionId == sess then attemptUpload(entry, attempt + 1) }
     }
 
   /** The backend finished with a stored recording, possibly one this tab did
@@ -963,8 +959,8 @@ final class Controller(
     * recordings list).
     */
   private def recordingProcessed(p: js.Dynamic): Unit =
-    p.recordingId.asInstanceOf[js.UndefOr[String]].foreach(recordingsInProcess -= _)
-    val moreComing = uploading || pendingUploads.nonEmpty || recordingsInProcess.nonEmpty
+    p.recordingId.asInstanceOf[js.UndefOr[String]].foreach(id => outbox = outbox.settled(id))
+    val moreComing = outbox.busy
     p.outcome.asInstanceOf[js.UndefOr[String]].getOrElse("") match
       case "sent" =>
         heardText = p.text.asInstanceOf[js.UndefOr[String]].getOrElse("")
