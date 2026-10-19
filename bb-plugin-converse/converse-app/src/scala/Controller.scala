@@ -117,7 +117,24 @@ final class Controller(
   private var startOptions: js.Dynamic = js.Dynamic.literal()
 
   // Playback is tab-wide rather than part of the voice-session state machine.
-  private val player = new Player(rpcCall, () => refreshSnapshot())
+  private val player = new Player(rpcCall, () => refreshSnapshot(), reportPlayback)
+
+  /** Records a heard reply as an activity span; sent so it still lands if the
+    * page is closing.
+    */
+  private def reportPlayback(threadId: String, source: ActivitySource, startAt: Double, endAt: Double): Unit =
+    if threadId != null then
+      rpcCallOutlivingPage(
+        "reportPlayback",
+        js.Dynamic.literal(
+          "id"        -> js.Dynamic.global.crypto.randomUUID().asInstanceOf[String],
+          "sessionId" -> sessionId,
+          "threadId"  -> threadId,
+          "source"    -> source.code,
+          "startAt"   -> startAt,
+          "endAt"     -> endAt
+        )
+      ).toFuture.failed.foreach(e => warn(s"reportPlayback failed: ${e.getMessage}"))
   private val cues   = new SoundCuePlayer
 
   // Watches bb's UI thread, which this plugin's speech detector shares: a

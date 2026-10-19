@@ -17,9 +17,18 @@ import scala.util.{Failure, Success}
   */
 final class Player(
     rpcCall: js.Function2[String, js.Any, js.Promise[js.Dynamic]],
-    onChange: () => Unit
+    onChange: () => Unit,
+    // Each reply that was heard, once it ends or is cut off: its thread,
+    // whether it was session speech or a replay, and when its audio first
+    // played and stopped.
+    onPlayback: (String, ActivitySource, Double, Double) => Unit
 ):
-  private final case class QueuedSpeech(text: String, sourceThread: String, settled: Promise[Boolean])
+  private final case class QueuedSpeech(
+      text: String,
+      sourceThread: String,
+      source: ActivitySource,
+      settled: Promise[Boolean]
+  )
 
   private val TtsPath = "/api/v1/plugins/converse/http/tts"
 
@@ -38,6 +47,10 @@ final class Player(
   private var abortCtl: js.Dynamic       = null
   private var currentSettled: Promise[Boolean] = null
   private val queuedSpeech = mutable.Queue.empty[QueuedSpeech]
+  // When the current reply's audio first played; NaN until it does.
+  private var playbackStartedAt: Double = Double.NaN
+  // Reports the current reply's playback span, at most once.
+  private var finishPlayback: () => Unit = null
 
   private def debug(message: String): Unit =
     val _ = js.Dynamic.global.console.debug(s"[converse] $message")
@@ -78,17 +91,24 @@ final class Player(
     * particular response finishes, or false if stop()/play() clears it.
     */
   def enqueue(text: String, sourceThread: String): Future[Boolean] =
-    if Speech.splitSpeechChunks(text).isEmpty then Future.successful(true)
-    else
-      val settled = Promise[Boolean]()
-      queuedSpeech.enqueue(QueuedSpeech(text, sourceThread, settled))
-      startNextQueuedSpeech()
-      settled.future
+    enqueueAs(text, sourceThread, ActivitySource.Session)
 
   /** Explicit replay is immediate: it clears queued agent speech first. */
   def play(text: String, sourceThread: String): Future[Boolean] =
     stop()
-    enqueue(text, sourceThread)
+    enqueueAs(text, sourceThread, ActivitySource.Replay)
+
+  private def enqueueAs(text: String, sourceThread: String, source: ActivitySource): Future[Boolean] =
+    if Speech.splitSpeechChunks(text).isEmpty then Future.successful(true)
+    else
+      val settled = Promise[Boolean]()
+      queuedSpeech.enqueue(QueuedSpeech(text, sourceThread, source, settled))
+      startNextQueuedSpeech()
+      settled.future
+
+  /** Marks the current reply's audio as playing, the first time. */
+  private def markPlaying(gen: Int): Unit =
+    if generation == gen && playbackStartedAt.isNaN then playbackStartedAt = js.Date.now()
 
   private def startNextQueuedSpeech(): Unit =
     if !speakingActive && !held && queuedSpeech.nonEmpty then
@@ -100,6 +120,14 @@ final class Player(
       currentThread = item.sourceThread
       currentVoice = null
       currentSettled = item.settled
+      playbackStartedAt = Double.NaN
+      var reported = false
+      finishPlayback = () =>
+        if !reported then
+          reported = true
+          // A reply that never started playing (stopped while still fetching)
+          // was not heard, so it has no span.
+          if !playbackStartedAt.isNaN then onPlayback(item.sourceThread, item.source, playbackStartedAt, js.Date.now())
       onChange()
       val done = resolveThreadVoice(item.sourceThread).flatMap { voice =>
         if generation != gen then Future.unit
@@ -110,6 +138,7 @@ final class Player(
       }
       done.onComplete {
         case Success(_) if generation == gen =>
+          finishPlayback()
           speakingActive = false
           currentThread = null
           currentVoice = null
@@ -119,6 +148,7 @@ final class Player(
           val _ = item.settled.trySuccess(true)
         case Failure(e) if generation == gen =>
           debug(s"speech failed: ${e.getMessage}")
+          finishPlayback()
           speakingActive = false
           currentThread = null
           currentVoice = null
@@ -131,6 +161,7 @@ final class Player(
       }
 
   def stop(): Unit =
+    if finishPlayback != null then finishPlayback()
     generation += 1
     queuedSpeech.dequeueAll(_ => true).foreach(_.settled.success(false))
     if currentSettled != null then
@@ -170,6 +201,7 @@ final class Player(
             voices.find(v => v.voiceURI.asInstanceOf[String] == voice || v.name.asInstanceOf[String] == voice)
               .foreach(v => utterance.voice = v)
           currentSentence = chunk.text
+          utterance.onstart = js.Any.fromFunction1((_: js.Any) => markPlaying(gen))
           utterance.onend = js.Any.fromFunction1((_: js.Any) => { val _ = p.success(()) })
           utterance.onerror = js.Any.fromFunction1((_: js.Any) => { val _ = p.success(()) })
           val _ = js.Dynamic.global.speechSynthesis.speak(utterance)
@@ -231,6 +263,7 @@ final class Player(
             source.buffer = decoded
             val _ = source.connect(output.input)
             currentAudio = source
+            markPlaying(gen)
             source.onended = js.Any.fromFunction1 { (_: js.Any) =>
               if currentAudio eq source then currentAudio = null
               if !p.isCompleted then { val _ = p.success(()) }

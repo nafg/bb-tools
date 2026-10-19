@@ -6,6 +6,7 @@ import conversecore.{
   RecordingStatus,
   ActivityKind,
   ActivitySource,
+  PlaybackReport,
   RetryBackoff,
   TranscriptSegment,
   TranscriptSegments,
@@ -1680,6 +1681,10 @@ def plugin(bb: BbApi): Unit =
       "recentUtterances" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "retryRecording" -> js.Dynamic.literal("input" -> Schema.strings("id" -> 100), "output" -> Schema.passthrough),
       "activitySpans" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "reportPlayback" -> js.Dynamic.literal(
+        "input"  -> Schema.stringsWithOptional(Seq("id" -> 100, "threadId" -> 100, "source" -> 20), Seq("sessionId" -> 100)),
+        "output" -> Schema.passthrough
+      ),
       "utterance" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "utteranceForMessage" -> js.Dynamic.literal("input" -> Schema.strings("threadId" -> 100, "text" -> 100_000), "output" -> Schema.passthrough),
       "updateSoundCueSettings" -> js.Dynamic.literal(
@@ -1834,6 +1839,25 @@ def plugin(bb: BbApi): Unit =
             bb.realtime.publish("converse-utterances", js.Dynamic.literal())
             enqueueRecording(recordingId)
           Future.successful(js.Dynamic.literal("stored" -> true)).toJSPromise
+      },
+      "reportPlayback" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val threadId = str(input.threadId)
+        val startAt  = input.startAt.asInstanceOf[js.UndefOr[Double]].getOrElse(Double.NaN)
+        val endAt    = input.endAt.asInstanceOf[js.UndefOr[Double]].getOrElse(Double.NaN)
+        (ActivitySource.fromCode(str(input.source)), PlaybackReport.validate(threadId, startAt, endAt)) match
+          case (None, _)            => rejected(s"unknown source ${str(input.source)}")
+          case (_, Left(message))   => rejected(message)
+          case (Some(source), Right(_)) =>
+            recordActivitySpan(
+              str(input.id),
+              ActivityKind.Playback,
+              source,
+              threadId,
+              startAt,
+              endAt,
+              Option(str(input.sessionId)).filter(_.nonEmpty)
+            )
+            Future.successful(js.Dynamic.literal("ok" -> true)).toJSPromise
       },
       "activitySpans" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         // Spans recorded after `afterSeq`, oldest first; a reader keeps the
