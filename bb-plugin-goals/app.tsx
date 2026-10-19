@@ -543,6 +543,10 @@ function useElementSize<T extends HTMLElement>(): [React.RefObject<T | null>, { 
 
 const flatten = (threads: OverviewThread[]): OverviewThread[] => threads.flatMap((t) => [t, ...flatten(t.children)]);
 
+/** The label as a map box shows it: the enclosing goal box already names the goal, so only the value and the inherited marker remain. */
+const boxLabel = (label: EffectiveLabel | null): string =>
+  label ? `${label.value ?? ""}${label.source.kind === "inherited" ? "*" : ""}` : "–";
+
 /** What to work on next: the most important first (1 before 3, lent labels counted, unranked last), then the most attended, then by title. */
 const byImportance = (a: OverviewThread, b: OverviewThread): number =>
   (a.importance ?? Number.POSITIVE_INFINITY) - (b.importance ?? Number.POSITIVE_INFINITY) ||
@@ -845,6 +849,7 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
                     {row && <ThreadStatusGlyph indicator={row.indicator} size="compact" />}
                     <span className="w-8 tabular-nums text-muted-foreground">{w.thread.label ? shortLabel(w.thread.label) : "–"}</span>
                     <span className="min-w-0 flex-1 truncate">{w.thread.title}</span>
+                    <span className="w-32 truncate text-muted-foreground">{overview?.projects[w.thread.projectId] ?? w.thread.projectId}</span>
                     <span className="text-muted-foreground">{w.reason}</span>
                     <span className="w-14 text-right tabular-nums text-muted-foreground">{w.since ? formatDuration((now - w.since) / 1000) : ""}</span>
                   </div>
@@ -887,7 +892,8 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
               }
               const inherited = thread.label?.source.kind === "inherited";
               const unvalued = thread.label !== null && thread.label.value === null;
-              const label = thread.label ? shortLabel(thread.label) : "";
+              const label = boxLabel(thread.label);
+              const project = overview?.projects[thread.projectId] ?? thread.projectId;
               const lentBest = thread.lent.length > 0 ? thread.lent.reduce((a, b) => ((a.value ?? 2) <= (b.value ?? 2) ? a : b)) : null;
               const state = liveStateOf(live.get(thread.id));
               const attention = isWaitingOnYou(state);
@@ -916,13 +922,14 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
                   {cell.w > 16 && cell.h > 16 && <LiveMarker state={state} x={cell.x + cell.w - 7} y={cell.y + 7} />}
                   {cell.w > 48 && cell.h > 14 && (
                     <text x={cell.x + 4} y={cell.y + 11} fontSize={10} fill="currentColor">
-                      <tspan fontWeight={600}>{label || "–"}</tspan>
+                      {label && <tspan fontWeight={600}>{label}</tspan>}
                       <tspan dx={4}>{thread.title.slice(0, Math.max(0, Math.floor((cell.w - 30) / 6)))}</tspan>
                     </text>
                   )}
                   {cell.w > 48 && cell.h > 28 && (
                     <text x={cell.x + 4} y={cell.y + 23} fontSize={9} fill="currentColor" opacity={0.75}>
-                      {formatDuration(thread.seconds)}
+                      <tspan opacity={0.8}>{project.slice(0, Math.max(0, Math.floor((cell.w - 40) / 5)))}</tspan>
+                      <tspan dx={5}>{formatDuration(thread.seconds)}</tspan>
                       {lentBest ? `  ← ${lentBest.goal}${lentBest.value ?? ""} lent` : ""}
                     </text>
                   )}
@@ -1031,6 +1038,9 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
         <div className="flex items-center gap-2 border-b px-3 py-2 text-sm">
           <span className="min-w-0 flex-1 truncate font-medium">
             {selected ? selected.title : <ThreadTitle threadId={selectedId} />}
+            {selected && (
+              <span className="ml-2 font-normal text-muted-foreground">{overview?.projects[selected.projectId] ?? selected.projectId}</span>
+            )}
           </span>
           <button type="button" className={buttonClass} onClick={() => navigate.toThread(selectedId)}>
             Open
