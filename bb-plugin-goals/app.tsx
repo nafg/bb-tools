@@ -551,6 +551,22 @@ const byImportance = (a: OverviewThread, b: OverviewThread): number =>
 
 const PANEL_PATH = "goals";
 
+/** How much of the page the thread pane takes; remembered per browser. */
+const PANE_FRACTION_KEY = "goals.paneFraction";
+const DEFAULT_PANE_FRACTION = 0.6;
+const clampFraction = (f: number) => Math.min(0.85, Math.max(0.2, f));
+function usePaneFraction(): [number, (fraction: number, persist: boolean) => void] {
+  const [fraction, setFraction] = useState(() => {
+    const stored = Number(window.localStorage.getItem(PANE_FRACTION_KEY));
+    return Number.isFinite(stored) && stored > 0 ? clampFraction(stored) : DEFAULT_PANE_FRACTION;
+  });
+  const update = useCallback((f: number, persist: boolean) => {
+    setFraction(f);
+    if (persist) window.localStorage.setItem(PANE_FRACTION_KEY, String(f));
+  }, []);
+  return [fraction, update];
+}
+
 /** The order the waiting list and Next walk: the user's quick moves, then focus, then unread replies, then what is only owed later. */
 type WaitingGroup = MyMove | "unread";
 const WAITING_GROUPS: readonly WaitingGroup[] = ["quick", "focus", "unread", "later"];
@@ -620,6 +636,8 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; thread: OverviewThread } | null>(null);
   const [mapRef, mapSize] = useElementSize<HTMLDivElement>();
+  const [pageRef, pageSize] = useElementSize<HTMLDivElement>();
+  const [paneFraction, setPaneFraction] = usePaneFraction();
   const sidebar = experimental_useSidebarThreads();
   const live = useMemo(() => new Map(sidebar.threads.map((t) => [t.id, t])), [sidebar.threads]);
 
@@ -720,8 +738,22 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
     return () => window.removeEventListener("keydown", onKey);
   }, [selectNext]);
   const now = Date.now();
+  const startResize = (event: React.PointerEvent) => {
+    event.preventDefault();
+    const page = pageRef.current;
+    if (!page) return;
+    const rect = page.getBoundingClientRect();
+    const move = (e: PointerEvent) => setPaneFraction(clampFraction((rect.right - e.clientX) / rect.width), false);
+    const stop = (e: PointerEvent) => {
+      setPaneFraction(clampFraction((rect.right - e.clientX) / rect.width), true);
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+  };
   return (
-    <div className="flex h-full min-h-0 flex-row">
+    <div ref={pageRef} className="flex h-full min-h-0 flex-row">
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 p-4">
       <div className="flex flex-wrap items-center gap-2">
         <div role="group" aria-label="Time window" className="flex gap-1">
@@ -981,7 +1013,21 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
       )}
     </div>
     {selectedId && (
-      <aside className="flex h-full min-h-0 w-[520px] shrink-0 flex-col border-l" aria-label="Selected thread">
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize the thread pane"
+        title="Drag to resize"
+        className="h-full w-1.5 shrink-0 cursor-col-resize bg-border hover:bg-primary/40"
+        onPointerDown={startResize}
+      />
+    )}
+    {selectedId && (
+      <aside
+        className="flex h-full min-h-0 shrink-0 flex-col"
+        style={{ width: pageSize.width > 0 ? Math.round(pageSize.width * paneFraction) : "60%" }}
+        aria-label="Selected thread"
+      >
         <div className="flex items-center gap-2 border-b px-3 py-2 text-sm">
           <span className="min-w-0 flex-1 truncate font-medium">
             {selected ? selected.title : <ThreadTitle threadId={selectedId} />}
