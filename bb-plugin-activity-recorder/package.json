@@ -1,0 +1,28 @@
+{
+  "name": "bb-plugin-activity-recorder",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "bbPluginSdk": "^0.6.49"
+  },
+  "scripts": {
+    "build": "bleep --directory .. link activity && cp ../.bleep/builds/normal/.bloop/activity/link-output/debug/js/main.js server.js && bleep --directory .. link activity-app && cp ../.bleep/builds/normal/.bloop/activity-app/link-output/debug/js/main.js app-core.cjs",
+    "test": "bleep --directory .. test activity-core-test",
+    "reload": "npm run build && bb plugin build . && bb plugin reload activity-recorder"
+  },
+  "bb": {
+    "name": "Activity recorder",
+    "description": "Records when you give each thread attention (speech, replies read aloud, typed messages, a focused pane) and serves per-thread activity intervals over RPC for other plugins.",
+    "branding": {
+      "icon": "Timer"
+    },
+    "server": "./server.js",
+    "app": "./app.tsx"
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.49",
+    "@types/react": "^19.2.18",
+    "react": "^19.2.8",
+    "typescript": "^7.0.2"
+  }
+}

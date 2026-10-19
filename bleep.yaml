@@ -7,6 +7,40 @@ projects:
     extends:
     - template-common
     - template-js
+  activity-core:
+    cross:
+      jvm3:
+        extends:
+        - template-common
+        - template-jvm
+      js3:
+        extends:
+        - template-common
+        - template-js
+    folder: ./bb-plugin-activity-recorder/activity-core
+  activity-core-test:
+    dependsOn: activity-core
+    extends:
+    - template-common
+    - template-jvm
+    isTestProject: true
+    dependencies:
+    - org.scalameta::munit:1.1.1
+    folder: ./bb-plugin-activity-recorder/activity-core-test
+  activity:
+    dependsOn:
+    - bb-plugin-facades
+    - activity-core
+    extends:
+    - template-common
+    - template-js
+    folder: ./bb-plugin-activity-recorder/activity
+  activity-app:
+    dependsOn: activity-core
+    extends:
+    - template-common
+    - template-js
+    folder: ./bb-plugin-activity-recorder/activity-app
   agentmail:
     dependsOn: bb-plugin-facades
     extends:

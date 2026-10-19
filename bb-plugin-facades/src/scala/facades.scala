@@ -64,6 +64,8 @@ trait SqliteStmt extends js.Object:
 @js.native
 trait BbBackgroundArea extends js.Object:
   def schedule(name: String, cron: String, handler: js.Function0[js.Promise[Unit]]): Unit = js.native
+  /** service: { start(signal: AbortSignal) }; must resolve once the signal aborts. */
+  def service(name: String, service: js.Any): Unit = js.native
 
 @js.native
 trait BbCliArea extends js.Object:
@@ -97,6 +99,8 @@ trait BbRealtimeArea extends js.Object:
 trait BbRpcArea extends js.Object:
   /** contract: method -> { input, output } Standard Schema pairs; handlers: method -> function. */
   def register(contract: js.Any, handlers: js.Any): Unit = js.native
+  /** options: { experimental_discoverable?, experimental_description? }. */
+  def register(contract: js.Any, handlers: js.Any, options: js.Any): Unit = js.native
 
 @js.native
 trait BbHttpArea extends js.Object:
@@ -115,6 +119,14 @@ trait BbSdk extends js.Object:
   val system: BbSystemArea             = js.native
   val hosts: BbHostsArea               = js.native
   val terminals: BbTerminalsArea       = js.native
+  val plugins: BbPluginsArea           = js.native
+
+@js.native
+trait BbPluginsArea extends js.Object:
+  /** args: { pluginId, method, input?, outputSchema }; outputSchema needs only `parse(result)`. */
+  def callRpc(args: js.Any): js.Promise[js.Dynamic] = js.native
+  /** args: { pluginId?, method? }; the rpc methods registered with experimental_discoverable: true. */
+  def experimental_discoverRpc(args: js.Any): js.Promise[js.Array[js.Dynamic]] = js.native
 
 @js.native
 trait BbHostsArea extends js.Object:
@@ -140,6 +152,16 @@ trait BbThreadEventsArea extends js.Object:
 trait BbThreadsArea extends js.Object:
   val events: BbThreadEventsArea                      = js.native
   def get(args: js.Any): js.Promise[js.Dynamic]       = js.native
+  /** args: { projectId?, archived?, includeHidden?, limit?, offset?, ... }; resolves the thread rows. */
+  def list(args: js.Any): js.Promise[js.Array[js.Dynamic]] = js.native
+  /** args: { threadId, pluginId? }; resolves this plugin's JSON namespace on the thread ({} when absent). */
+  def getPluginMetadata(args: js.Any): js.Promise[js.Dynamic]    = js.native
+  /** args: { threadId, pluginId?, set?, remove? }; resolves the complete resulting namespace. */
+  def updatePluginMetadata(args: js.Any): js.Promise[js.Dynamic] = js.native
+  /** args: { threadIds (1–200), pluginId? }; resolves { threads: [{ threadId, metadata }] }, omitting threads without a namespace. */
+  def experimental_listPluginMetadata(args: js.Any): js.Promise[js.Dynamic] = js.native
+  /** args: { threadIds (1–200) }; resolves { threads: [{ threadId, ancestorIds }] } parent first, archived included. */
+  def experimental_listAncestors(args: js.Any): js.Promise[js.Dynamic] = js.native
   def send(args: js.Any): js.Promise[js.Dynamic]      = js.native
   def spawn(args: js.Any): js.Promise[js.Dynamic]     = js.native
   def timeline(args: js.Any): js.Promise[js.Dynamic]  = js.native
