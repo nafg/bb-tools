@@ -57,13 +57,13 @@ final class Player(
 
   def setTtsMode(mode: String): Unit = ttsMode = mode
 
-  private var output: CallAudioOutput = null
+  private var output: AudioOutput = null
 
   /** Must be called inside a user gesture, so playback is allowed to start. */
   def setAudioContext(ctx: AudioContext): Unit =
     if output != null then output.close()
     audioContext = ctx
-    output = if ctx == null then null else CallAudioOutput(ctx, debug)
+    output = if ctx == null then null else AudioOutput.forThisDevice(ctx, debug)
 
   def isSpeaking: Boolean = speakingActive
 

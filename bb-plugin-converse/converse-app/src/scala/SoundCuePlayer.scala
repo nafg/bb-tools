@@ -70,7 +70,7 @@ final class SoundCuePlayer:
       audioContext = new AudioContext
       master = audioContext.createGain()
       master.gain.value = settings.volume
-      val _ = master.connect(CallAudioOutput(audioContext, message => { val _ = js.Dynamic.global.console.debug(s"[converse] $message") }).input)
+      val _ = master.connect(AudioOutput.forThisDevice(audioContext, message => { val _ = js.Dynamic.global.console.debug(s"[converse] $message") }).input)
     val _ = audioContext.resume()
 
   def onStateChange(from: VoiceState, to: VoiceState, activity: Option[AgentActivity]): Unit =

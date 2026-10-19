@@ -9,7 +9,7 @@ import scala.scalajs.js
   * instead of the headset; this sends the sound the way call audio goes.
   * Create it inside a user gesture, since the element must be allowed to play.
   */
-final class CallAudioOutput(ctx: AudioContext, onError: String => Unit):
+final class CallAudioOutput(ctx: AudioContext, onError: String => Unit) extends AudioOutput:
   private val stream  = ctx.createMediaStreamDestination()
   private val element = js.Dynamic.newInstance(js.Dynamic.global.Audio)()
   element.srcObject = stream.stream
@@ -17,7 +17,6 @@ final class CallAudioOutput(ctx: AudioContext, onError: String => Unit):
     onError(s"call-style audio output could not start: ${e.getMessage}")
   }
 
-  /** Where sound meant to be heard is connected. */
   def input: AudioNode = stream
 
   def close(): Unit =
