@@ -543,9 +543,9 @@ function useElementSize<T extends HTMLElement>(): [React.RefObject<T | null>, { 
 
 const flatten = (threads: OverviewThread[]): OverviewThread[] => threads.flatMap((t) => [t, ...flatten(t.children)]);
 
-/** The label as a map box shows it: the enclosing goal box already names the goal, so only the value and the inherited marker remain. */
-const boxLabel = (label: EffectiveLabel | null): string =>
-  label ? `${label.value ?? ""}${label.source.kind === "inherited" ? "*" : ""}` : "–";
+/** The label as a map box shows it: the enclosing goal box already names the goal, and where the label came from lives in the tooltip,
+ * so only the value digit remains. */
+const boxLabel = (label: EffectiveLabel | null): string => (label ? `${label.value ?? "?"}` : "–");
 
 /** What to work on next: the most important first (1 before 3, lent labels counted, unranked last), then the most attended, then by title. */
 const byImportance = (a: OverviewThread, b: OverviewThread): number =>
@@ -623,7 +623,7 @@ function LiveMarker({ state, x, y }: { state: LiveState; x: number; y: number })
         <animate attributeName="stroke-opacity" values="1;0.4;1" dur="1.4s" repeatCount="indefinite" />
       </circle>
     );
-  return <circle cx={x} cy={y} r={4} fill={state === "failed" ? FAILED_COLOR : "currentColor"} stroke="white" strokeWidth={1.5} />;
+  return <circle cx={x} cy={y} r={5} fill={state === "failed" ? FAILED_COLOR : "currentColor"} stroke="white" strokeWidth={2} />;
 }
 
 /** The Goals page: bars and the map on the left, and, once a thread is picked, that thread's chat on the right. The picked thread lives
@@ -690,7 +690,8 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
     return map;
   }, [threadsById]);
 
-  const alphaFor = (label: EffectiveLabel | null): number => (!label ? 0.25 : label.value === 1 ? 0.85 : label.value === 2 ? 0.6 : label.value === 3 ? 0.4 : 0.3);
+  // Fill strength is importance, lending included: the same number the table ranks by.
+  const alphaFor = (importance: number | null): number => (importance === 1 ? 0.85 : importance === 2 ? 0.6 : importance === 3 ? 0.4 : 0.22);
 
   const selected = selectedId ? threadsById.get(selectedId) ?? null : null;
 
@@ -768,7 +769,7 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
           ))}
         </div>
         <span className="text-xs text-muted-foreground">
-          Attention time per thread, parallel threads each counted in full. Box area follows it; * marks an inherited label.
+          Attention time per thread, parallel threads each counted in full. Box area follows it; darker fill is a bigger lever; a dot means your turn; a ring means the open thread.
         </span>
       </div>
       {overview?.recorder.state === "missing" && (
@@ -890,13 +891,13 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
               if (cell.kind === "self") {
                 return <rect key={`s${i}`} x={cell.x} y={cell.y} width={cell.w} height={cell.h} fill={color} fillOpacity={0.12} stroke="none" rx={2} />;
               }
-              const inherited = thread.label?.source.kind === "inherited";
-              const unvalued = thread.label !== null && thread.label.value === null;
               const label = boxLabel(thread.label);
               const project = overview?.projects[thread.projectId] ?? thread.projectId;
               const lentBest = thread.lent.length > 0 ? thread.lent.reduce((a, b) => ((a.value ?? 2) <= (b.value ?? 2) ? a : b)) : null;
               const state = liveStateOf(live.get(thread.id));
-              const attention = isWaitingOnYou(state);
+              const move = labelRows.get(thread.id)?.own.myMove ?? null;
+              // The dot means "your turn": bb's attention states, or a quick or focus mark you set yourself.
+              const marker: LiveState = state === "idle" && (move === "quick" || move === "focus") ? "waiting" : state;
               return (
                 <g
                   key={`t${i}`}
@@ -913,13 +914,12 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
                     width={cell.w}
                     height={cell.h}
                     fill={color}
-                    fillOpacity={alphaFor(thread.label)}
-                    stroke={thread.id === selectedId || attention ? "currentColor" : color}
-                    strokeWidth={thread.id === selectedId ? 2.5 : attention ? 2 : 1}
-                    strokeDasharray={inherited ? "3 2" : unvalued ? "1 2" : undefined}
+                    fillOpacity={alphaFor(thread.importance)}
+                    stroke={thread.id === selectedId ? "currentColor" : color}
+                    strokeWidth={thread.id === selectedId ? 3 : 1}
                     rx={3}
                   />
-                  {cell.w > 16 && cell.h > 16 && <LiveMarker state={state} x={cell.x + cell.w - 7} y={cell.y + 7} />}
+                  {cell.w > 16 && cell.h > 16 && <LiveMarker state={marker} x={cell.x + cell.w - 7} y={cell.y + 7} />}
                   {cell.w > 48 && cell.h > 14 && (
                     <text x={cell.x + 4} y={cell.y + 11} fontSize={10} fill="currentColor">
                       {label && <tspan fontWeight={600}>{label}</tspan>}
@@ -970,7 +970,11 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
             <div className="font-medium">{hover.thread.title}</div>
             <div className="text-muted-foreground">{overview?.projects[hover.thread.projectId] ?? hover.thread.projectId}</div>
             <div>{describeLabel(hover.thread.label)}</div>
-            <div>{LIVE_STATE_TEXT[liveStateOf(live.get(hover.thread.id))]}</div>
+            <div>
+              {LIVE_STATE_TEXT[liveStateOf(live.get(hover.thread.id))]}
+              {labelRows.get(hover.thread.id)?.own.myMove ? `; my move: ${labelRows.get(hover.thread.id)!.own.myMove}` : ""}
+              {hover.thread.importance !== null ? `; importance ${hover.thread.importance}` : ""}
+            </div>
             <div>{formatDuration(hover.thread.seconds)} of attention in this window</div>
             {hover.thread.lent.length > 0 && (
               <div>Lent: {hover.thread.lent.map((l) => `${l.goal}${l.value ?? ""} from ${threadsById.get(l.fromThreadId)?.title ?? l.fromThreadId}`).join("; ")}</div>
