@@ -8,9 +8,12 @@ import {
   definePluginApp,
   experimental_THREAD_ACTION_GROUPS,
   experimental_useSidebarThreads,
+  ThreadChat,
+  ThreadTitle,
   useBbNavigate,
   useRealtime,
   useRpc,
+  type PluginNavPanelProps,
   type PluginRpcMethodContract,
   type PluginThreadActionRegistration,
   type StandardSchemaV1,
@@ -500,9 +503,15 @@ const byImportance = (a: OverviewThread, b: OverviewThread): number =>
   b.seconds - a.seconds ||
   a.title.localeCompare(b.title);
 
-function GoalsPage() {
+const PANEL_PATH = "goals";
+
+/** The Goals page: bars and the map on the left, and, once a thread is picked, that thread's chat on the right. The picked thread lives
+ * in the route's subPath, so a reload keeps it. */
+function GoalsPage({ subPath }: PluginNavPanelProps) {
   const rpc = useRpc<GoalsRpc>();
   const navigate = useBbNavigate();
+  const selectedId = /^thr_[a-z0-9]+$/.test(subPath) ? subPath : null;
+  const select = (id: string | null) => navigate.toPluginPanel(PANEL_PATH, { subPath: id ?? "", replace: true });
   const dark = useDarkMode();
   const { version } = useLabelState();
   const [window_, setWindow] = useState<Window>("7d");
@@ -558,8 +567,10 @@ function GoalsPage() {
 
   const alphaFor = (label: EffectiveLabel | null): number => (!label ? 0.25 : label.value === 1 ? 0.85 : label.value === 2 ? 0.6 : label.value === 3 ? 0.4 : 0.3);
 
+  const selected = selectedId ? threadsById.get(selectedId) ?? null : null;
   return (
-    <div className="flex h-full min-h-0 flex-col gap-3 p-4">
+    <div className="flex h-full min-h-0 flex-row">
+    <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 p-4">
       <div className="flex flex-wrap items-center gap-2">
         <div role="group" aria-label="Time window" className="flex gap-1">
           {WINDOWS.map((w) => (
@@ -655,7 +666,7 @@ function GoalsPage() {
                 <g
                   key={`t${i}`}
                   style={{ cursor: "pointer" }}
-                  onClick={() => navigate.toThread(thread.id, { split: true })}
+                  onClick={() => select(thread.id)}
                   onMouseMove={(event) => {
                     const box = (event.currentTarget.ownerSVGElement as SVGSVGElement).getBoundingClientRect();
                     setHover({ x: event.clientX - box.left, y: event.clientY - box.top, thread });
@@ -668,8 +679,8 @@ function GoalsPage() {
                     height={cell.h}
                     fill={color}
                     fillOpacity={alphaFor(thread.label)}
-                    stroke={color}
-                    strokeWidth={1}
+                    stroke={thread.id === selectedId ? "currentColor" : color}
+                    strokeWidth={thread.id === selectedId ? 2.5 : 1}
                     strokeDasharray={inherited ? "3 2" : unvalued ? "1 2" : undefined}
                     rx={3}
                   />
@@ -750,7 +761,7 @@ function GoalsPage() {
               {[...threadsById.values()]
                 .sort(byImportance)
                 .map((t) => (
-                  <tr key={t.id} className="cursor-pointer hover:bg-accent" onClick={() => navigate.toThread(t.id, { split: true })}>
+                  <tr key={t.id} className={`cursor-pointer hover:bg-accent ${t.id === selectedId ? "bg-accent" : ""}`} onClick={() => select(t.id)}>
                     <td className="py-0.5 pr-2 tabular-nums">{t.importance ?? "–"}</td>
                     <td className="py-0.5 pr-2 tabular-nums">{t.label ? shortLabel(t.label) : "–"}</td>
                     <td className="py-0.5 pr-2">{t.title}</td>
@@ -762,6 +773,23 @@ function GoalsPage() {
           </table>
         </details>
       )}
+    </div>
+    {selectedId && (
+      <aside className="flex h-full min-h-0 w-[520px] shrink-0 flex-col border-l" aria-label="Selected thread">
+        <div className="flex items-center gap-2 border-b px-3 py-2 text-sm">
+          <span className="min-w-0 flex-1 truncate font-medium">
+            {selected ? selected.title : <ThreadTitle threadId={selectedId} />}
+          </span>
+          <button type="button" className={buttonClass} onClick={() => navigate.toThread(selectedId)}>
+            Open
+          </button>
+          <button type="button" className={buttonClass} aria-label="Close thread pane" onClick={() => select(null)}>
+            ×
+          </button>
+        </div>
+        <ThreadChat key={selectedId} threadId={selectedId} variant="full" layout="contained" className="min-h-0 flex-1" />
+      </aside>
+    )}
     </div>
   );
 }
