@@ -340,7 +340,15 @@ def plugin(bb: BbApi): Unit =
         |  start_at REAL NOT NULL,
         |  end_at REAL NOT NULL,
         |  session_id TEXT
-        |)""".stripMargin
+        |)""".stripMargin,
+      // Recordings stored before speech was stamped in the browser: their span
+      // is taken from the store time and the detector's frame count (32 ms
+      // each), so it runs about 4 s long and late by the upload's delay.
+      """INSERT OR IGNORE INTO activity_spans (id, kind, source, thread_id, start_at, end_at, session_id)
+        |SELECT id, 'speech', 'backfill', thread_id, at - detector_frames * 32, at, session_id
+        |FROM utterances
+        |WHERE thread_id != '' AND detector_frames IS NOT NULL AND speech_start_at IS NULL
+        |ORDER BY at""".stripMargin
     )
   )
   val awaitingReplies = AwaitingReplies(db)
@@ -1844,7 +1852,7 @@ def plugin(bb: BbApi): Unit =
         val threadId = str(input.threadId)
         val startAt  = input.startAt.asInstanceOf[js.UndefOr[Double]].getOrElse(Double.NaN)
         val endAt    = input.endAt.asInstanceOf[js.UndefOr[Double]].getOrElse(Double.NaN)
-        (ActivitySource.fromCode(str(input.source)), PlaybackReport.validate(threadId, startAt, endAt)) match
+        (ActivitySource.fromCode(str(input.source)).filter(ActivitySource.Reported.contains), PlaybackReport.validate(threadId, startAt, endAt)) match
           case (None, _)            => rejected(s"unknown source ${str(input.source)}")
           case (_, Left(message))   => rejected(message)
           case (Some(source), Right(_)) =>
