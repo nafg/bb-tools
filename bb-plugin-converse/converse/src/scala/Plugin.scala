@@ -1705,7 +1705,7 @@ def plugin(bb: BbApi): Unit =
       "soundCueSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "recentUtterances" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "retryRecording" -> js.Dynamic.literal("input" -> Schema.strings("id" -> 100), "output" -> Schema.passthrough),
-      "recordingOutcomes" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "sessionSync" -> js.Dynamic.literal("input" -> Schema.strings("sessionId" -> 100), "output" -> Schema.passthrough),
       "activitySpans" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "reportPlayback" -> js.Dynamic.literal(
         "input"  -> Schema.stringsWithOptional(Seq("id" -> 100, "threadId" -> 100, "source" -> 20), Seq("sessionId" -> 100)),
@@ -1917,11 +1917,14 @@ def plugin(bb: BbApi): Unit =
         val oldestSeq = db.prepare("SELECT MIN(seq) AS seq FROM activity_spans").get().toOption.map(_.seq).orNull
         Future.successful(js.Dynamic.literal("items" -> items, "oldestSeq" -> oldestSeq)).toJSPromise
       },
-      "recordingOutcomes" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
-        // How the given recordings ended, for those that have: the same facts
-        // the utterance-processed signal carries, for a page that missed it.
-        val ids = input.ids.asInstanceOf[js.UndefOr[js.Array[String]]].fold(Vector.empty[String])(_.toVector).take(50)
-        val items = ids.flatMap { id =>
+      "sessionSync" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        // The backend's records for a page's session: how the given recordings
+        // ended, for those that have (the facts the utterance-processed signal
+        // carries), and which threads owe the session a reply. Safe to ask
+        // repeatedly, for a page that missed a signal.
+        val sessionId = str(input.sessionId)
+        val ids       = input.recordingIds.asInstanceOf[js.UndefOr[js.Array[String]]].fold(Vector.empty[String])(_.toVector).take(50)
+        val outcomes = ids.flatMap { id =>
           db.prepare("SELECT id, status, text, thread_id, project_id, last_error, say_again FROM utterances WHERE id = ?")
             .get(id)
             .toOption
@@ -1931,6 +1934,7 @@ def plugin(bb: BbApi): Unit =
                   js.Dynamic.literal(
                     "recordingId"     -> row.id,
                     "outcome"         -> "sent",
+                    "threadId"        -> row.thread_id,
                     "text"            -> row.text,
                     "createdThreadId" -> (if str(row.project_id).nonEmpty then row.thread_id else null)
                   )
@@ -1945,7 +1949,8 @@ def plugin(bb: BbApi): Unit =
               }
             }
         }
-        Future.successful(js.Dynamic.literal("items" -> items.toJSArray)).toJSPromise
+        val awaiting = awaitingReplies.bySession(sessionId)
+        Future.successful(js.Dynamic.literal("outcomes" -> outcomes.toJSArray, "awaiting" -> awaiting.toJSArray)).toJSPromise
       },
       "retryRecording" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val id = str(input.id)
