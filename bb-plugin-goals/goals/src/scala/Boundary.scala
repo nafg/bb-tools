@@ -24,7 +24,9 @@ object Js:
     ThreadLabels.fromStored(
       goal = optStr(metadata.goal),
       value = Dyn.number(metadata.value),
-      blockedBy = optArr(metadata.blockedBy).map(_.map(_.asInstanceOf[Any]))
+      blockedBy = optArr(metadata.blockedBy).map(_.map(_.asInstanceOf[Any])),
+      myMove = optStr(metadata.myMove),
+      myMoveAt = Dyn.number(metadata.myMoveAt)
     )
 
 /** The goals namespace and the overview as the frontend, the CLI, and agents receive them. */
@@ -35,7 +37,9 @@ object Out:
     js.Dynamic.literal(
       "goal"      -> labels.goal.map(goal).orNull,
       "value"     -> labels.value.map(v => v: js.Any).orNull,
-      "blockedBy" -> labels.blockedBy.toJSArray
+      "blockedBy" -> labels.blockedBy.toJSArray,
+      "myMove"    -> labels.myMove.map(m => m.name: js.Any).orNull,
+      "myMoveAt"  -> labels.myMoveAt.map(t => t.toDouble: js.Any).orNull
     )
 
   def effective(label: Option[Effective]): js.Any =

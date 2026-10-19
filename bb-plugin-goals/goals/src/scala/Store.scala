@@ -1,7 +1,7 @@
 package goals
 
 import activitycore.{ActivityJson, Interval}
-import bbplugin.BbApi
+import bbplugin.{BbApi, Dyn}
 import goalscore.*
 
 import scala.concurrent.{ExecutionContext, Future}
@@ -90,13 +90,20 @@ final class Store(bb: BbApi)(using ExecutionContext):
       threadId: String,
       goal: Option[Option[Goal]],
       value: Option[Option[Int]],
-      blockedBy: Option[List[String]]
+      blockedBy: Option[List[String]],
+      myMove: Option[Option[MyMove]] = None
   ): Future[ThreadLabels] =
     val set    = js.Dynamic.literal()
     val remove = js.Array[String]()
     goal.foreach(_.fold(remove.push("goal"))(g => set.updateDynamic("goal")(g.letter)))
     value.foreach(_.fold(remove.push("value"))(v => set.updateDynamic("value")(v)))
     blockedBy.foreach(ids => if ids.isEmpty then remove.push("blockedBy") else set.updateDynamic("blockedBy")(ids.toJSArray))
+    myMove.foreach {
+      case None    => remove.push("myMove", "myMoveAt")
+      case Some(m) =>
+        set.updateDynamic("myMove")(m.name)
+        set.updateDynamic("myMoveAt")(js.Date.now())
+    }
     bb.sdk.threads
       .updatePluginMetadata(js.Dynamic.literal("threadId" -> threadId, "set" -> set, "remove" -> remove))
       .toFuture
@@ -124,6 +131,26 @@ final class Store(bb: BbApi)(using ExecutionContext):
       ids = anc.getOrElse(threadId, Nil)
       more <- if own.goal.isDefined || ids.isEmpty then Future.successful(Map.empty[String, ThreadLabels]) else labels(ids)
     yield own -> Inheritance.effective(threadId, more + (threadId -> own), anc)
+
+  /** When the user last wrote to the thread: the newest turn request the user initiated, not an agent, bb, or an automation (those arrive
+    * tagged as the user, so their "[bb " prefix is the only sign of them). None when there is no such message.
+    */
+  def latestUserMessageAt(threadId: String): Future[Option[Long]] =
+    bb.sdk.threads.events
+      .list(js.Dynamic.literal("threadId" -> threadId, "types" -> js.Array("client/turn/requested"), "order" -> "desc", "limit" -> "20"))
+      .toFuture
+      .map { rows =>
+        rows.toList.iterator
+          .filter(row => isUserMessage(row.data))
+          .flatMap(row => Dyn.number(row.createdAt).map(_.toLong))
+          .nextOption()
+      }
+
+  private def isUserMessage(data: js.Dynamic): Boolean =
+    Js.optStr(data.initiator).contains("user") && Js.optStr(data.senderThreadId).forall(_.isEmpty) && !messageText(data).startsWith("[bb ")
+
+  private def messageText(data: js.Dynamic): String =
+    Js.optArr(data.input).getOrElse(Nil).filter(b => Js.optStr(b.`type`).contains("text")).flatMap(b => Js.optStr(b.text)).mkString
 
   // ---- activity recorder ----
 

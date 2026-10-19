@@ -26,10 +26,14 @@ import { layoutOverview, type LayoutCell } from "./app-core.cjs";
 
 type Shape<T> = StandardSchemaV1<T, T>;
 type GoalLetter = "B" | "C" | "P" | "S" | "M" | "F";
+type MyMove = "quick" | "focus" | "later";
 interface OwnLabels {
   goal: GoalLetter | null;
   value: number | null;
   blockedBy: string[];
+  /** What the user still owes the thread; null when nothing. Clears when they next write to it. */
+  myMove: MyMove | null;
+  myMoveAt: number | null;
 }
 interface EffectiveLabel {
   goal: GoalLetter;
@@ -55,6 +59,7 @@ interface LabelsSetInput {
   goal?: string;
   value?: string;
   blockedBy?: string[];
+  myMove?: string;
 }
 interface LabelsResult {
   threadId: string;
@@ -113,6 +118,7 @@ const GOALS: readonly GoalInfo[] = [
 const goalInfo = (letter: GoalLetter | null | undefined): GoalInfo | null =>
   GOALS.find((g) => g.letter === letter) ?? null;
 const UNLABELED = "#8a8a86";
+const EMPTY_OWN: OwnLabels = { goal: null, value: null, blockedBy: [], myMove: null, myMoveAt: null };
 
 function useDarkMode(): boolean {
   const query = useMemo(() => window.matchMedia("(prefers-color-scheme: dark)"), []);
@@ -289,12 +295,36 @@ function ThreadName({ threadId }: { threadId: string }) {
   return <span title={threadId}>{thread?.displayTitle ?? threadId}</span>;
 }
 
+const MY_MOVES: readonly { id: MyMove; label: string; title: string }[] = [
+  { id: "quick", label: "Quick", title: "A question or decision that takes little effort" },
+  { id: "focus", label: "Focus", title: "Needs real focused time; reserve space for it" },
+  { id: "later", label: "Later", title: "Nothing owed now, but more to prompt later" },
+];
+
+/** The "my move" buttons for one thread. One click sets; the same click again clears. */
+function MyMoveControl({ threadId, own, onError }: { threadId: string; own: OwnLabels; onError: (message: string | null) => void }) {
+  const set = (value: MyMove | "none") => {
+    onError(null);
+    setLabels({ threadId, myMove: value }).catch((cause: unknown) => onError(cause instanceof Error ? cause.message : String(cause)));
+  };
+  return (
+    <div className="flex items-center gap-1">
+      <span className="mr-1 text-xs text-muted-foreground">My move</span>
+      {MY_MOVES.map((m) => (
+        <ChoiceButton key={m.id} title={m.title} selected={own.myMove === m.id} onClick={() => set(own.myMove === m.id ? "none" : m.id)}>
+          {m.label}
+        </ChoiceButton>
+      ))}
+    </div>
+  );
+}
+
 function GoalHeaderPicker({ threadId }: { threadId: string }) {
   const { rows, error } = useLabelState();
   const dark = useDarkMode();
   const row = rows.get(threadId) ?? null;
   const effective = row?.effective ?? null;
-  const own = row?.own ?? { goal: null, value: null, blockedBy: [] };
+  const own = row?.own ?? EMPTY_OWN;
   const [writeError, setWriteError] = useState<string | null>(null);
   const [blockerInput, setBlockerInput] = useState("");
   const write = (input: Omit<LabelsSetInput, "threadId">) => {
@@ -354,6 +384,7 @@ function GoalHeaderPicker({ threadId }: { threadId: string }) {
                 </ChoiceButton>
               </div>
             </div>
+            <MyMoveControl threadId={threadId} own={own} onError={setWriteError} />
             <div>
               <div className="mb-1 text-xs text-muted-foreground">Waiting on</div>
               <ul className="space-y-1">
@@ -507,6 +538,22 @@ const byImportance = (a: OverviewThread, b: OverviewThread): number =>
 
 const PANEL_PATH = "goals";
 
+/** The order the waiting list and Next walk: the user's quick moves, then focus, then unread replies, then what is only owed later. */
+type WaitingGroup = MyMove | "unread";
+const WAITING_GROUPS: readonly WaitingGroup[] = ["quick", "focus", "unread", "later"];
+const WAITING_GROUP_TITLE: Record<WaitingGroup, string> = { quick: "Quick", focus: "Focus", unread: "Unread replies", later: "Later" };
+
+/** Why a thread is in the waiting list: the user's own mark first, else bb's attention state. */
+const reasonFor = (thread: OverviewThread, move: MyMove | null, state: LiveState): string => {
+  const parts: string[] = [];
+  if (move) parts.push(`${move} (your mark)`);
+  if (state === "needs-input") parts.push("needs input");
+  else if (state === "failed") parts.push("failed, unread");
+  else if (state === "waiting") parts.push("unread reply");
+  else if (state === "working") parts.push("working");
+  return parts.join(", ") || "idle";
+};
+
 /**
  * What a thread is doing right now, from bb's live sidebar view. "needs-input",
  * "failed", and "waiting" are the states bb paints its attention dot for
@@ -612,24 +659,40 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
 
   const selected = selectedId ? threadsById.get(selectedId) ?? null : null;
 
-  // Threads waiting on the user: most important first, then the one that has waited longest.
-  const waiting = useMemo(
-    () =>
-      [...threadsById.values()]
-        .filter((t) => isWaitingOnYou(liveStateOf(live.get(t.id))))
-        .sort(
-          (a, b) =>
-            (a.importance ?? Number.POSITIVE_INFINITY) - (b.importance ?? Number.POSITIVE_INFINITY) ||
-            (live.get(a.id)?.latestAttentionAt ?? 0) - (live.get(b.id)?.latestAttentionAt ?? 0) ||
-            a.title.localeCompare(b.title),
-        ),
-    [threadsById, live],
-  );
+  // Threads the user owes something: their own "my move" marks and bb's attention states, grouped quick, focus, unread, later, each
+  // most important first, then longest waiting.
+  const { rows: labelRows } = useLabelState();
+  const waiting = useMemo(() => {
+    const groupOf = (t: OverviewThread): WaitingGroup | null => {
+      const move = labelRows.get(t.id)?.own.myMove ?? null;
+      if (move) return move;
+      const state = liveStateOf(live.get(t.id));
+      if (state === "needs-input") return "quick";
+      if (state === "failed" || state === "waiting") return "unread";
+      return null;
+    };
+    const waitedSince = (t: OverviewThread) => {
+      const move = labelRows.get(t.id)?.own;
+      return move?.myMove && move.myMoveAt ? move.myMoveAt : (live.get(t.id)?.latestAttentionAt ?? 0);
+    };
+    return [...threadsById.values()]
+      .flatMap((t) => {
+        const group = groupOf(t);
+        return group ? [{ thread: t, group, reason: reasonFor(t, labelRows.get(t.id)?.own.myMove ?? null, liveStateOf(live.get(t.id))), since: waitedSince(t) }] : [];
+      })
+      .sort(
+        (a, b) =>
+          WAITING_GROUPS.indexOf(a.group) - WAITING_GROUPS.indexOf(b.group) ||
+          (a.thread.importance ?? Number.POSITIVE_INFINITY) - (b.thread.importance ?? Number.POSITIVE_INFINITY) ||
+          a.since - b.since ||
+          a.thread.title.localeCompare(b.thread.title),
+      );
+  }, [threadsById, live, labelRows]);
   const selectNext = useCallback(() => {
     if (waiting.length === 0) return;
-    const at = waiting.findIndex((t) => t.id === selectedId);
+    const at = waiting.findIndex((w) => w.thread.id === selectedId);
     const next = waiting[(at + 1) % waiting.length];
-    if (next) select(next.id);
+    if (next) select(next.thread.id);
   }, [waiting, selectedId, select]);
   useEffect(() => {
     // "n" picks the next waiting thread unless the user is typing somewhere.
@@ -707,7 +770,7 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
       <details open className="rounded border text-xs">
         <summary className="flex cursor-pointer items-center gap-2 px-3 py-1.5">
           <span className="font-medium">Waiting on you ({waiting.length})</span>
-          <span className="text-muted-foreground">most important first, then longest waiting</span>
+          <span className="text-muted-foreground">your marks and unread replies; quick, focus, unread, later; most important first, then longest waiting</span>
           <span className="flex-1" />
           <button
             type="button"
@@ -723,21 +786,23 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
           </button>
         </summary>
         {waiting.length > 0 && (
-          <ul className="max-h-40 overflow-auto border-t">
-            {waiting.map((t) => {
-              const row = live.get(t.id);
-              const state = liveStateOf(row);
+          <ul className="max-h-48 overflow-auto border-t">
+            {waiting.map((w, i) => {
+              const row = live.get(w.thread.id);
+              const first = i === 0 || waiting[i - 1]!.group !== w.group;
               return (
-                <li
-                  key={t.id}
-                  className={`flex cursor-pointer items-center gap-2 px-3 py-1 hover:bg-accent ${t.id === selectedId ? "bg-accent" : ""}`}
-                  onClick={() => select(t.id)}
-                >
-                  {row && <ThreadStatusGlyph indicator={row.indicator} size="compact" />}
-                  <span className="w-8 tabular-nums text-muted-foreground">{t.label ? shortLabel(t.label) : "–"}</span>
-                  <span className="min-w-0 flex-1 truncate">{t.title}</span>
-                  <span className="text-muted-foreground">{LIVE_STATE_TEXT[state]}</span>
-                  {row && <span className="w-14 text-right tabular-nums text-muted-foreground">{formatDuration((now - row.latestAttentionAt) / 1000)}</span>}
+                <li key={w.thread.id}>
+                  {first && <div className="bg-muted/50 px-3 py-0.5 font-medium text-muted-foreground">{WAITING_GROUP_TITLE[w.group]}</div>}
+                  <div
+                    className={`flex cursor-pointer items-center gap-2 px-3 py-1 hover:bg-accent ${w.thread.id === selectedId ? "bg-accent" : ""}`}
+                    onClick={() => select(w.thread.id)}
+                  >
+                    {row && <ThreadStatusGlyph indicator={row.indicator} size="compact" />}
+                    <span className="w-8 tabular-nums text-muted-foreground">{w.thread.label ? shortLabel(w.thread.label) : "–"}</span>
+                    <span className="min-w-0 flex-1 truncate">{w.thread.title}</span>
+                    <span className="text-muted-foreground">{w.reason}</span>
+                    <span className="w-14 text-right tabular-nums text-muted-foreground">{w.since ? formatDuration((now - w.since) / 1000) : ""}</span>
+                  </div>
                 </li>
               );
             })}

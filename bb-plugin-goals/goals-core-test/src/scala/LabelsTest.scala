@@ -42,3 +42,17 @@ class LabelsTest extends munit.FunSuite:
     assertEquals(LabelEdit.parse("thr_me", None, None, Some(List("thr_me"))), Left("a thread cannot block itself"))
     assertEquals(LabelEdit.parse("thr_me", None, None, Some(List("nope"))), Left("blockedBy 'nope': not a thread id"))
     assert(LabelEdit.parse("thr_me", Some("Z"), None, None).isLeft)
+
+  test("my move parses, clears on none, and is read tolerantly from storage"):
+    assertEquals(ThreadLabels.parseMyMoveWrite("Focus"), Right(Some(MyMove.Focus)))
+    assertEquals(ThreadLabels.parseMyMoveWrite("none"), Right(None))
+    assert(ThreadLabels.parseMyMoveWrite("soon").isLeft)
+    val stored = ThreadLabels.fromStored(None, None, None, myMove = Some("quick"), myMoveAt = Some(1000.0))
+    assertEquals(stored.myMove, Some(MyMove.Quick))
+    assertEquals(stored.myMoveAt, Some(1000L))
+    assertEquals(ThreadLabels.fromStored(None, None, None, myMove = Some(3), myMoveAt = Some("x")).myMove, None)
+
+  test("a user message clears a move set before it, not one set after"):
+    assert(ThreadLabels.clearedBy(Some(1000L), messageAt = 2000L))
+    assert(!ThreadLabels.clearedBy(Some(3000L), messageAt = 2000L))
+    assert(ThreadLabels.clearedBy(None, messageAt = 2000L))

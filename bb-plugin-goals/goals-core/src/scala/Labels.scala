@@ -22,9 +22,25 @@ enum LabelSource:
   */
 final case class Effective(goal: Goal, value: Option[Int], source: LabelSource)
 
+/** What the user still owes a thread: a quick answer, focused time, or more prompting later. */
+enum MyMove(val name: String):
+  case Quick extends MyMove("quick")
+  case Focus extends MyMove("focus")
+  case Later extends MyMove("later")
+
+object MyMove:
+  def parse(text: String): Option[MyMove] = MyMove.values.find(_.name == text.trim.toLowerCase)
+
 /** What one thread stores in the goals metadata namespace. A `value` without a `goal` is kept but does not label the thread.
   */
-final case class ThreadLabels(goal: Option[Goal], value: Option[Int], blockedBy: List[String]):
+final case class ThreadLabels(
+    goal: Option[Goal],
+    value: Option[Int],
+    blockedBy: List[String],
+    myMove: Option[MyMove] = None,
+    /** When `myMove` was set (epoch ms), so a user message sent after it clears it. */
+    myMoveAt: Option[Long] = None
+):
   def ownLabel: Option[Effective] = goal.map(Effective(_, value, LabelSource.Own))
 
 object ThreadLabels:
@@ -36,12 +52,29 @@ object ThreadLabels:
   /** Reads a stored namespace without failing: a field that is not what the plugin would have written is treated as absent. Values arrive
     * as the JSON numbers they were stored as.
     */
-  def fromStored(goal: Option[Any], value: Option[Any], blockedBy: Option[Seq[Any]]): ThreadLabels =
+  def fromStored(
+      goal: Option[Any],
+      value: Option[Any],
+      blockedBy: Option[Seq[Any]],
+      myMove: Option[Any] = None,
+      myMoveAt: Option[Any] = None
+  ): ThreadLabels =
     ThreadLabels(
       goal = goal.collect { case s: String => s }.flatMap(Goal.parse),
       value = value.collect { case n: Double => n }.map(_.toInt).filter(v => v >= 1 && v <= 3),
-      blockedBy = blockedBy.getOrElse(Nil).collect { case s: String if ThreadIdPattern.matches(s) => s }.distinct.toList
+      blockedBy = blockedBy.getOrElse(Nil).collect { case s: String if ThreadIdPattern.matches(s) => s }.distinct.toList,
+      myMove = myMove.collect { case s: String => s }.flatMap(MyMove.parse),
+      myMoveAt = myMoveAt.collect { case n: Double => n.toLong }
     )
+
+  /** A "my move" as typed: quick, focus, later, or "none" to clear. */
+  def parseMyMoveWrite(text: String): Either[String, Option[MyMove]] =
+    val trimmed = text.trim
+    if trimmed.isEmpty || trimmed.equalsIgnoreCase(None_) then Right(None)
+    else MyMove.parse(trimmed).map(Some(_)).toRight(s"my move must be quick, focus, later, or none, got '$trimmed'")
+
+  /** Whether a user message sent at `messageAt` clears a move set at `myMoveAt`: only a move set before the message. */
+  def clearedBy(myMoveAt: Option[Long], messageAt: Long): Boolean = myMoveAt.forall(_ < messageAt)
 
   /** A goal as typed by a person or an agent: a letter, or "none" to clear. */
   def parseGoalWrite(text: String): Either[String, Option[Goal]] =
@@ -106,14 +139,26 @@ object Lending:
 /** A requested change to one thread's labels, as typed by a person or an agent: each field is absent (leave alone), or `Some(None)`
   * (clear), or a new value. Validated before anything is written.
   */
-final case class LabelEdit(goal: Option[Option[Goal]], value: Option[Option[Int]], blockedBy: Option[List[String]]):
-  def isEmpty: Boolean = goal.isEmpty && value.isEmpty && blockedBy.isEmpty
+final case class LabelEdit(
+    goal: Option[Option[Goal]],
+    value: Option[Option[Int]],
+    blockedBy: Option[List[String]],
+    myMove: Option[Option[MyMove]] = None
+):
+  def isEmpty: Boolean = goal.isEmpty && value.isEmpty && blockedBy.isEmpty && myMove.isEmpty
 
 object LabelEdit:
-  def parse(threadId: String, goal: Option[String], value: Option[String], blockedBy: Option[List[String]]): Either[String, LabelEdit] =
+  def parse(
+      threadId: String,
+      goal: Option[String],
+      value: Option[String],
+      blockedBy: Option[List[String]],
+      myMove: Option[String] = None
+  ): Either[String, LabelEdit] =
     for
       g <- goal.fold[Either[String, Option[Option[Goal]]]](Right(None))(ThreadLabels.parseGoalWrite(_).map(Some(_)))
       v <- value.fold[Either[String, Option[Option[Int]]]](Right(None))(ThreadLabels.parseValueWrite(_).map(Some(_)))
+      m <- myMove.fold[Either[String, Option[Option[MyMove]]]](Right(None))(ThreadLabels.parseMyMoveWrite(_).map(Some(_)))
       b <- blockedBy.fold[Either[String, Option[List[String]]]](Right(None)) { ids =>
         ids
           .map(_.trim)
@@ -124,4 +169,4 @@ object LabelEdit:
           }
           .flatMap(ids => if ids.contains(threadId) then Left("a thread cannot block itself") else Right(Some(ids)))
       }
-    yield LabelEdit(g, v, b)
+    yield LabelEdit(g, v, b, m)

@@ -21,16 +21,43 @@ private def describe(own: ThreadLabels, effective: Option[Effective]): String =
     case Some(Effective(g, v, LabelSource.Own))           => s"${g.letter}, ${valueText(v)}"
     case Some(Effective(g, v, LabelSource.Inherited(id))) => s"${g.letter}, ${valueText(v)}, inherited from $id"
   val blocked = if own.blockedBy.isEmpty then "" else s"; blocked by ${own.blockedBy.mkString(", ")}"
-  s"$ownText; effective: $effText$blocked"
+  val move    = own.myMove.fold("")(m => s"; my move: ${m.name}")
+  s"$ownText; effective: $effText$blocked$move"
 
 final class Service(bb: BbApi, store: Store):
   /** The one path every write takes. */
   def edit(threadId: String, edit: LabelEdit): Future[(ThreadLabels, Option[Effective])] =
-    val written = if edit.isEmpty then store.ownLabels(threadId) else store.write(threadId, edit.goal, edit.value, edit.blockedBy)
-    written.flatMap { _ =>
+    val written =
+      if edit.isEmpty then store.ownLabels(threadId) else store.write(threadId, edit.goal, edit.value, edit.blockedBy, edit.myMove)
+    written.flatMap { labels =>
+      moves.note(threadId, labels)
       if !edit.isEmpty then bb.realtime.publish(LabelsChanged, js.Dynamic.literal("threadId" -> threadId))
       store.effectiveOf(threadId)
     }
+
+  /** The threads whose "my move" is set, so a user message to one of them can clear it without reading every thread's metadata. */
+  object moves:
+    private val pending                                    = scala.collection.mutable.Set.empty[String]
+    def note(threadId: String, labels: ThreadLabels): Unit = if labels.myMove.isDefined then pending += threadId else pending -= threadId
+    def seed(): Future[Unit] = store.snapshot().map(snap => snap.own.foreach { case (id, labels) => note(id, labels) })
+
+    /** Clears the move when the user has written to the thread since setting it. */
+    def reconcile(threadId: String): Future[Unit] =
+      if !pending.contains(threadId) then Future.unit
+      else
+        for
+          own <- store.ownLabels(threadId)
+          at  <- if own.myMove.isDefined then store.latestUserMessageAt(threadId) else Future.successful(None)
+          _   <- at match
+            case Some(messageAt) if ThreadLabels.clearedBy(own.myMoveAt, messageAt) =>
+              store.write(threadId, None, None, None, Some(None)).map { cleared =>
+                note(threadId, cleared)
+                bb.realtime.publish(LabelsChanged, js.Dynamic.literal("threadId" -> threadId))
+              }
+            case _ =>
+              note(threadId, own)
+              Future.unit
+        yield ()
 
   def rows(): Future[js.Dynamic] =
     store.snapshot().map { snap =>
@@ -111,7 +138,7 @@ def plugin(bb: BbApi): Unit =
     Js.optStr(input.threadId) match
       case None           => failed("threadId is required")
       case Some(threadId) =>
-        LabelEdit.parse(threadId, typed(input.goal), typed(input.value), typedList(input.blockedBy)) match
+        LabelEdit.parse(threadId, typed(input.goal), typed(input.value), typedList(input.blockedBy), typed(input.myMove)) match
           case Left(message) => failed(message)
           case Right(edit)   => service.edit(threadId, edit).map { case (own, effective) => result(threadId, own, effective) }
 
@@ -144,11 +171,21 @@ def plugin(bb: BbApi): Unit =
   bb.events.on("experimental_thread.parentChanged", _ => bb.realtime.publish(LabelsChanged, js.Dynamic.literal()))
   bb.events.on("thread.created", _ => bb.realtime.publish(LabelsChanged, js.Dynamic.literal()))
 
+  // A user message to a thread with a pending "my move" clears it. The debounced per-thread event covers typed messages and steers alike.
+  val _ = service.moves.seed().recover { case e => bb.log.warn(s"could not read pending moves: ${e.getMessage}") }
+  bb.events.on(
+    "experimental_thread.events",
+    payload =>
+      Js.optStr(payload.thread.id).foreach { id =>
+        service.moves.reconcile(id).recover { case e => bb.log.warn(s"could not reconcile my move for $id: ${e.getMessage}") }
+      }
+  )
+
   bb.agents.registerTool(
     js.Dynamic.literal(
       "name"        -> "goals_set_label",
       "description" ->
-        ("Set the goal a bb thread serves, how big a lever it is for that goal, or which threads it is waiting on. " +
+        ("Set the goal a bb thread serves, how big a lever it is for that goal, which threads it is waiting on, or what the user still owes it. " +
           "Goals: B billable client work, C client work not billable, P product or future income, S sanity, " +
           "M maintainer obligations, F fun. Value 1 is the biggest lever within its goal, 3 the smallest. " +
           "Omitted fields are left as they are; \"none\" clears a field. Defaults to the current thread."),
@@ -177,6 +214,12 @@ def plugin(bb: BbApi): Unit =
             "type"        -> "array",
             "items"       -> js.Dynamic.literal("type" -> "string"),
             "description" -> "The complete list of thread ids this thread waits on; an empty list clears it."
+          ),
+          "myMove" -> js.Dynamic.literal(
+            "type"        -> "string",
+            "enum"        -> js.Array("quick", "focus", "later", "none"),
+            "description" -> ("What the user still owes this thread: quick (a short answer or decision), focus (real focused time), " +
+              "later (nothing now, more to prompt later), or none. Clears by itself when the user next writes to the thread.")
           )
         ),
         "additionalProperties" -> false
@@ -186,7 +229,8 @@ def plugin(bb: BbApi): Unit =
           "threadId"  -> Js.optStr(params.threadId).orElse(Js.optStr(context.threadId)).orNull,
           "goal"      -> params.goal,
           "value"     -> params.value,
-          "blockedBy" -> params.blockedBy
+          "blockedBy" -> params.blockedBy,
+          "myMove"    -> params.myMove
         )
         editFrom(input)
           .map(out => Js.optStr(out.text).getOrElse(""))
@@ -205,8 +249,8 @@ def plugin(bb: BbApi): Unit =
           .literal("name" -> "show", "summary" -> "Print a thread's own and effective label", "usage" -> "bb goals show [thread-id]"),
         js.Dynamic.literal(
           "name" -> "set",
-          "summary" -> "Set a thread's goal (B C P S M F or none), value (1 2 3 or none), or blockers (comma-separated thread ids, or none)",
-          "usage" -> "bb goals set [thread-id] [--goal X] [--value N] [--blocked-by ids]"
+          "summary" -> "Set a thread's goal (B C P S M F or none), value (1 2 3 or none), blockers (comma-separated thread ids, or none), or my move (quick, focus, later, or none)",
+          "usage" -> "bb goals set [thread-id] [--goal X] [--value N] [--blocked-by ids] [--my-move quick|focus|later|none]"
         ),
         js.Dynamic
           .literal("name" -> "list", "summary" -> "Print every open thread's effective label, one per line", "usage" -> "bb goals list"),
@@ -224,7 +268,7 @@ def plugin(bb: BbApi): Unit =
 
 private object Cli:
   private val Usage =
-    "Usage: bb goals show [thread-id] | set [thread-id] [--goal X] [--value N] [--blocked-by ids] | list | import <file.csv>"
+    "Usage: bb goals show [thread-id] | set [thread-id] [--goal X] [--value N] [--blocked-by ids] [--my-move quick|focus|later|none] | list | import <file.csv>"
   private def ok(stdout: String): js.Dynamic   = js.Dynamic.literal("exitCode" -> 0, "stdout" -> (stdout + "\n"))
   private def err(message: String): js.Dynamic = js.Dynamic.literal("exitCode" -> 1, "stderr" -> (message + "\n"))
 
@@ -283,26 +327,28 @@ private object Cli:
     result.recover { case e => err(e.getMessage) }
 
   private def parseSet(args: List[String], currentThread: Option[String]): Either[String, (String, LabelEdit)] =
+    final case class Flags(
+        id: Option[String] = None,
+        goal: Option[String] = None,
+        value: Option[String] = None,
+        blocked: Option[String] = None,
+        move: Option[String] = None
+    )
     @annotation.tailrec
-    def loop(
-        rest: List[String],
-        id: Option[String],
-        goal: Option[String],
-        value: Option[String],
-        blocked: Option[String]
-    ): Either[String, (Option[String], Option[String], Option[String], Option[String])] =
+    def loop(rest: List[String], f: Flags): Either[String, Flags] =
       rest match
-        case "--goal" :: g :: tail                                  => loop(tail, id, Some(g), value, blocked)
-        case "--value" :: v :: tail                                 => loop(tail, id, goal, Some(v), blocked)
-        case "--blocked-by" :: b :: tail                            => loop(tail, id, goal, value, Some(b))
-        case flag :: Nil if flag.startsWith("--")                   => Left(s"$flag requires a value")
-        case other :: tail if id.isEmpty && !other.startsWith("--") => loop(tail, Some(other), goal, value, blocked)
-        case other :: _                                             => Left(s"unexpected argument '$other'\n$Usage")
-        case Nil                                                    => Right((id, goal, value, blocked))
-    loop(args, None, None, None, None).flatMap { case (id, goal, value, blocked) =>
-      id.orElse(currentThread).toRight("No thread given and no current thread.").flatMap { threadId =>
-        val blockedBy = blocked.map(b => if b.equalsIgnoreCase("none") then Nil else b.split(",").toList)
-        LabelEdit.parse(threadId, goal, value, blockedBy).flatMap { edit =>
+        case "--goal" :: g :: tail                                    => loop(tail, f.copy(goal = Some(g)))
+        case "--value" :: v :: tail                                   => loop(tail, f.copy(value = Some(v)))
+        case "--blocked-by" :: b :: tail                              => loop(tail, f.copy(blocked = Some(b)))
+        case "--my-move" :: m :: tail                                 => loop(tail, f.copy(move = Some(m)))
+        case flag :: Nil if flag.startsWith("--")                     => Left(s"$flag requires a value")
+        case other :: tail if f.id.isEmpty && !other.startsWith("--") => loop(tail, f.copy(id = Some(other)))
+        case other :: _                                               => Left(s"unexpected argument '$other'\n$Usage")
+        case Nil                                                      => Right(f)
+    loop(args, Flags()).flatMap { f =>
+      f.id.orElse(currentThread).toRight("No thread given and no current thread.").flatMap { threadId =>
+        val blockedBy = f.blocked.map(b => if b.equalsIgnoreCase("none") then Nil else b.split(",").toList)
+        LabelEdit.parse(threadId, f.goal, f.value, blockedBy, f.move).flatMap { edit =>
           if edit.isEmpty then Left(s"Nothing to set.\n$Usage") else Right(threadId -> edit)
         }
       }
