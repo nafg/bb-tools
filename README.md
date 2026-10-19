@@ -9,6 +9,9 @@ Tools around [bb](https://github.com/get-bb/bb).
 - `bb-plugin-agentmail/` — bb plugin (written in Scala.js) that lets agent
   threads send email via [AgentMail](https://agentmail.to) and routes replies
   back into the thread that sent them.
+- `bb-plugin-billing/` — bb plugin (written in Scala.js) that bills recorded
+  thread attention to Zoho Books: map threads to projects and tasks, review
+  each week's time and overlaps, push time entries, and report per client.
 - `bb-plugin-converse/` — bb plugin (written in Scala.js) for two-way voice
   conversations with agent threads: continuous listening with VAD,
   transcription into the thread, and spoken replies with barge-in.

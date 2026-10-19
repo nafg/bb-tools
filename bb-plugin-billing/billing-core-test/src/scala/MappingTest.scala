@@ -1,0 +1,49 @@
+package billingcore
+
+class MappingTest extends munit.FunSuite:
+  private val acme   = ZohoTarget("p1", "Acme", "t1", "Development", "c1", "Acme Inc")
+  private val globex = ZohoTarget("p2", "Globex", "t2", "Support", "c2", "Globex Corp")
+
+  test("a thread's own entry wins"):
+    val entries: String => MappingEntry = { case "child" => MappingEntry.Assigned(acme); case _ => MappingEntry.Absent }
+    assertEquals(
+      Mapping.resolve("child", Seq("parent", "root"), entries, Some(globex)),
+      Resolved(Billability.Billable(acme), Some(MappingSource.Thread("child")))
+    )
+
+  test("an absent entry inherits from the nearest ancestor before the project default"):
+    val entries: String => MappingEntry = { case "root" => MappingEntry.Assigned(acme); case _ => MappingEntry.Absent }
+    assertEquals(
+      Mapping.resolve("child", Seq("parent", "root"), entries, Some(globex)),
+      Resolved(Billability.Billable(acme), Some(MappingSource.Thread("root")))
+    )
+
+  test("an explicit null stops inheritance and the project default"):
+    val entries: String => MappingEntry = {
+      case "parent" => MappingEntry.Unbillable
+      case "root"   => MappingEntry.Assigned(acme)
+      case _        => MappingEntry.Absent
+    }
+    assertEquals(
+      Mapping.resolve("child", Seq("parent", "root"), entries, Some(globex)),
+      Resolved(Billability.NotBillable, Some(MappingSource.Thread("parent")))
+    )
+
+  test("with no entry anywhere the project default applies"):
+    assertEquals(
+      Mapping.resolve("child", Seq("parent"), _ => MappingEntry.Absent, Some(globex)),
+      Resolved(Billability.Billable(globex), Some(MappingSource.Project))
+    )
+
+  test("no entry anywhere and no project default means not billable"):
+    assertEquals(
+      Mapping.resolve("child", Seq("parent"), _ => MappingEntry.Absent, None),
+      Resolved(Billability.NotBillable, None)
+    )
+
+  test("a project default exists only for a bb project with exactly one Zoho project"):
+    val lookup: (String, String) => Option[ZohoTarget] = (p, t) => Option.when(p == "p1" && t == "t1")(acme)
+    assertEquals(ProjectMapping.default(Seq(ProjectZoho("p1", "t1")), lookup), Some(acme))
+    assertEquals(ProjectMapping.default(Seq(ProjectZoho("p1", "t1"), ProjectZoho("p2", "t2")), lookup), None)
+    assertEquals(ProjectMapping.default(Nil, lookup), None)
+    assertEquals(ProjectMapping.default(Seq(ProjectZoho("p9", "t9")), lookup), None)

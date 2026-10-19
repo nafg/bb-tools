@@ -54,6 +54,43 @@ projects:
     dependencies:
     - com.github.japgolly.scalajs-react::core:4.0.0
     folder: ./bb-plugin-agentmail/agentmail-app
+  billing:
+    dependsOn:
+    - activity-core
+    - bb-plugin-facades
+    - billing-core
+    extends:
+    - template-common
+    - template-js
+    folder: ./bb-plugin-billing/billing
+  billing-core:
+    cross:
+      jvm3:
+        extends:
+        - template-common
+        - template-jvm
+      js3:
+        extends:
+        - template-common
+        - template-js
+    folder: ./bb-plugin-billing/billing-core
+  billing-core-test:
+    dependsOn: billing-core
+    extends:
+    - template-common
+    - template-jvm
+    isTestProject: true
+    dependencies:
+    - org.scalameta::munit:1.1.1
+    folder: ./bb-plugin-billing/billing-core-test
+  billing-app:
+    dependsOn: billing-core
+    extends:
+    - template-common
+    - template-js
+    dependencies:
+    - com.github.japgolly.scalajs-react::core:4.0.0
+    folder: ./bb-plugin-billing/billing-app
   converse:
     dependsOn:
     - bb-plugin-facades

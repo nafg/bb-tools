@@ -1,0 +1,401 @@
+798
+- main :
+      - main :
+            - button "Scroll to top"
+            - generic:
+              - paragraph : Billing
+                - button "Close pane"  [cursor=pointer]
+                - button "Show right panel"  [cursor=pointer]
+              - button "To bill"
+              - button "Projects"
+              - button "Submissions"
+              - button "Client report"
+                - generic : "bb records when each thread has your attention: speaking, typing, or reading it. Nothing is logged by hand. A stretch of recording is billed 
+                  - generic : "1"
+                    - generic : Connect Zoho Books
+                    - generic : Connected. Days run midnight to midnight in America/New_York.
+                  - generic : "2"
+                    - generic : Say which Zoho projects each bb project bills to
+                      - text: 7 of 26 bb projects with recent time have Zoho projects.
+                      - button "Set them up on the Projects tab"
+                      - text: .
+                  - generic : "3"
+                    - generic : Summaries
+                    - generic : "\"Write summaries\" in a submission has a model describe each stretch of work in a hidden thread; the entry notes join those lines. The s
+                - generic : Archived client threads to settle (10)
+                - generic : "Archiving ends a task. Each of these still has recorded time no submission covers: bill it, or mark it settled without billing."
+                    - button "Consolidate the 31 kept write-ups from the group SMS chat threads"
+                    - text: "chesednow; LRBCOL: ChesedNow LRBCOL / Coding"
+                    - generic : 5h 55m unbilled, 2h 25m already in 2 submissions
+                    - button "Reviewing below ↓" [active]
+                    - 'button "MR: upgrade Mill" '
+                    - text: "chesednow - database; LRBCOL: ChesedNow LRBCOL / Coding"
+                    - generic : 49m unbilled, nothing sent before
+                    - button "Review and bill…"
+                    - button "Entrance Group workspaces for volunteer group SMS chat"
+                    - text: "chesednow - infrastructure; LRBCOL: ChesedNow LRBCOL / Coding"
+                    - generic : 47m unbilled, nothing sent before
+                    - button "Review and bill…"
+                    - 'button "database: plan schema for group SMS chat" '
+                    - text: "chesednow - database; LRBCOL: ChesedNow LRBCOL / Coding"
+                    - generic : 45m unbilled, nothing sent before
+                    - button "Review and bill…"
+                    - 'button "config: plan config types for group SMS chat" '
+                    - text: "chesednow - config; LRBCOL: ChesedNow LRBCOL / Coding"
+                    - generic : 40m unbilled, nothing sent before
+                    - button "Review and bill…"
+                    - 'button "Group SMS chat: testing approach (business-requirement level)" '
+                    - text: "chesednow; LRBCOL: ChesedNow LRBCOL / Coding"
+                    - generic : 12m unbilled, 0m already in 1 submission
+                    - button "Review and bill…"
+                    - 'button "MR: bump Scala 3 to 3.9.0" '
+                    - text: "chesednow - database; LRBCOL: ChesedNow LRBCOL / Coding"
+                    - generic : 5m unbilled, nothing sent before
+                    - button "Review and bill…"
+                    - button "Add .bb-env-teardown.sh that shuts down Mill"
+                    - text: "chesednow - database; LRBCOL: ChesedNow LRBCOL / Coding"
+                    - generic : 1m unbilled, nothing sent before
+                    - button "Review and bill…"
+                    - button "Add .bb-env-teardown.sh that shuts down Mill"
+                    - text: "chesednow - infrastructure; LRBCOL: ChesedNow LRBCOL / Coding"
+                    - generic : under a minute unbilled, nothing sent before
+                    - button "Review and bill…"
+                    - button "Add balance column to members"
+                    - text: "mikvahbook - app; Rabbi Schachter: Mikvahbook / Coding"
+                    - generic : under a minute unbilled, nothing sent before
+                    - button "Review and bill…"
+                - generic : Recent activity
+                - generic : Every send to Zoho and every "mark settled", newest first. Undo deletes the Zoho entries it created and makes the time unbilled again.
+                    - button "Consolidate the 31 kept write-ups from the group SMS chat threads"
+                    - text: "Oct 26, 13:37: sent Consolidate the 31 kept write-ups from t from Oct 8, 21:14 to Oct 8, 22:23: Thu 2026-10-08 39m (entry 1175410000015069003
+                  - button "Undo this send"
+                    - button "Consolidate the 31 kept write-ups from the group SMS chat threads"
+                    - text: "Oct 26, 04:46: sent thr_reu57vwwuj from Oct 8, 16:54 to Oct 8, 21:05; Consolidate the 31 kept write-ups from t from Oct 8, 16:54 to Oct 8, 21
+                  - button "Undo this send"
+                    - button "Implement group text chat"
+                    - text: "Oct 21, 22:01: sent per day, before submissions recorded their stretches: Mon 2026-10-19 3m (entry 1175410000015049002)"
+                  - button "Undo this send"
+                  - generic : "Bill: Consolidate the 31 kept write-ups from the group SMS chat threads"
+                  - button "Close"
+                - generic : "Reviewing. Nothing is sent until you press Send: 32 stretches (15 struck out), 6h 07m to bill plus 0m shared time awaiting a decision, up to 
+                    - generic : Where you stand
+                      - generic : "Sent or settled before, newest first; each can be undone on the Recent activity card:"
+                      - list :
+                        - listitem : "Sent to Zoho on Oct 26, 13:37, Consolidate the 31 kept write-ups from t from Oct 8, 21:14 to Oct 8, 22:23: Thu 2026-10-08 39m (entry
+                        - listitem : "Sent to Zoho on Oct 26, 04:46, Group SMS chat: testing approach (busine from Oct 8, 16:54 to Oct 8, 21:05; Consolidate the 31 kept w
+                    - generic : This draft covers 32 stretches (15 struck out), 6h 07m to bill plus 0m shared time awaiting a decision, up to Oct 26, 13:48.
+                    - generic : "Bills to LRBCOL: ChesedNow LRBCOL / Coding"
+                      - generic : Up to
+                      - textbox "Up to" : 2026-10-26T13:48
+                    - button "Now"
+                    - button "When archived"
+                      - checkbox "Include subthreads that bill to the same place" [checked]
+                      - generic : Include subthreads that bill to the same place
+                    - generic : days in America/New_York
+                  - generic : "Covers: Consolidate the 31 kept write-ups from the group SMS chat threads; Group SMS chat: testing approach (business-requirement level)"
+                      - generic : What you did (32 stretches (15 struck out), 6h 07m to bill plus 0m shared time awaiting a decision)
+                      - button "Write summaries"
+                    - generic : Each line is one stretch you spent on the thread. "Write summaries" has a model describe the stretches that only show your first message (
+                          - cell "Wed 10-07 17:53–18:09"
+                          - cell "16m"
+                          - cell "The consolidation of the 31 group-chat write-ups was in progress, with the developer reading the drafts. No decisions or changes were re
+                            - text: The consolidation of the 31 group-chat write-ups was in progress, with the developer reading the drafts. No decisions or changes were 
+                            - group :
+                              - generic "nothing said or done in this stretch (reading, or speaking elsewhere)"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Wed 10-07 18:17–18:18"
+                          - cell "1m"
+                          - cell "Consolidation of the group-chat write-ups continued while the developer reviewed the drafts. No decisions or changes were recorded in th
+                            - text: Consolidation of the group-chat write-ups continued while the developer reviewed the drafts. No decisions or changes were recorded in 
+                            - group :
+                              - generic "nothing said or done in this stretch (reading, or speaking elsewhere)"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Wed 10-07 19:27–20:04"
+                          - cell "37m"
+                          - 'cell "Reframed the group-chat duplicate problem: a duplicate entry for one person is a code fix, while one number shared by several people is
+                            - text: "Reframed the group-chat duplicate problem: a duplicate entry for one person is a code fix, while one number shared by several people 
+                            - group :
+                              - generic "13 from you, 10 replies, 6 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Wed 10-07 20:06–21:06"
+                          - cell "1h 00m"
+                          - 'cell "Settled the testing approach for group chat: tests state behavior at the business level, with current behavior recorded first and later
+                            - text: "Settled the testing approach for group chat: tests state behavior at the business level, with current behavior recorded first and lat
+                            - group :
+                              - generic "55 from you, 61 replies, 41 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Wed 10-07 21:06–21:22"
+                          - cell "15m"
+                          - 'cell "Reshaped the test-harness plan around one objective: tests that specify every message the system sends, on any channel. The work was sp
+                            - text: "Reshaped the test-harness plan around one objective: tests that specify every message the system sends, on any channel. The work was 
+                            - group :
+                              - generic "13 from you, 13 replies, 1 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Wed 10-07 21:26–21:27"
+                          - cell "0m"
+                          - cell "Stopped time tracking for the group-chat organizing work.(Consolidate the 31 kept write-ups from t)" :
+                            - text: Stopped time tracking for the group-chat organizing work.(Consolidate the 31 kept write-ups from t)
+                            - group :
+                              - generic "1 from you, 1 replies, 1 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Thu 10-08 00:41–01:09"
+                          - cell "28m"
+                          - 'cell "Reorganized the group-chat findings for review: the 34 consolidated files were reviewed, and the next page was planned as already-decid
+                            - text: "Reorganized the group-chat findings for review: the 34 consolidated files were reviewed, and the next page was planned as already-dec
+                            - group :
+                              - generic "25 from you, 35 replies, 48 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Thu 10-08 01:14–01:55"
+                          - cell "40m"
+                          - cell "Made Entrance's campaign_id optional so texts with a null value are no longer rejected, committed as 3802134cc4 without pushing. Reviewe
+                            - text: Made Entrance's campaign_id optional so texts with a null value are no longer rejected, committed as 3802134cc4 without pushing. Revie
+                            - group :
+                              - generic "44 from you, 43 replies, 27 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Thu 10-08 02:02–02:47"
+                          - cell "44m"
+                          - 'cell "Renamed the group-number check to isInGroupNumberPool and removed the comment it needed. Reshaped incoming SMS handling so one path han
+                            - text: "Renamed the group-number check to isInGroupNumberPool and removed the comment it needed. Reshaped incoming SMS handling so one path h
+                            - group :
+                              - generic "38 from you, 38 replies, 17 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Thu 10-08 02:54–03:47"
+                          - cell "53m"
+                          - cell "Continued the group-number refactor; the developer rejected passing the number pool in as a parameter. Committed 57d3884c23 so a person'
+                            - text: Continued the group-number refactor; the developer rejected passing the number pool in as a parameter. Committed 57d3884c23 so a perso
+                            - group :
+                              - generic "49 from you, 53 replies, 47 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Thu 10-08 03:54–03:58"
+                          - cell "4m"
+                          - 'cell "Clarified how send failures are recorded: each sender logs a failed recipient and moves on, and a message is marked succeeded whenever 
+                            - text: "Clarified how send failures are recorded: each sender logs a failed recipient and moves on, and a message is marked succeeded wheneve
+                            - group :
+                              - generic "5 from you, 5 replies, 0 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Thu 10-08 15:24–15:26"
+                          - cell "1m"
+                          - cell "Made the group-three review page interactive, with answer choices, recommended options, notes and a copy-to-clipboard summary. The first
+                            - text: Made the group-three review page interactive, with answer choices, recommended options, notes and a copy-to-clipboard summary. The fir
+                            - group :
+                              - generic "1 from you, 2 replies, 0 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Thu 10-08 16:14–16:19"
+                          - cell "4m"
+                          - 'cell "Applied the group-three decisions: a bug task, 165, was filed for failed sends recorded only in the logs, and task-009.01 now depends o
+                            - text: "Applied the group-three decisions: a bug task, 165, was filed for failed sends recorded only in the logs, and task-009.01 now depends
+                            - group :
+                              - generic "2 from you, 3 replies, 4 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Thu 10-08 16:25–16:39"
+                          - cell "13m"
+                          - 'cell "Regrouped the message-queue bugs: the unreadable-message bug moved out of the performance task and, with the oversized-message bug, sit
+                            - text: "Regrouped the message-queue bugs: the unreadable-message bug moved out of the performance task and, with the oversized-message bug, s
+                            - group :
+                              - generic "10 from you, 12 replies, 9 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Thu 10-08 16:45–16:54"
+                          - cell "9m"
+                          - 'cell "Applied group-seven decisions: task 021 was narrowed to the GitLab token rotation, a deploy release-notes header bug was filed as task 
+                            - text: "Applied group-seven decisions: task 021 was narrowed to the GitLab token rotation, a deploy release-notes header bug was filed as tas
+                            - group :
+                              - generic "8 from you, 13 replies, 21 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "undo"
+                          - cell "Fri 10-09 00:08–00:09"
+                          - cell "1m"
+                          - cell "Confirmed from the parent work that the rebased zio-app branch passes a full compile at 678b8f23cb, though it lacks six recent master co
+                            - text: Confirmed from the parent work that the rebased zio-app branch passes a full compile at 678b8f23cb, though it lacks six recent master 
+                            - group :
+                              - generic "1 from you, 2 replies, 0 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 00:10–00:22"
+                          - cell "12m"
+                          - 'cell "Finalized the group-chat specification: Backlog document 11 and tasks 150 to 157 were committed locally, with spelling standardized to 
+                            - text: "Finalized the group-chat specification: Backlog document 11 and tasks 150 to 157 were committed locally, with spelling standardized t
+                            - group :
+                              - generic "9 from you, 17 replies, 23 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 00:23–00:23"
+                          - cell "0m"
+                          - cell "Asked for confirmation that archived people cannot send to or receive group messages, to be implemented if the code did not already enfo
+                            - text: Asked for confirmation that archived people cannot send to or receive group messages, to be implemented if the code did not already en
+                            - group :
+                              - generic "1 from you, 0 replies, 0 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 00:28–00:46"
+                          - cell "18m"
+                          - cell "Moved the archived-person and excluded-sender filters for group recipients out of memory and into the database query, and confirmed the 
+                            - text: Moved the archived-person and excluded-sender filters for group recipients out of memory and into the database query, and confirmed th
+                            - group :
+                              - generic "17 from you, 26 replies, 23 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 00:52–01:10"
+                          - cell "17m"
+                          - cell "Reviewed the eight unpushed user-facing commits and reworded three behavior changes (archived people, administrator-only role edits, tex
+                            - text: Reviewed the eight unpushed user-facing commits and reworded three behavior changes (archived people, administrator-only role edits, t
+                            - group :
+                              - generic "15 from you, 25 replies, 20 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 01:16–01:53"
+                          - cell "36m"
+                          - 'cell "Changed release notes to git trailers: user-facing commits carry Changelog-Type and Changelog trailers, the publishing script reads the
+                            - text: "Changed release notes to git trailers: user-facing commits carry Changelog-Type and Changelog trailers, the publishing script reads t
+                            - group :
+                              - generic "25 from you, 36 replies, 21 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 01:58–02:08"
+                          - cell "10m"
+                          - 'cell "Worked out a simpler release design: build the Docker image in the release job after the tag exists, reusing build artifacts, so the ve
+                            - text: "Worked out a simpler release design: build the Docker image in the release job after the tag exists, reusing build artifacts, so the 
+                            - group :
+                              - generic "6 from you, 6 replies, 3 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 02:15–02:38"
+                          - cell "22m"
+                          - cell "Examined how production runs the app container and chose JDK_JAVA_OPTIONS for runtime options, since it works with both sbt-built and Mi
+                            - text: Examined how production runs the app container and chose JDK_JAVA_OPTIONS for runtime options, since it works with both sbt-built and 
+                            - group :
+                              - generic "13 from you, 18 replies, 18 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 03:24–03:25"
+                          - cell "1m"
+                          - 'cell "Settled the release job''s order: the tag is created locally in the job checkout first so the version and merged tags are correct, then
+                            - text: "Settled the release job's order: the tag is created locally in the job checkout first so the version and merged tags are correct, the
+                            - group :
+                              - generic "1 from you, 1 replies, 0 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 03:34–03:35"
+                          - cell "0m"
+                          - cell "Pushed the mill-release-pipeline branch with the developer entering the SSH passphrase, and began the release script and docs while its 
+                            - text: Pushed the mill-release-pipeline branch with the developer entering the SSH passphrase, and began the release script and docs while it
+                            - group :
+                              - generic "1 from you, 2 replies, 1 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 04:21–04:24"
+                          - cell "3m"
+                          - 'cell "Clarified the release plan: on master the release job is manual and receives its version from the release script, and the branch''s tes
+                            - text: "Clarified the release plan: on master the release job is manual and receives its version from the release script, and the branch's te
+                            - group :
+                              - generic "3 from you, 3 replies, 0 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 05:06–05:07"
+                          - cell "0m"
+                          - cell "Confirmed the message queues were clear, then pushed infrastructure's master commits with the developer entering the SSH passphrase.(Con
+                            - text: Confirmed the message queues were clear, then pushed infrastructure's master commits with the developer entering the SSH passphrase.(C
+                            - group :
+                              - generic "1 from you, 2 replies, 5 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 05:12–05:15"
+                          - cell "2m"
+                          - cell "Considered how to organize the 20 commits on the Mill release branch. The conclusion was to split by unit of behavior change so each com
+                            - text: Considered how to organize the 20 commits on the Mill release branch. The conclusion was to split by unit of behavior change so each c
+                            - group :
+                              - generic "2 from you, 3 replies, 1 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 05:25–05:33"
+                          - cell "8m"
+                          - 'cell "Analyzed why What''s New is broken: building the image after tagging fixes its version list, but the page still reads release notes fro
+                            - text: "Analyzed why What's New is broken: building the image after tagging fixes its version list, but the page still reads release notes fr
+                            - group :
+                              - generic "4 from you, 5 replies, 1 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 05:38–06:09"
+                          - cell "31m"
+                          - cell "Created a fine-grained replacement GitLab token limited to disp and stored it once in the shared Pulumi secret, committed in infrastruct
+                            - text: Created a fine-grained replacement GitLab token limited to disp and stored it once in the shared Pulumi secret, committed in infrastru
+                            - group :
+                              - generic "26 from you, 38 replies, 95 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 06:15–06:59"
+                          - cell "43m"
+                          - cell "Made What's New read its GitLab token through a layer supplied by AppCake from the shared secret, instead of each organization's config.
+                            - text: Made What's New read its GitLab token through a layer supplied by AppCake from the shared secret, instead of each organization's confi
+                            - group :
+                              - generic "45 from you, 73 replies, 87 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 07:21–07:31"
+                          - cell "9m"
+                          - cell "Reviewed and corrected the unpushed task for reloading outdated browser code after deployment (TASK-173), then pushed master (72aaaf7119
+                            - text: Reviewed and corrected the unpushed task for reloading outdated browser code after deployment (TASK-173), then pushed master (72aaaf71
+                            - group :
+                              - generic "15 from you, 23 replies, 18 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 09:54–10:04"
+                          - cell "9m"
+                          - cell "Diagnosed What's New's error as the running 53.3.1 still using the expired per-organization token, which the deploy would fix. Timed the
+                            - text: Diagnosed What's New's error as the running 53.3.1 still using the expired per-organization token, which the deploy would fix. Timed t
+                            - group :
+                              - generic "9 from you, 23 replies, 30 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 10:16–10:17"
+                          - cell "0m"
+                          - cell "Committed a local CI fix separating the two build mill tasks with a plus sign, to be pushed after the deploy.(Consolidate the 31 kept wr
+                            - text: Committed a local CI fix separating the two build mill tasks with a plus sign, to be pushed after the deploy.(Consolidate the 31 kept 
+                            - group :
+                              - generic "1 from you, 1 replies, 1 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 15:54–15:57"
+                          - cell "3m"
+                          - cell "Ran the infrastructure job that writes the new GitLab token into the shared secret and updates the portal. Fixed a broken local deploy t
+                            - text: Ran the infrastructure job that writes the new GitLab token into the shared secret and updates the portal. Fixed a broken local deploy
+                            - group :
+                              - generic "3 from you, 5 replies, 2 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 16:05–16:05"
+                          - cell "0m"
+                          - cell "Confirmed What's New renders the release notes correctly on 53.4.1. An empty entry for v53.4.1 appeared because it had no Changelog trai
+                            - text: Confirmed What's New renders the release notes correctly on 53.4.1. An empty entry for v53.4.1 appeared because it had no Changelog tr
+                            - group :
+                              - generic "0 from you, 1 replies, 0 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 16:15–16:17"
+                          - cell "1m"
+                          - cell "Closed TASK-171, which the release job's GitLab release creation resolves, and pushed three disp commits (4444b71ea1 to 92cedf02ee), inc
+                            - text: Closed TASK-171, which the release job's GitLab release creation resolves, and pushed three disp commits (4444b71ea1 to 92cedf02ee), i
+                            - group :
+                              - generic "2 from you, 6 replies, 2 actions"  [cursor=pointer]
+                            - button "up to here"
+                            - button "✕"
+                          - cell "Fri 10-09 16:48–16:54"
+                          - cell "5m"
+                          - cell "Cleared the description of v53.4.2 on GitLab, which held a What's New entry describing the page's own bookkeeping; the filter now hides 
+                            - text: Cleared the description of v53.4.2 on GitLab, which held a What's New entry describing the page's own bookkeeping; the filter now hide
+                            - group :
+                              - generic "6 from you, 10 replies, 9 actions"  [cursor=pointer]
+                            - button "up to here"
