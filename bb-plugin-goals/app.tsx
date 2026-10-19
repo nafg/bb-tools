@@ -7,6 +7,7 @@ import * as Popover from "@radix-ui/react-popover";
 import {
   definePluginApp,
   experimental_THREAD_ACTION_GROUPS,
+  experimental_ThreadStatusGlyph as ThreadStatusGlyph,
   experimental_useSidebarThreads,
   ThreadChat,
   ThreadTitle,
@@ -15,6 +16,7 @@ import {
   useRpc,
   type PluginNavPanelProps,
   type PluginRpcMethodContract,
+  type PluginSidebarThread,
   type PluginThreadActionRegistration,
   type StandardSchemaV1,
 } from "@get-bb/plugin-sdk/app";
@@ -505,13 +507,52 @@ const byImportance = (a: OverviewThread, b: OverviewThread): number =>
 
 const PANEL_PATH = "goals";
 
+/**
+ * What a thread is doing right now, from bb's live sidebar view. "needs-input",
+ * "failed", and "waiting" are the states bb paints its attention dot for
+ * (indicator waiting-for-input, unread-error, unread-success), which is what
+ * "waiting on you" means here; "working" is a running agent.
+ */
+type LiveState = "working" | "needs-input" | "failed" | "waiting" | "idle";
+
+const liveStateOf = (t: PluginSidebarThread | undefined): LiveState => {
+  if (!t) return "idle";
+  if (t.hasPendingInteraction || t.indicator === "waiting-for-input") return "needs-input";
+  if (t.status === "active" || t.status === "starting" || t.status === "stopping" || t.indicator === "runtime") return "working";
+  if (t.indicator === "unread-error" || (t.status === "error" && t.isUnread)) return "failed";
+  if (t.indicator === "unread-success" || t.indicator === "queued-failed" || t.isUnread) return "waiting";
+  return "idle";
+};
+const isWaitingOnYou = (state: LiveState): boolean => state === "needs-input" || state === "failed" || state === "waiting";
+const LIVE_STATE_TEXT: Record<LiveState, string> = {
+  working: "Working",
+  "needs-input": "Needs your input",
+  failed: "Failed, unread",
+  waiting: "Waiting on you",
+  idle: "Idle",
+};
+const FAILED_COLOR = "#e34948";
+
+/** A small marker in a map box's corner: a pulsing ring while working, a solid dot while waiting on you. */
+function LiveMarker({ state, x, y }: { state: LiveState; x: number; y: number }) {
+  if (state === "idle") return null;
+  if (state === "working")
+    return (
+      <circle cx={x} cy={y} r={3.5} fill="none" stroke="currentColor" strokeWidth={1.5}>
+        <animate attributeName="r" values="2.5;4.5;2.5" dur="1.4s" repeatCount="indefinite" />
+        <animate attributeName="stroke-opacity" values="1;0.4;1" dur="1.4s" repeatCount="indefinite" />
+      </circle>
+    );
+  return <circle cx={x} cy={y} r={4} fill={state === "failed" ? FAILED_COLOR : "currentColor"} stroke="white" strokeWidth={1.5} />;
+}
+
 /** The Goals page: bars and the map on the left, and, once a thread is picked, that thread's chat on the right. The picked thread lives
  * in the route's subPath, so a reload keeps it. */
 function GoalsPage({ subPath }: PluginNavPanelProps) {
   const rpc = useRpc<GoalsRpc>();
   const navigate = useBbNavigate();
   const selectedId = /^thr_[a-z0-9]+$/.test(subPath) ? subPath : null;
-  const select = (id: string | null) => navigate.toPluginPanel(PANEL_PATH, { subPath: id ?? "", replace: true });
+  const select = useCallback((id: string | null) => navigate.toPluginPanel(PANEL_PATH, { subPath: id ?? "", replace: true }), [navigate]);
   const dark = useDarkMode();
   const { version } = useLabelState();
   const [window_, setWindow] = useState<Window>("7d");
@@ -519,6 +560,8 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
   const [error, setError] = useState<string | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; thread: OverviewThread } | null>(null);
   const [mapRef, mapSize] = useElementSize<HTMLDivElement>();
+  const sidebar = experimental_useSidebarThreads();
+  const live = useMemo(() => new Map(sidebar.threads.map((t) => [t.id, t])), [sidebar.threads]);
 
   useEffect(() => {
     let cancelled = false;
@@ -568,6 +611,39 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
   const alphaFor = (label: EffectiveLabel | null): number => (!label ? 0.25 : label.value === 1 ? 0.85 : label.value === 2 ? 0.6 : label.value === 3 ? 0.4 : 0.3);
 
   const selected = selectedId ? threadsById.get(selectedId) ?? null : null;
+
+  // Threads waiting on the user: most important first, then the one that has waited longest.
+  const waiting = useMemo(
+    () =>
+      [...threadsById.values()]
+        .filter((t) => isWaitingOnYou(liveStateOf(live.get(t.id))))
+        .sort(
+          (a, b) =>
+            (a.importance ?? Number.POSITIVE_INFINITY) - (b.importance ?? Number.POSITIVE_INFINITY) ||
+            (live.get(a.id)?.latestAttentionAt ?? 0) - (live.get(b.id)?.latestAttentionAt ?? 0) ||
+            a.title.localeCompare(b.title),
+        ),
+    [threadsById, live],
+  );
+  const selectNext = useCallback(() => {
+    if (waiting.length === 0) return;
+    const at = waiting.findIndex((t) => t.id === selectedId);
+    const next = waiting[(at + 1) % waiting.length];
+    if (next) select(next.id);
+  }, [waiting, selectedId, select]);
+  useEffect(() => {
+    // "n" picks the next waiting thread unless the user is typing somewhere.
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "n" || event.metaKey || event.ctrlKey || event.altKey) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.closest("input, textarea, select, [contenteditable]") || target.isContentEditable)) return;
+      event.preventDefault();
+      selectNext();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectNext]);
+  const now = Date.now();
   return (
     <div className="flex h-full min-h-0 flex-row">
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 p-4">
@@ -628,6 +704,47 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
         </table>
       )}
 
+      <details open className="rounded border text-xs">
+        <summary className="flex cursor-pointer items-center gap-2 px-3 py-1.5">
+          <span className="font-medium">Waiting on you ({waiting.length})</span>
+          <span className="text-muted-foreground">most important first, then longest waiting</span>
+          <span className="flex-1" />
+          <button
+            type="button"
+            className={buttonClass}
+            disabled={waiting.length === 0}
+            title="Select the next waiting thread (n)"
+            onClick={(event) => {
+              event.preventDefault();
+              selectNext();
+            }}
+          >
+            Next
+          </button>
+        </summary>
+        {waiting.length > 0 && (
+          <ul className="max-h-40 overflow-auto border-t">
+            {waiting.map((t) => {
+              const row = live.get(t.id);
+              const state = liveStateOf(row);
+              return (
+                <li
+                  key={t.id}
+                  className={`flex cursor-pointer items-center gap-2 px-3 py-1 hover:bg-accent ${t.id === selectedId ? "bg-accent" : ""}`}
+                  onClick={() => select(t.id)}
+                >
+                  {row && <ThreadStatusGlyph indicator={row.indicator} size="compact" />}
+                  <span className="w-8 tabular-nums text-muted-foreground">{t.label ? shortLabel(t.label) : "–"}</span>
+                  <span className="min-w-0 flex-1 truncate">{t.title}</span>
+                  <span className="text-muted-foreground">{LIVE_STATE_TEXT[state]}</span>
+                  {row && <span className="w-14 text-right tabular-nums text-muted-foreground">{formatDuration((now - row.latestAttentionAt) / 1000)}</span>}
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </details>
+
       <div ref={mapRef} className="relative min-h-[320px] flex-1 overflow-hidden rounded border" onMouseLeave={() => setHover(null)}>
         {cells.length > 0 && (
           <svg width={mapSize.width} height={mapSize.height} role="img" aria-label="Threads as nested boxes, grouped by goal">
@@ -662,6 +779,8 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
               const unvalued = thread.label !== null && thread.label.value === null;
               const label = thread.label ? shortLabel(thread.label) : "";
               const lentBest = thread.lent.length > 0 ? thread.lent.reduce((a, b) => ((a.value ?? 2) <= (b.value ?? 2) ? a : b)) : null;
+              const state = liveStateOf(live.get(thread.id));
+              const attention = isWaitingOnYou(state);
               return (
                 <g
                   key={`t${i}`}
@@ -679,11 +798,12 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
                     height={cell.h}
                     fill={color}
                     fillOpacity={alphaFor(thread.label)}
-                    stroke={thread.id === selectedId ? "currentColor" : color}
-                    strokeWidth={thread.id === selectedId ? 2.5 : 1}
+                    stroke={thread.id === selectedId || attention ? "currentColor" : color}
+                    strokeWidth={thread.id === selectedId ? 2.5 : attention ? 2 : 1}
                     strokeDasharray={inherited ? "3 2" : unvalued ? "1 2" : undefined}
                     rx={3}
                   />
+                  {cell.w > 16 && cell.h > 16 && <LiveMarker state={state} x={cell.x + cell.w - 7} y={cell.y + 7} />}
                   {cell.w > 48 && cell.h > 14 && (
                     <text x={cell.x + 4} y={cell.y + 11} fontSize={10} fill="currentColor">
                       <tspan fontWeight={600}>{label || "–"}</tspan>
@@ -733,6 +853,7 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
             <div className="font-medium">{hover.thread.title}</div>
             <div className="text-muted-foreground">{overview?.projects[hover.thread.projectId] ?? hover.thread.projectId}</div>
             <div>{describeLabel(hover.thread.label)}</div>
+            <div>{LIVE_STATE_TEXT[liveStateOf(live.get(hover.thread.id))]}</div>
             <div>{formatDuration(hover.thread.seconds)} of attention in this window</div>
             {hover.thread.lent.length > 0 && (
               <div>Lent: {hover.thread.lent.map((l) => `${l.goal}${l.value ?? ""} from ${threadsById.get(l.fromThreadId)?.title ?? l.fromThreadId}`).join("; ")}</div>
@@ -750,6 +871,7 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
           <table className="mt-2 w-full">
             <thead>
               <tr className="text-left text-muted-foreground">
+                <th className="py-0.5 pr-2 font-normal">State</th>
                 <th className="py-0.5 pr-2 font-normal">Rank</th>
                 <th className="py-0.5 pr-2 font-normal">Label</th>
                 <th className="py-0.5 pr-2 font-normal">Thread</th>
@@ -762,6 +884,12 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
                 .sort(byImportance)
                 .map((t) => (
                   <tr key={t.id} className={`cursor-pointer hover:bg-accent ${t.id === selectedId ? "bg-accent" : ""}`} onClick={() => select(t.id)}>
+                    <td className="py-0.5 pr-2">
+                      <span className="flex items-center gap-1">
+                        {live.get(t.id) && <ThreadStatusGlyph indicator={live.get(t.id)!.indicator} size="compact" />}
+                        {LIVE_STATE_TEXT[liveStateOf(live.get(t.id))]}
+                      </span>
+                    </td>
                     <td className="py-0.5 pr-2 tabular-nums">{t.importance ?? "–"}</td>
                     <td className="py-0.5 pr-2 tabular-nums">{t.label ? shortLabel(t.label) : "–"}</td>
                     <td className="py-0.5 pr-2">{t.title}</td>
