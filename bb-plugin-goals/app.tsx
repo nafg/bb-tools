@@ -655,7 +655,7 @@ function GoalsPage() {
                 <g
                   key={`t${i}`}
                   style={{ cursor: "pointer" }}
-                  onClick={() => navigate.toThread(thread.id)}
+                  onClick={() => navigate.toThread(thread.id, { split: true })}
                   onMouseMove={(event) => {
                     const box = (event.currentTarget.ownerSVGElement as SVGSVGElement).getBoundingClientRect();
                     setHover({ x: event.clientX - box.left, y: event.clientY - box.top, thread });
@@ -750,7 +750,7 @@ function GoalsPage() {
               {[...threadsById.values()]
                 .sort(byImportance)
                 .map((t) => (
-                  <tr key={t.id} className="cursor-pointer hover:bg-accent" onClick={() => navigate.toThread(t.id)}>
+                  <tr key={t.id} className="cursor-pointer hover:bg-accent" onClick={() => navigate.toThread(t.id, { split: true })}>
                     <td className="py-0.5 pr-2 tabular-nums">{t.importance ?? "–"}</td>
                     <td className="py-0.5 pr-2 tabular-nums">{t.label ? shortLabel(t.label) : "–"}</td>
                     <td className="py-0.5 pr-2">{t.title}</td>
