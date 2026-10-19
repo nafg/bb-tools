@@ -350,7 +350,8 @@ def plugin(bb: BbApi): Unit =
         |SELECT id, 'speech', 'backfill', thread_id, at - detector_frames * 32, at, session_id
         |FROM utterances
         |WHERE thread_id != '' AND detector_frames IS NOT NULL AND speech_start_at IS NULL
-        |ORDER BY at""".stripMargin
+        |ORDER BY at""".stripMargin,
+      "ALTER TABLE utterances ADD COLUMN say_again INTEGER"
     )
   )
   val awaitingReplies = AwaitingReplies(db)
@@ -1487,6 +1488,10 @@ def plugin(bb: BbApi): Unit =
                 case RecordingOutcome.NothingSaid          => RecordingStatus.Empty
                 case RecordingOutcome.NotDelivered(reason, _) => RecordingStatus.Failed(reason)
             )
+            outcome match
+              case RecordingOutcome.NotDelivered(_, sayingAgainHelps) =>
+                val _ = db.prepare("UPDATE utterances SET say_again = ? WHERE id = ?").run(if sayingAgainHelps then 1 else 0, id)
+              case _ => ()
             val signalThread = outcome match
               case RecordingOutcome.Delivered(_, Some(created)) => created
               case _                                            => threadId
@@ -1700,6 +1705,7 @@ def plugin(bb: BbApi): Unit =
       "soundCueSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "recentUtterances" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "retryRecording" -> js.Dynamic.literal("input" -> Schema.strings("id" -> 100), "output" -> Schema.passthrough),
+      "recordingOutcomes" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "activitySpans" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "reportPlayback" -> js.Dynamic.literal(
         "input"  -> Schema.stringsWithOptional(Seq("id" -> 100, "threadId" -> 100, "source" -> 20), Seq("sessionId" -> 100)),
@@ -1910,6 +1916,36 @@ def plugin(bb: BbApi): Unit =
           }
         val oldestSeq = db.prepare("SELECT MIN(seq) AS seq FROM activity_spans").get().toOption.map(_.seq).orNull
         Future.successful(js.Dynamic.literal("items" -> items, "oldestSeq" -> oldestSeq)).toJSPromise
+      },
+      "recordingOutcomes" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        // How the given recordings ended, for those that have: the same facts
+        // the utterance-processed signal carries, for a page that missed it.
+        val ids = input.ids.asInstanceOf[js.UndefOr[js.Array[String]]].fold(Vector.empty[String])(_.toVector).take(50)
+        val items = ids.flatMap { id =>
+          db.prepare("SELECT id, status, text, thread_id, project_id, last_error, say_again FROM utterances WHERE id = ?")
+            .get(id)
+            .toOption
+            .flatMap { row =>
+              recordingStatus(row).collect {
+                case RecordingStatus.Sent =>
+                  js.Dynamic.literal(
+                    "recordingId"     -> row.id,
+                    "outcome"         -> "sent",
+                    "text"            -> row.text,
+                    "createdThreadId" -> (if str(row.project_id).nonEmpty then row.thread_id else null)
+                  )
+                case RecordingStatus.Empty => js.Dynamic.literal("recordingId" -> row.id, "outcome" -> "empty")
+                case RecordingStatus.Failed(reason) =>
+                  js.Dynamic.literal(
+                    "recordingId" -> row.id,
+                    "outcome"     -> "failed",
+                    "error"       -> reason,
+                    "sayAgain"    -> (row.say_again == null || row.say_again.asInstanceOf[Int] != 0)
+                  )
+              }
+            }
+        }
+        Future.successful(js.Dynamic.literal("items" -> items.toJSArray)).toJSPromise
       },
       "retryRecording" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val id = str(input.id)

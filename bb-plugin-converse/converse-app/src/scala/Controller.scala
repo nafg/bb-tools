@@ -81,6 +81,30 @@ final class Controller(
   // The session's recordings from capture until their outcome; uploads go up
   // one at a time in capture order, each retried until stored.
   private var outbox: Outbox[PendingUpload] = Outbox.empty
+  // Recordings whose outcome this page has acted on: an outcome arrives by
+  // signal and may also be found by the check below, and is acted on once.
+  private val outcomesActedOn = scala.collection.mutable.Set.empty[String]
+  // A realtime signal is sent once and not kept, so one missed (say, during a
+  // reconnect) would leave a recording unsettled forever; while any is, the
+  // page asks the backend how they ended.
+  private val OutcomeCheckMs       = 4000
+  private var outcomeCheckInFlight = false
+  locally {
+    val _ = setInterval(OutcomeCheckMs) {
+      if sessionId != null && outbox.unsettled.nonEmpty && !outcomeCheckInFlight then
+        outcomeCheckInFlight = true
+        val sess = sessionId
+        rpcCall("recordingOutcomes", js.Dynamic.literal("ids" -> outbox.unsettled.toJSArray)).toFuture.onComplete {
+          case Success(result) if sessionId == sess =>
+            outcomeCheckInFlight = false
+            result.items.asInstanceOf[js.Array[js.Dynamic]].foreach(recordingProcessed)
+          case Success(_) => outcomeCheckInFlight = false
+          case Failure(e) =>
+            outcomeCheckInFlight = false
+            debug(s"recordingOutcomes failed: ${e.getMessage}")
+        }
+    }
+  }
   private var previewDiscard: Boolean             = false
   private var previewSegmentStart: Double         = 0
   private var previewInFlight: Boolean            = false
@@ -588,6 +612,7 @@ final class Controller(
     replyHeld = false
     abandonCapture()
     outbox = Outbox.empty
+    outcomesActedOn.clear()
     if speechDetector != null then
       val detector = speechDetector
       speechDetector = null
@@ -989,7 +1014,15 @@ final class Controller(
     * recordings list).
     */
   private def recordingProcessed(p: js.Dynamic): Unit =
-    p.recordingId.asInstanceOf[js.UndefOr[String]].foreach(id => outbox = outbox.settled(id))
+    val recordingId = p.recordingId.asInstanceOf[js.UndefOr[String]].toOption
+    if !recordingId.exists(outcomesActedOn.contains) then
+      recordingId.foreach { id =>
+        outcomesActedOn += id
+        outbox = outbox.settled(id)
+      }
+      actOnOutcome(p)
+
+  private def actOnOutcome(p: js.Dynamic): Unit =
     val moreComing = outbox.busy
     p.outcome.asInstanceOf[js.UndefOr[String]].getOrElse("") match
       case "sent" =>
