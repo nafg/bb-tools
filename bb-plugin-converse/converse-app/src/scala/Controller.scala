@@ -25,7 +25,11 @@ private final case class PendingUpload(
     route: UtteranceRoute,
     blob: js.Dynamic,
     evidence: js.Dynamic,
-    interrupted: Option[ReplyInterruption.SpeakingReply]
+    interrupted: Option[ReplyInterruption.SpeakingReply],
+    // Wall-clock bounds of the speech itself: when capture began, and the
+    // last frame the detector took for speech.
+    speechStartAt: Double,
+    speechEndAt: Double
 )
 
 final class Controller(
@@ -91,6 +95,8 @@ final class Controller(
   private var utteranceRoute: UtteranceRoute      = null
   // The reply the user cut off by starting this capture, if any.
   private var captureInterrupted: Option[ReplyInterruption.SpeakingReply] = None
+  private var captureStartedAt: Double = 0.0
+  private var lastVoicedAt: Double     = 0.0
   private var interimText: String                 = null
   private var interimSegments: List[String]       = Nil
 
@@ -575,6 +581,7 @@ final class Controller(
 
   private def handleSpeechFrame(frame: SpeechDetectorFrame): Unit =
     currentSpeechProbability = frame.speechProbability
+    if captureActive && frame.speechProbability >= speechProbabilityThreshold then lastVoicedAt = js.Date.now()
     frameCount += 1
     // Silero V5 frames are 32ms; update the UI around 6Hz rather than render
     // for every inference result.
@@ -612,8 +619,10 @@ final class Controller(
           captureActive = false
           stopPreviewRecorder()
           debug(s"utterance captured (${recording.size.asInstanceOf[Double]} bytes)")
+          // Taken now: the next capture may begin before the recording is finished.
+          val (speechStartAt, speechEndAt) = (captureStartedAt, lastVoicedAt)
           finishUtteranceRecorder().foreach { compressed =>
-            enqueueUpload(compressed.getOrElse(recording), evidenceToJs(evidence))
+            enqueueUpload(compressed.getOrElse(recording), evidenceToJs(evidence), speechStartAt, speechEndAt)
           }
           syncReplyHold()
         else backToListening(SessionPhase.Recording)
@@ -629,6 +638,8 @@ final class Controller(
         case Some(route) =>
           utteranceRoute = route
           captureInterrupted = None
+          captureStartedAt = js.Date.now()
+          lastVoicedAt = captureStartedAt
           captureActive = true
           syncReplyHold()
           noteCapture(active = true)
@@ -860,7 +871,7 @@ final class Controller(
     utteranceRecording = null
     if r != null && r.state != "inactive" then r.stop()
 
-  private def enqueueUpload(blob: js.Dynamic, evidence: js.Dynamic): Unit =
+  private def enqueueUpload(blob: js.Dynamic, evidence: js.Dynamic, speechStartAt: Double, speechEndAt: Double): Unit =
     val bytes = blob.size.asInstanceOf[Double]
     if sessionId != null && !UploadLimit.fits(bytes) then
       // The backend would refuse it, and retrying would resend it in full.
@@ -872,7 +883,9 @@ final class Controller(
     else if sessionId != null then
       val route = if utteranceRoute != null then utteranceRoute else UtteranceRoute.ToThread(threadId)
       val recordingId = js.Dynamic.global.crypto.randomUUID().asInstanceOf[String]
-      pendingUploads.enqueue(PendingUpload(recordingId, sessionId, route, blob, evidence, captureInterrupted))
+      pendingUploads.enqueue(
+        PendingUpload(recordingId, sessionId, route, blob, evidence, captureInterrupted, speechStartAt, speechEndAt)
+      )
       uploadNext()
 
   private def uploadNext(): Unit =
@@ -892,6 +905,8 @@ final class Controller(
                     val request = js.Dynamic.literal(
                       "sessionId"   -> sess,
                       "recordingId" -> upload.recordingId,
+                      "speechStartAt" -> upload.speechStartAt,
+                      "speechEndAt"   -> upload.speechEndAt,
                       "mimeType"    -> upload.blob.`type`.asInstanceOf[String],
                       "audioBase64" -> b64,
                       "evidence"    -> upload.evidence,

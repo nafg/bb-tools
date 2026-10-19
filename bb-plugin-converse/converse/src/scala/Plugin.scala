@@ -4,6 +4,8 @@ import bbplugin.*
 import conversecore.{
   UploadLimit,
   RecordingStatus,
+  ActivityKind,
+  ActivitySource,
   RetryBackoff,
   TranscriptSegment,
   TranscriptSegments,
@@ -91,6 +93,11 @@ private final case class ServiceVersionCheck(url: String, expected: String)
   * it is taken to be hung rather than busy.
   */
 private val ServiceHungAfterMs = 60_000.0
+
+/** Activity spans are kept 90 days, independently of the recordings, so a
+  * reader that was down for a while can still catch up; rows are tiny.
+  */
+private val ActivitySpansKeptDays = 90
 
 private val PocketService = ManagedService(
   key = "pocket",
@@ -180,7 +187,9 @@ private final case class ReceivedRecording(
     mimeType: String,
     audioBase64: String,
     detector: Option[DetectorEvidence],
-    notes: List[String]
+    notes: List[String],
+    speechStartAt: Option[Double],
+    speechEndAt: Option[Double]
 )
 
 /** The transcriber called the request itself malformed (400, 413, 415 or
@@ -318,6 +327,18 @@ def plugin(bb: BbApi): Unit =
         |  thread_id TEXT PRIMARY KEY,
         |  session_id TEXT NOT NULL,
         |  previous_assistant_message_id TEXT
+        |)""".stripMargin,
+      "ALTER TABLE utterances ADD COLUMN speech_start_at REAL",
+      "ALTER TABLE utterances ADD COLUMN speech_end_at REAL",
+      """CREATE TABLE IF NOT EXISTS activity_spans (
+        |  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+        |  id TEXT NOT NULL UNIQUE,
+        |  kind TEXT NOT NULL,
+        |  source TEXT NOT NULL,
+        |  thread_id TEXT NOT NULL,
+        |  start_at REAL NOT NULL,
+        |  end_at REAL NOT NULL,
+        |  session_id TEXT
         |)""".stripMargin
     )
   )
@@ -338,8 +359,8 @@ def plugin(bb: BbApi): Unit =
     val _ = db
       .prepare(
         "INSERT INTO utterances (id, at, session_id, thread_id, project_id, mime_type, audio, text, detector_frames, " +
-          "detector_speech_frames, detector_peak_speech_probability, detector_peak_rms, notes, status) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?)"
+          "detector_speech_frames, detector_peak_speech_probability, detector_peak_rms, notes, status, " +
+          "speech_start_at, speech_end_at) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, ?)"
       )
       .run(
         r.id,
@@ -354,7 +375,9 @@ def plugin(bb: BbApi): Unit =
         r.detector.map(_.peakSpeechProbability: js.Any).orNull,
         r.detector.map(_.peakRms: js.Any).orNull,
         js.JSON.stringify(r.notes.toJSArray),
-        RecordingStatus.Received.code
+        RecordingStatus.Received.code,
+        r.speechStartAt.map(t => t: js.Any).orNull,
+        r.speechEndAt.map(t => t: js.Any).orNull
       )
     val _ = db
       .prepare(
@@ -377,6 +400,45 @@ def plugin(bb: BbApi): Unit =
       .run(transcription.text, transcription.transcriber, transcription.segments.orNull, id)
   def setRecordingThread(id: String, threadId: String): Unit =
     val _ = db.prepare("UPDATE utterances SET thread_id = ? WHERE id = ?").run(threadId, id)
+    recordSpeechSpan(id)
+
+  // What the user did and heard, as time spans per thread, for other plugins
+  // to read through the activitySpans RPC.
+  def recordActivitySpan(
+      id: String,
+      kind: ActivityKind,
+      source: ActivitySource,
+      threadId: String,
+      startAt: Double,
+      endAt: Double,
+      sessionId: Option[String]
+  ): Unit =
+    val _ = db
+      .prepare(
+        "INSERT OR IGNORE INTO activity_spans (id, kind, source, thread_id, start_at, end_at, session_id) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?)"
+      )
+      .run(id, kind.code, source.code, threadId, startAt, endAt, sessionId.orNull)
+    val _ = db.prepare("DELETE FROM activity_spans WHERE end_at < ?").run(js.Date.now() - ActivitySpansKeptDays * 86_400_000.0)
+  /** The span of a stored recording's speech, once its thread is known; one
+    * that will start a thread gets it when the thread is started.
+    */
+  def recordSpeechSpan(recordingId: String): Unit =
+    db.prepare("SELECT thread_id, session_id, speech_start_at, speech_end_at FROM utterances WHERE id = ?")
+      .get(recordingId)
+      .toOption
+      .filter(row => str(row.thread_id).nonEmpty && row.speech_start_at != null && row.speech_end_at != null)
+      .foreach { row =>
+        recordActivitySpan(
+          recordingId,
+          ActivityKind.Speech,
+          ActivitySource.Session,
+          str(row.thread_id),
+          row.speech_start_at.asInstanceOf[Double],
+          row.speech_end_at.asInstanceOf[Double],
+          Option(str(row.session_id)).filter(_.nonEmpty)
+        )
+      }
   def recordingStatus(row: js.Dynamic): Option[RecordingStatus] =
     RecordingStatus.fromColumns(row.status.asInstanceOf[String | Null], row.last_error.asInstanceOf[String | Null])
   /** Whether a recording for this thread is stored but not yet transcribed. */
@@ -1617,6 +1679,7 @@ def plugin(bb: BbApi): Unit =
       "soundCueSettings" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "recentUtterances" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "retryRecording" -> js.Dynamic.literal("input" -> Schema.strings("id" -> 100), "output" -> Schema.passthrough),
+      "activitySpans" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "utterance" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "utteranceForMessage" -> js.Dynamic.literal("input" -> Schema.strings("threadId" -> 100, "text" -> 100_000), "output" -> Schema.passthrough),
       "updateSoundCueSettings" -> js.Dynamic.literal(
@@ -1762,12 +1825,42 @@ def plugin(bb: BbApi): Unit =
                     peakRms = e.peakRms.asInstanceOf[Double]
                   )
                 },
-                notes = notesForThread
+                notes = notesForThread,
+                speechStartAt = input.speechStartAt.asInstanceOf[js.UndefOr[Double]].toOption,
+                speechEndAt = input.speechEndAt.asInstanceOf[js.UndefOr[Double]].toOption
               )
             )
+            recordSpeechSpan(recordingId)
             bb.realtime.publish("converse-utterances", js.Dynamic.literal())
             enqueueRecording(recordingId)
           Future.successful(js.Dynamic.literal("stored" -> true)).toJSPromise
+      },
+      "activitySpans" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        // Spans recorded after `afterSeq`, oldest first; a reader keeps the
+        // last seq it saw and asks for those after it. `oldestSeq` is the
+        // smallest seq still held, so a reader whose last seq is older can tell
+        // that spans it never saw were purged.
+        val afterSeq = input.afterSeq.asInstanceOf[js.UndefOr[Double]].getOrElse(0.0)
+        val limit    = input.limit.asInstanceOf[js.UndefOr[Double]].toOption.map(_.toInt).filter(_ > 0).fold(500)(_.min(1000))
+        val items = db
+          .prepare(
+            "SELECT seq, id, kind, source, thread_id, start_at, end_at FROM activity_spans " +
+              "WHERE seq > ? ORDER BY seq LIMIT ?"
+          )
+          .all(afterSeq, limit)
+          .map { row =>
+            js.Dynamic.literal(
+              "seq"      -> row.seq,
+              "id"       -> row.id,
+              "threadId" -> row.thread_id,
+              "kind"     -> row.kind,
+              "source"   -> row.source,
+              "start"    -> row.start_at,
+              "end"      -> row.end_at
+            )
+          }
+        val oldestSeq = db.prepare("SELECT MIN(seq) AS seq FROM activity_spans").get().toOption.map(_.seq).orNull
+        Future.successful(js.Dynamic.literal("items" -> items, "oldestSeq" -> oldestSeq)).toJSPromise
       },
       "retryRecording" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val id = str(input.id)
