@@ -191,6 +191,41 @@ projects:
     - template-common
     - template-js
     folder: ./bb-plugin-subscriptions/subscriptions
+  goals-core:
+    cross:
+      jvm3:
+        extends:
+        - template-common
+        - template-jvm
+      js3:
+        extends:
+        - template-common
+        - template-js
+    folder: ./bb-plugin-goals/goals-core
+  goals-core-test:
+    dependsOn: goals-core
+    extends:
+    - template-common
+    - template-jvm
+    isTestProject: true
+    dependencies:
+    - org.scalameta::munit:1.1.1
+    folder: ./bb-plugin-goals/goals-core-test
+  goals:
+    dependsOn:
+    - activity-core
+    - bb-plugin-facades
+    - goals-core
+    extends:
+    - template-common
+    - template-js
+    folder: ./bb-plugin-goals/goals
+  goals-app:
+    dependsOn: goals-core
+    extends:
+    - template-common
+    - template-js
+    folder: ./bb-plugin-goals/goals-app
 templates:
   template-jvm:
     platform:

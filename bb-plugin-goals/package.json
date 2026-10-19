@@ -1,0 +1,34 @@
+{
+  "name": "bb-plugin-goals",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": {
+    "bb": ">=0.46",
+    "bbPluginSdk": ">=0.6.49"
+  },
+  "scripts": {
+    "build": "bleep --directory .. link goals && cp ../.bleep/builds/normal/.bloop/goals/link-output/debug/js/main.js server.js && bleep --directory .. link goals-app && cp ../.bleep/builds/normal/.bloop/goals-app/link-output/debug/js/main.js app-core.cjs",
+    "test": "bleep --directory .. test goals-core-test",
+    "typecheck": "tsc -p .",
+    "reload": "npm run build && bb plugin build . && bb plugin reload goals"
+  },
+  "bb": {
+    "name": "Goals",
+    "description": "See your threads through the goals they serve: label each thread's goal and value, and view them as nested boxes sized by attention time.",
+    "branding": {
+      "icon": "Target"
+    },
+    "server": "./server.js",
+    "app": "./app.tsx",
+    "skills": [
+      "skills"
+    ]
+  },
+  "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.49",
+    "@radix-ui/react-popover": "^1.1.19",
+    "@types/react": "^19.0.0",
+    "react": "^19.2.8",
+    "typescript": "^5.7.0"
+  }
+}

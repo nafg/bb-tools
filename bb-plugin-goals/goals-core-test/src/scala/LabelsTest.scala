@@ -1,0 +1,44 @@
+package goalscore
+
+class LabelsTest extends munit.FunSuite:
+  test("goal letters parse case-insensitively and reject anything else"):
+    assertEquals(Goal.parse("B"), Some(Goal.B))
+    assertEquals(Goal.parse("f"), Some(Goal.F))
+    assertEquals(Goal.parse("X"), None)
+    assertEquals(Goal.parse(""), None)
+
+  test("a goal write accepts a letter or an explicit none"):
+    assertEquals(ThreadLabels.parseGoalWrite("S"), Right(Some(Goal.S)))
+    assertEquals(ThreadLabels.parseGoalWrite("none"), Right(None))
+    assert(ThreadLabels.parseGoalWrite("Q").isLeft)
+
+  test("a value write accepts 1 to 3 or none"):
+    assertEquals(ThreadLabels.parseValueWrite("2"), Right(Some(2)))
+    assertEquals(ThreadLabels.parseValueWrite("none"), Right(None))
+    assert(ThreadLabels.parseValueWrite("0").isLeft)
+    assert(ThreadLabels.parseValueWrite("4").isLeft)
+    assert(ThreadLabels.parseValueWrite("two").isLeft)
+
+  test("thread ids must look like bb thread ids"):
+    assertEquals(ThreadLabels.parseThreadId("thr_abc123"), Right("thr_abc123"))
+    assert(ThreadLabels.parseThreadId("abc").isLeft)
+    assert(ThreadLabels.parseThreadId("thr_ABC").isLeft)
+
+  test("stored metadata is read tolerantly: bad fields are dropped, not fatal"):
+    val labels = ThreadLabels.fromStored(goal = Some("P"), value = Some(7.0), blockedBy = Some(Seq("thr_a1", 3, "thr_a1", "bad")))
+    assertEquals(labels, ThreadLabels(Some(Goal.P), None, List("thr_a1")))
+    assertEquals(ThreadLabels.fromStored(Some("?"), Some(2.0), None), ThreadLabels(None, Some(2), Nil))
+
+  test("value without goal survives storage but reads as unlabeled"):
+    assertEquals(ThreadLabels(None, Some(1), Nil).ownLabel, None)
+    assertEquals(ThreadLabels(Some(Goal.M), None, Nil).ownLabel, Some(Effective(Goal.M, None, LabelSource.Own)))
+
+  test("an edit leaves absent fields alone, clears on none, and rejects self-blocking"):
+    assertEquals(LabelEdit.parse("thr_me", None, None, None), Right(LabelEdit(None, None, None)))
+    assertEquals(
+      LabelEdit.parse("thr_me", Some("none"), Some("1"), Some(List("thr_a", " thr_a ", ""))),
+      Right(LabelEdit(Some(None), Some(Some(1)), Some(List("thr_a"))))
+    )
+    assertEquals(LabelEdit.parse("thr_me", None, None, Some(List("thr_me"))), Left("a thread cannot block itself"))
+    assertEquals(LabelEdit.parse("thr_me", None, None, Some(List("nope"))), Left("blockedBy 'nope': not a thread id"))
+    assert(LabelEdit.parse("thr_me", Some("Z"), None, None).isLeft)

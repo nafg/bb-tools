@@ -16,6 +16,8 @@ exec scala-cli test \
   bb-plugin-converse/converse-core-test/src \
   bb-plugin-wbs/wbs-core/src \
   bb-plugin-wbs/wbs-core-test/src \
+  bb-plugin-goals/goals-core/src \
+  bb-plugin-goals/goals-core-test/src \
   --js \
   --scala 3.8.3 \
   --js-version 1.22.0 \
