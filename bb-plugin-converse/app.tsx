@@ -92,16 +92,32 @@ function useSoundCueSettings() {
   return { state, setState, error, setError };
 }
 
-// Invisible: forwards route, settings, and realtime signals to the controller.
+// Invisible: forwards the viewed thread, settings, and realtime signals to the
+// controller. Mounted in every thread composer, including a ThreadChat
+// embedded in a plugin page, where the route names no thread: there the
+// composer on screen names it. bb keeps previously visited thread pages
+// mounted but hidden, so only a composer actually on screen counts.
 function VoiceBridge() {
   const bbContext = useBbContext();
+  const view = useComposerView();
+  const composerThread = view.scope.kind === "thread" ? view.scope.threadId : null;
   const settings = useSettings();
   const soundCues = useSoundCueSettings();
   const ctl = getController();
   useHostBridge(ctl);
+  const marker = useRef<HTMLSpanElement>(null);
+  const [onScreen, setOnScreen] = useState(false);
   useEffect(() => {
-    if (bbContext.threadId) ctl.noteViewed(bbContext.threadId);
-  }, [ctl, bbContext.threadId]);
+    const element = marker.current;
+    if (!element) return;
+    const observer = new IntersectionObserver(([entry]) => setOnScreen(entry?.isIntersecting ?? false));
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  useEffect(() => {
+    const viewed = bbContext.threadId ?? (onScreen ? composerThread : null);
+    if (viewed) ctl.noteViewed(viewed);
+  }, [ctl, bbContext.threadId, onScreen, composerThread]);
   useEffect(() => {
     const values = settings.values ?? {};
     const speechProbabilityThreshold = Number.parseFloat(
@@ -127,7 +143,7 @@ function VoiceBridge() {
           : 3000,
     });
   }, [ctl, settings.values, soundCues.state]);
-  return null;
+  return <span ref={marker} aria-hidden="true" style={{ display: "block", height: 0 }} />;
 }
 
 // The live transcription belongs to the thread that will receive it, not to
