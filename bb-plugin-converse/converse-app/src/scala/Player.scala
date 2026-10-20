@@ -44,6 +44,7 @@ final class Player(
   private var currentSentence: String    = null
   private var generation: Int            = 0
   private var currentAudio: js.Dynamic   = null
+  private var currentStream: StreamedSpeech = null
   private var abortCtl: js.Dynamic       = null
   private var currentSettled: Promise[Boolean] = null
   private val queuedSpeech = mutable.Queue.empty[QueuedSpeech]
@@ -106,9 +107,11 @@ final class Player(
       startNextQueuedSpeech()
       settled.future
 
-  /** Marks the current reply's audio as playing, the first time. */
-  private def markPlaying(gen: Int): Unit =
-    if generation == gen && playbackStartedAt.isNaN then playbackStartedAt = js.Date.now()
+  /** Marks the current reply's audio as playing (from `at`, as Date.now()),
+    * the first time.
+    */
+  private def markPlaying(gen: Int, at: Double = js.Date.now()): Unit =
+    if generation == gen && playbackStartedAt.isNaN then playbackStartedAt = at
 
   private def startNextQueuedSpeech(): Unit =
     if !speakingActive && !held && queuedSpeech.nonEmpty then
@@ -174,6 +177,9 @@ final class Player(
     currentSentence = null
     if abortCtl != null then { val _ = abortCtl.abort(); abortCtl = null }
     if !js.isUndefined(js.Dynamic.global.speechSynthesis) then { val _ = js.Dynamic.global.speechSynthesis.cancel() }
+    if currentStream != null then
+      currentStream.stop()
+      currentStream = null
     if currentAudio != null then
       // An AudioBufferSourceNode stops with stop(); its onended settles the
       // playback future.
@@ -236,8 +242,30 @@ final class Player(
       .flatMap { response =>
         if !response.ok.asInstanceOf[Boolean] then
           Future.failed(new RuntimeException(s"TTS endpoint returned ${response.status}"))
-        else response.blob().asInstanceOf[js.Promise[js.Dynamic]].toFuture
+        else Future.successful(response)
       }
+
+  /** A chunk's synthesized audio: streamed WAV is played as it arrives;
+    * anything else (MP3 from some providers) is played once all of it is in.
+    */
+  private enum ChunkAudio:
+    case Streamed(speech: StreamedSpeech)
+    case Whole(blob: js.Dynamic)
+
+    /** Completes once all of the chunk's audio has been received. */
+    def arrived: Future[Unit] = this match
+      case Streamed(speech) => speech.arrived
+      case Whole(_)         => Future.unit
+
+  private def requestChunk(text: String, voice: String, signal: js.Any): Future[ChunkAudio] =
+    fetchTts(text, voice, signal).flatMap { response =>
+      val contentType = Option(response.headers.get("content-type").asInstanceOf[String]).getOrElse("")
+      if WavTypes.exists(contentType.startsWith) && audioContext != null then
+        Future.successful(ChunkAudio.Streamed(StreamedSpeech(audioContext, output.input, response.body)))
+      else response.blob().asInstanceOf[js.Promise[js.Dynamic]].toFuture.map(ChunkAudio.Whole(_))
+    }
+
+  private val WavTypes = Seq("audio/wav", "audio/x-wav", "audio/wave", "audio/vnd.wave")
 
   /** Plays through the owner-supplied AudioContext (created inside a user
     * gesture), which is exempt from autoplay blocking — a standalone
@@ -273,23 +301,47 @@ final class Player(
         }
         .recover { case e => debug(s"playback failed: ${e.getMessage}") }
 
-  /** Sequential playback with a one-chunk synthesis prefetch. */
+  private def playStreamed(gen: Int, speech: StreamedSpeech): Future[Unit] =
+    if generation != gen then
+      speech.stop()
+      Future.unit
+    else
+      currentStream = speech
+      speech
+        .play(at => markPlaying(gen, at))
+        .andThen { case _ => if currentStream eq speech then currentStream = null }
+        .recover { case e => debug(s"playback failed: ${e.getMessage}") }
+
+  /** Plays the chunks in order. Each chunk's synthesis is requested as soon
+    * as the previous chunk's audio has all arrived, so it is generated while
+    * that one plays.
+    */
   private def speakServer(gen: Int, chunks: List[SpeechChunk], voice: String): Future[Unit] =
     val ctl = js.Dynamic.newInstance(js.Dynamic.global.AbortController)()
     abortCtl = ctl
     val all = chunks.toVector
-    def go(i: Int, fetched: Future[js.Dynamic]): Future[Unit] =
-      fetched.flatMap { blob =>
-        if generation != gen then Future.unit
+    def request(i: Int): Future[ChunkAudio] = requestChunk(all(i).text, voice, ctl.signal)
+    def go(i: Int, requested: Future[ChunkAudio]): Future[Unit] =
+      requested.flatMap { audio =>
+        if generation != gen then
+          audio match
+            case ChunkAudio.Streamed(speech) => speech.stop()
+            case ChunkAudio.Whole(_)         => ()
+          Future.unit
         else
           val next =
-            if i + 1 < all.length then fetchTts(all(i + 1).text, voice, ctl.signal) else null
+            if i + 1 < all.length then
+              audio.arrived.transformWith(_ => if generation == gen then request(i + 1) else Future.never)
+            else null
           currentSentence = all(i).text
-          playBlob(gen, blob)
+          val played = audio match
+            case ChunkAudio.Streamed(speech) => playStreamed(gen, speech)
+            case ChunkAudio.Whole(blob)      => playBlob(gen, blob)
+          played
             .flatMap(_ => delay(all(i).pauseSeconds))
             .flatMap { _ =>
               if next == null || generation != gen then Future.unit else go(i + 1, next)
             }
       }
-    val result = if all.isEmpty then Future.unit else go(0, fetchTts(all(0).text, voice, ctl.signal))
+    val result = if all.isEmpty then Future.unit else go(0, request(0))
     result.andThen { case _ => if abortCtl eq ctl then abortCtl = null }
