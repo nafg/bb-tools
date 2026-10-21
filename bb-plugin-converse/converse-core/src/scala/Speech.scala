@@ -76,7 +76,10 @@ object Speech:
   private def speakable(text: String): String =
     val dotted   = IdentifierDot.replaceAllIn(text, "$1 dot ")
     val numbered = HashNumber.replaceAllIn(dotted, "$1number $2")
-    val split    = Word.replaceAllIn(numbered, m => if isId(m.matched) then spelled(m.matched) else words(m.matched))
+    val split = Word.replaceAllIn(
+      numbered,
+      m => if isId(m.matched) then spelled(m.matched) else words(m.matched).split(" ").map(pluralAcronym).mkString(" ")
+    )
     val acronyms = VowellessWord.replaceAllIn(
       split,
       m => if SaidAsWords(m.matched.toLowerCase) then m.matched else spelled(m.matched)
@@ -94,12 +97,21 @@ object Speech:
       if i > 0 then
         val before = token(i - 1)
         val next   = token.lift(i + 1)
+        // The "s" of a plural acronym (IDs, URLs) is no word of its own.
+        val plural = next.contains('s') && i + 2 == token.length
         val joint =
-          (c.isUpper && (before.isLower || (before.isUpper && next.exists(_.isLower)))) ||
+          (c.isUpper && (before.isLower || (before.isUpper && next.exists(_.isLower) && !plural))) ||
             (c.isDigit != before.isDigit)
         if joint then out += ' '
       out += c
     out.result()
+
+  /** A plural acronym spelled out with its plural kept on the last letter
+    * ("IDs" as "I D's"); any other word as it is.
+    */
+  private def pluralAcronym(word: String): String =
+    if word.length >= 3 && word.last == 's' && word.init.forall(_.isUpper) then spelled(word.init) + "'s"
+    else word
 
   /** Digits spoken as they are: part of a decimal or version number (2.13,
     * 3.5), or an amount of money ($5).

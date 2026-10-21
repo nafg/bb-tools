@@ -55,6 +55,10 @@ class SpeechTest extends munit.FunSuite:
       List("Set S M S Chat and Entrance Group V two S M S Config dot S R C Number on the H T T P Server.")
     )
 
+  test("spells a plural acronym out with its plural on the last letter"):
+    val chunks = Speech.splitSpeechChunks("The IDs, URLs and PRs in EntranceGroupIDs.")
+    assertEquals(chunks.map(_.text), List("The I D's, U R L's and P R's in Entrance Group I D's."))
+
   test("speaks a thread by its title, or as 'a thread' when its title is unknown"):
     val text = "@thread:thr_abc123 confirms it, and thr_def456 too (see @thread:thr_abc123#msg=42)."
     assertEquals(Speech.threadsReferredTo(text), Set("thr_abc123", "thr_def456"))
