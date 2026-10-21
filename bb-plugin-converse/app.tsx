@@ -4,10 +4,11 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   definePluginApp,
+  experimental_THREAD_ACTION_GROUPS,
   experimental_useSidebarThreads,
   useBbContext,
   useBbNavigate,
-  useComposerView,
+  useComposer,
   useRealtime,
   useSettings,
 } from "@get-bb/plugin-sdk/app";
@@ -99,7 +100,7 @@ function useSoundCueSettings() {
 // mounted but hidden, so only a composer actually on screen counts.
 function VoiceBridge() {
   const bbContext = useBbContext();
-  const view = useComposerView();
+  const view = useComposer();
   const composerThread = view.scope.kind === "thread" ? view.scope.threadId : null;
   const settings = useSettings();
   const soundCues = useSoundCueSettings();
@@ -151,7 +152,7 @@ function VoiceBridge() {
 // clipping inside the narrow sidebar widget. Once submitted, the ordinary
 // timeline message replaces it.
 function PendingVoiceTranscript() {
-  const view = useComposerView();
+  const view = useComposer();
   const ctl = getController();
   const state = useSyncExternalStore(ctl.subscribe, ctl.getSnapshot);
 
@@ -177,7 +178,7 @@ function PendingVoiceTranscript() {
 // composer's selected project from the next utterance, and it hosts the live
 // transcript the thread banner would otherwise show.
 function NewThreadVoiceBanner() {
-  const view = useComposerView();
+  const view = useComposer();
   const projectId = view.scope.kind === "new-thread" ? view.scope.projectId : null;
   const ctl = getController();
   const sidebar = useHostBridge(ctl);
@@ -956,51 +957,35 @@ function SoundCueSettingsSection() {
   );
 }
 
-type ThreadVoiceState = { enabled: boolean; provider: string; voice: string | null; voices: VoiceChoice[] };
+type ThreadVoices = {
+  enabled: boolean;
+  provider: string;
+  voices: VoiceChoice[];
+  /** The voice assigned to each requested thread that has one. */
+  assigned: Record<string, string>;
+};
 
-function ThreadVoicePicker({ threadId }: { threadId: string }) {
-  const [state, setState] = useState<ThreadVoiceState | null>(null);
-  const [saving, setSaving] = useState(false);
-
-  const load = () =>
-    rpcCall("threadVoice", { threadId }).then((result) => setState(result as ThreadVoiceState));
+// The voice catalog and the assignments of the threads whose menus are on
+// screen. Each change of those threads, or of any voice setting, reloads them
+// in one request; a response overtaken by a newer request is dropped.
+function useThreadVoices({ threadIds }: { threadIds: readonly string[] }): ThreadVoices | undefined {
+  const [voices, setVoices] = useState<ThreadVoices>();
+  const [changes, setChanges] = useState(0);
+  const latest = useRef(0);
+  useRealtime("converse-voices", () => setChanges((n) => n + 1));
   useEffect(() => {
-    void load();
-  }, [threadId]);
-  useRealtime("converse-voices", (payload) => {
-    const changed = payload as { threadId?: string };
-    if (!changed.threadId || changed.threadId === threadId) void load();
-  });
+    const request = ++latest.current;
+    void rpcCall("threadVoices", { threadIds }).then((result) => {
+      if (request === latest.current) setVoices(result as ThreadVoices);
+    });
+  }, [threadIds, changes]);
+  return voices;
+}
 
-  if (!state) return null;
-  const enabledVoices = state.voices.filter((voice) => voice.enabled);
-  return (
-    <select
-      aria-label="Voice for this thread"
-      title={state.enabled ? "Voice for this thread" : "Voice for this thread (different voices are off)"}
-      className="h-7 max-w-32 rounded border bg-background px-1 text-xs text-foreground"
-      value={state.voice ?? ""}
-      disabled={saving}
-      onChange={async (event) => {
-        const voice = event.target.value;
-        setState({ ...state, voice: voice || null });
-        setSaving(true);
-        try {
-          await rpcCall("setThreadVoice", { threadId, voice });
-        } finally {
-          setSaving(false);
-          await load();
-        }
-      }}
-    >
-      <option value="">Not assigned</option>
-      {enabledVoices.map((voice) => (
-        <option key={voice.id} value={voice.id}>
-          {voice.label ?? voice.id.replaceAll("_", " ")}
-        </option>
-      ))}
-    </select>
-  );
+const UnassignedVoice = "unassigned";
+
+function voiceLabel(voices: VoiceChoice[], id: string): string {
+  return voices.find((voice) => voice.id === id)?.label ?? id.replaceAll("_", " ");
 }
 
 export default definePluginApp((app) => {
@@ -1022,10 +1007,38 @@ export default definePluginApp((app) => {
     description: "A week of uploads, with their transcripts and the transcriber's per-segment silence and confidence figures.",
     component: RecentUtterancesSection,
   });
-  app.slots.experimental_threadHeaderAction({
+  app.slots.experimental_threadAction<ThreadVoices | undefined>({
     id: "thread-voice",
-    title: "Thread voice",
-    component: ThreadVoicePicker,
+    title: "Voice",
+    icon: "AudioLines",
+    group: experimental_THREAD_ACTION_GROUPS.settings,
+    useData: useThreadVoices,
+    item({ thread, data }) {
+      if (!data) return null;
+      const current = data.assigned[thread.id] ?? null;
+      const offered = data.voices.filter((voice) => voice.enabled || voice.id === current);
+      return {
+        label: "Voice",
+        icon: "AudioLines",
+        detail: current ? voiceLabel(data.voices, current) : "Not assigned",
+        choices: {
+          heading: "Voice for this thread",
+          hint: data.enabled ? undefined : "Different voices for different threads are turned off in settings.",
+          items: [
+            { id: UnassignedVoice, label: "Not assigned", selected: current === null },
+            ...offered.map((voice) => ({
+              id: voice.id,
+              label: voiceLabel(data.voices, voice.id),
+              selected: voice.id === current,
+            })),
+          ],
+        },
+        async run({ value }) {
+          if (value === undefined) return;
+          await rpcCall("setThreadVoice", { threadId: thread.id, voice: value === UnassignedVoice ? "" : value });
+        },
+      };
+    },
   });
   app.contentScripts.register({
     id: "voice-widget",

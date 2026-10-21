@@ -1725,7 +1725,7 @@ def plugin(bb: BbApi): Unit =
         "input" -> Schema.passthrough,
         "output" -> Schema.passthrough
       ),
-      "threadVoice" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "threadVoices" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "setThreadVoice" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "resolveThreadVoice" -> js.Dynamic.literal(
         "input" -> Schema.passthrough,
@@ -2082,21 +2082,23 @@ def plugin(bb: BbApi): Unit =
             publishVoiceChanged()
             js.Dynamic.literal("ok" -> true)).toJSPromise
       },
-      "threadVoice" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
-        val threadId = str(input.threadId)
-        if threadId.isEmpty then rejected("threadId is required")
-        else
-          settings.get().toFuture.flatMap { currentSettings =>
-            val provider = str(currentSettings.ttsProvider)
-            voiceSettingsResponse(provider).map { voiceSettings =>
-              js.Dynamic.literal(
-                "enabled"  -> voiceSettings.enabled,
-                "provider" -> provider,
-                "voice"    -> storedThreadVoice(provider, threadId).orNull,
-                "voices"   -> voiceSettings.voices
-              )
-            }
-          }.toJSPromise
+      // The voice catalog, and the voice assigned to each of `threadIds` that
+      // has one.
+      "threadVoices" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val threadIds = input.threadIds.asInstanceOf[js.UndefOr[js.Array[String]]].getOrElse(js.Array())
+        settings.get().toFuture.flatMap { currentSettings =>
+          val provider = str(currentSettings.ttsProvider)
+          voiceSettingsResponse(provider).map { voiceSettings =>
+            val assigned = js.Dynamic.literal()
+            threadIds.foreach(id => storedThreadVoice(provider, id).foreach(assigned.updateDynamic(id)(_)))
+            js.Dynamic.literal(
+              "enabled"  -> voiceSettings.enabled,
+              "provider" -> provider,
+              "voices"   -> voiceSettings.voices,
+              "assigned" -> assigned
+            )
+          }
+        }.toJSPromise
       },
       "setThreadVoice" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val threadId = str(input.threadId)
