@@ -4,6 +4,10 @@
 export interface PaneHandle {
   /** Whether this pane is the focused one in the split layout (true when there is no split). */
   setFocused(focused: boolean): void;
+  /** A view span is open for this pane right now. */
+  recording(): boolean;
+  /** Calls `listener` whenever `recording()` changes; returns the unsubscribe. */
+  subscribe(listener: () => void): () => void;
   /** The pane went away; its open span closes now. */
   dispose(): void;
 }

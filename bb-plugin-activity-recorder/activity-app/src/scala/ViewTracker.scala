@@ -26,6 +26,12 @@ final class ViewTracker(report: js.Function2[js.Dynamic, Boolean, js.Promise[js.
   private final class Pane(val threadId: String):
     var focused: Boolean       = false
     var span: Option[OpenSpan] = None
+    val listeners              = mutable.LinkedHashSet.empty[() => Unit]
+
+    def setSpan(next: Option[OpenSpan]): Unit =
+      val wasOpen = span.isDefined
+      span = next
+      if wasOpen != next.isDefined then listeners.foreach(listener => listener())
 
   private val panes       = mutable.LinkedHashSet.empty[Pane]
   private var lastInputAt = now()
@@ -53,6 +59,10 @@ final class ViewTracker(report: js.Function2[js.Dynamic, Boolean, js.Promise[js.
       def setFocused(focused: Boolean): Unit =
         pane.focused = focused
         evaluate(unloading = false)
+      def recording: Boolean = pane.span.isDefined
+      def subscribe(listener: () => Unit): () => Unit =
+        pane.listeners += listener
+        () => pane.listeners -= listener
       def dispose(): Unit =
         close(pane, now(), unloading = false)
         panes -= pane
@@ -80,7 +90,7 @@ final class ViewTracker(report: js.Function2[js.Dynamic, Boolean, js.Promise[js.
       Policy.decide(pageViewed && pane.focused, at, lastInputAt, pane.span.map(s => (s.start, s.reportedAt))) match
         case Some(ViewReport.Open) =>
           val span = new OpenSpan(js.Dynamic.global.crypto.randomUUID().asInstanceOf[String], at)
-          pane.span = Some(span)
+          pane.setSpan(Some(span))
           send(pane, span, at, unloading)
         case Some(ViewReport.Extend(end)) => pane.span.foreach(span => send(pane, span, end, unloading))
         case Some(ViewReport.Close(end))  => close(pane, end, unloading)
@@ -92,7 +102,7 @@ final class ViewTracker(report: js.Function2[js.Dynamic, Boolean, js.Promise[js.
 
   private def close(pane: Pane, end: Long, unloading: Boolean): Unit =
     pane.span.foreach { span =>
-      pane.span = None
+      pane.setSpan(None)
       send(pane, span, end, unloading)
     }
 
@@ -111,6 +121,10 @@ object ViewTracker:
 
 trait PaneHandle:
   def setFocused(focused: Boolean): Unit
+  /** A view span is open for this pane right now. */
+  def recording: Boolean
+  /** Calls `listener` whenever `recording` changes; returns the unsubscribe. */
+  def subscribe(listener: () => Unit): () => Unit
   def dispose(): Unit
 
 @JSExportTopLevel("createViewTracker")
@@ -121,7 +135,12 @@ def createViewTracker(deps: js.Dynamic): js.Dynamic =
       val handle = tracker.attach(threadId)
       js.Dynamic.literal(
         "setFocused" -> js.Any.fromFunction1((focused: Boolean) => handle.setFocused(focused)),
-        "dispose"    -> js.Any.fromFunction0(() => handle.dispose())
+        "recording"  -> js.Any.fromFunction0(() => handle.recording),
+        "subscribe" -> js.Any.fromFunction1 { (listener: js.Function0[Unit]) =>
+          val unsubscribe = handle.subscribe(() => listener())
+          js.Any.fromFunction0(() => unsubscribe())
+        },
+        "dispose" -> js.Any.fromFunction0(() => handle.dispose())
       )
     },
     "dispose" -> js.Any.fromFunction0(() => tracker.dispose())

@@ -28,6 +28,10 @@ Messages and turns come from bb's thread event log, including everything
 from before the plugin was installed: on load it reads every thread once, and
 then follows new events as they arrive.
 
+Each thread pane's header shows the thread's attention today as a timer. It
+runs, with a red dot, while that pane is being viewed and counting; it
+stands still otherwise, and re-reads the recorder's total every minute.
+
 ## Intervals
 
 Per thread, signals no further apart than the gap setting (5 minutes by
