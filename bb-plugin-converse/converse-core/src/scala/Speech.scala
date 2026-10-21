@@ -31,6 +31,16 @@ object Speech:
       Set("hm", "hmm", "mm", "mhm", "shh", "psst", "pst", "tsk", "brr", "grr", "pfft", "zzz")
   // A number marked with "#", as in issue and pull request references.
   private val HashNumber     = "(^|[^\\w#])#(\\d+)\\b".r
+  private val Word           = "\\b[A-Za-z0-9]+\\b".r
+  private val Digits         = "\\d+".r
+  // A bb thread: a mention (with or without a message) or a bare id.
+  private val ThreadReference = "@thread:(thr_[a-z0-9]+)(?:#msg=\\d+)?|\\b(thr_[a-z0-9]+)\\b".r
+
+  /** The ids of the bb threads `text` refers to, whose titles
+    * [[splitSpeechChunks]] speaks in their place.
+    */
+  def threadsReferredTo(text: String): Set[String] =
+    ThreadReference.findAllMatchIn(text).map(m => Option(m.group(1)).getOrElse(m.group(2))).toSet
 
   // No (?m)/(?s) flags: Scala.js rejects MULTILINE and DOTALL on the default
   // ES target, so line anchors are handled by splitting instead.
@@ -58,15 +68,55 @@ object Speech:
     * "#" (it dropped the numbers and repeated the words around them), so
     * "#233" is spoken as "number 233"; and it says a short word with no vowels
     * as a word ("sbt" as "sess B T", "ssh" as "set"), so such a word is
-    * spelled out ("S B T").
+    * spelled out ("S B T"), as are hashes and ids, which it garbled. A
+    * camelCase name is split into its words first, so each word is spoken as
+    * any other is ("smsChat" as "S M S Chat"). Numbers are spoken as words,
+    * since it read "3754" differently from one sentence to the next.
     */
   private def speakable(text: String): String =
     val dotted   = IdentifierDot.replaceAllIn(text, "$1 dot ")
     val numbered = HashNumber.replaceAllIn(dotted, "$1number $2")
-    VowellessWord.replaceAllIn(
-      numbered,
-      m => if SaidAsWords(m.matched.toLowerCase) then m.matched else m.matched.toUpperCase.mkString(" ")
+    val split    = Word.replaceAllIn(numbered, m => if isId(m.matched) then spelled(m.matched) else words(m.matched))
+    val acronyms = VowellessWord.replaceAllIn(
+      split,
+      m => if SaidAsWords(m.matched.toLowerCase) then m.matched else spelled(m.matched)
     )
+    Digits.replaceAllIn(acronyms, m => if leftAsDigits(acronyms, m.start, m.end) then m.matched else NumberWords(m.matched))
+
+  /** The words of a name run together: split where a lowercase letter meets a
+    * capital (smsChat), a run of capitals meets a capitalized word
+    * (HTTPServer), or letters meet digits (Scala3, V2Sms).
+    */
+  private def words(token: String): String =
+    val out = StringBuilder()
+    for i <- token.indices do
+      val c = token(i)
+      if i > 0 then
+        val before = token(i - 1)
+        val next   = token.lift(i + 1)
+        val joint =
+          (c.isUpper && (before.isLower || (before.isUpper && next.exists(_.isLower)))) ||
+            (c.isDigit != before.isDigit)
+        if joint then out += ' '
+      out += c
+    out.result()
+
+  /** Digits spoken as they are: part of a decimal or version number (2.13,
+    * 3.5), or an amount of money ($5).
+    */
+  private def leftAsDigits(text: String, start: Int, end: Int): Boolean =
+    (start >= 2 && text(start - 1) == '.' && text(start - 2).isDigit) ||
+      (end + 1 < text.length && text(end) == '.' && text(end + 1).isDigit) ||
+      (start >= 1 && text(start - 1) == '$')
+
+  /** A hash or an id: one case throughout, at least five characters, with
+    * letters and digits alternating at least twice (0db1ea5, uexjg8nei2).
+    */
+  private def isId(token: String): Boolean =
+    token.length >= 5 && (token == token.toLowerCase || token == token.toUpperCase) &&
+      token.sliding(2).count(pair => pair(0).isDigit != pair(1).isDigit) >= 2
+
+  private def spelled(token: String): String = token.toUpperCase.mkString(" ")
 
   private def splitSentences(text: String): List[String] =
     val words     = text.split("\\s+").toList.filter(_.nonEmpty)
@@ -83,11 +133,18 @@ object Speech:
     if current.nonEmpty then sentences += current.mkString(" ")
     sentences.result()
 
-  def splitSpeechChunks(text: String): List[SpeechChunk] =
+  /** `text` in the pieces it is spoken in. A bb thread it refers to is spoken
+    * as its title from `threadTitles`, or as "a thread" when that has none.
+    */
+  def splitSpeechChunks(text: String, threadTitles: Map[String, String] = Map.empty): List[SpeechChunk] =
     if text.trim.isEmpty then Nil
     else
+      val titled = ThreadReference.replaceAllIn(
+        text,
+        m => scala.util.matching.Regex.quoteReplacement(threadTitles.getOrElse(Option(m.group(1)).getOrElse(m.group(2)), "a thread"))
+      )
       val chunks     = collection.mutable.ListBuffer.empty[SpeechChunk]
-      val paragraphs = text.split("\\n{2,}").toList.map(_.trim).filter(_.nonEmpty)
+      val paragraphs = titled.split("\\n{2,}").toList.map(_.trim).filter(_.nonEmpty)
       for (paragraph, paragraphIndex) <- paragraphs.zipWithIndex do
         val lines  = paragraph.split("\n").toList
         val isList = lines.exists(ListLine.matches)

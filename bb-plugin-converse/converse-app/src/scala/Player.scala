@@ -118,8 +118,7 @@ final class Player(
 
   private def startNextQueuedSpeech(): Unit =
     if !speakingActive && !held && queuedSpeech.nonEmpty then
-      val item   = queuedSpeech.dequeue()
-      val chunks = Speech.splitSpeechChunks(item.text)
+      val item = queuedSpeech.dequeue()
       generation += 1
       val gen = generation
       speakingActive = true
@@ -135,11 +134,12 @@ final class Player(
           // was not heard, so it has no span.
           if !playbackStartedAt.isNaN then onPlayback(item.sourceThread, item.source, playbackStartedAt, js.Date.now())
       onChange()
-      val done = resolveThreadVoice(item.sourceThread).flatMap { voice =>
+      val done = resolveThreadVoice(item.sourceThread).zip(threadTitles(item.text)).flatMap { (voice, titles) =>
         if generation != gen then Future.unit
         else
           currentVoice = voice
           onChange()
+          val chunks = Speech.splitSpeechChunks(item.text, titles)
           if ttsMode == "server" then speakServer(gen, chunks, voice) else speakBrowser(gen, chunks, voice)
       }
       done.onComplete {
@@ -226,6 +226,21 @@ final class Player(
         debug(s"voice assignment failed: ${e.getMessage}")
         null
       }
+
+  /** The titles of the bb threads `text` refers to, which it is spoken with;
+    * a thread whose title cannot be read is left out.
+    */
+  private def threadTitles(text: String): Future[Map[String, String]] =
+    val ids = Speech.threadsReferredTo(text)
+    if ids.isEmpty then Future.successful(Map.empty)
+    else
+      rpcCall("threadTitles", js.Dynamic.literal("threadIds" -> js.Array(ids.toSeq*)))
+        .toFuture
+        .map(_.titles.asInstanceOf[js.Dictionary[String]].toMap)
+        .recover { case e =>
+          debug(s"thread titles failed: ${e.getMessage}")
+          Map.empty
+        }
 
   private def fetchTts(text: String, voice: String, signal: js.Any): Future[js.Dynamic] =
     val body = js.Dynamic.literal("text" -> text)

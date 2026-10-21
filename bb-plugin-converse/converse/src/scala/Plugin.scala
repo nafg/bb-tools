@@ -1726,6 +1726,7 @@ def plugin(bb: BbApi): Unit =
         "output" -> Schema.passthrough
       ),
       "threadVoices" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "threadTitles" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "setThreadVoice" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "resolveThreadVoice" -> js.Dynamic.literal(
         "input" -> Schema.passthrough,
@@ -2088,6 +2089,20 @@ def plugin(bb: BbApi): Unit =
             }
             publishVoiceChanged()
             js.Dynamic.literal("ok" -> true)).toJSPromise
+      },
+      // The title of each of `threadIds` that can be read.
+      "threadTitles" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        val threadIds = input.threadIds.asInstanceOf[js.UndefOr[js.Array[String]]].getOrElse(js.Array()).toSeq
+        Future
+          .sequence(threadIds.map { id =>
+            bb.sdk.threads
+              .get(js.Dynamic.literal("threadId" -> id))
+              .toFuture
+              .map(thread => Option(str(thread.title)).filter(_.nonEmpty).orElse(Option(str(thread.titleFallback)).filter(_.nonEmpty)).map(id -> _))
+              .recover(_ => None)
+          })
+          .map(found => js.Dynamic.literal("titles" -> js.Dictionary(found.flatten*)))
+          .toJSPromise
       },
       // The voice catalog, and the voice assigned to each of `threadIds` that
       // has one.

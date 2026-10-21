@@ -32,15 +32,38 @@ class SpeechTest extends munit.FunSuite:
 
   test("speaks a number marked with # as 'number', leaving other uses of # alone"):
     val chunks = Speech.splitSpeechChunks("[#233](https://example.com/pull/233) is merged, and C# is fine.")
-    assertEquals(chunks.map(_.text), List("number 233 is merged, and C# is fine."))
+    assertEquals(chunks.map(_.text), List("number two hundred thirty three is merged, and C# is fine."))
 
   test("spells out short words with no vowels, except titles and sounds said as words"):
     val chunks = Speech.splitSpeechChunks("Run sbt and npm over SSH, then open a PR. Mr Smith said hmm, mm.")
     assertEquals(chunks.map(_.text), List("Run S B T and N P M over S S H, then open a P R.", "Mr Smith said hmm, mm."))
 
+  test("spells out hashes and ids, and speaks numbers in names as words"):
+    val chunks = Speech.splitSpeechChunks("Commit 0db1ea5 fixes uexjg8nei2 for Scala3, ES2018 and sha256, costing $5.")
+    assertEquals(
+      chunks.map(_.text),
+      List(
+        "Commit zero D B one E A five fixes U E X J G eight N E I two for Scala three, ES two thousand eighteen " +
+          "and sha two hundred fifty six, costing $5."
+      )
+    )
+
+  test("splits camelCase names into words, each then spoken as any other word"):
+    val chunks = Speech.splitSpeechChunks("Set smsChat and EntranceGroupV2SmsConfig.srcNumber on the HTTPServer.")
+    assertEquals(
+      chunks.map(_.text),
+      List("Set S M S Chat and Entrance Group V two S M S Config dot S R C Number on the H T T P Server.")
+    )
+
+  test("speaks a thread by its title, or as 'a thread' when its title is unknown"):
+    val text = "@thread:thr_abc123 confirms it, and thr_def456 too (see @thread:thr_abc123#msg=42)."
+    assertEquals(Speech.threadsReferredTo(text), Set("thr_abc123", "thr_def456"))
+    val chunks = Speech.splitSpeechChunks(text, Map("thr_abc123" -> "Fix the $5 build"))
+    assertEquals(chunks.map(_.text), List("Fix the $5 build confirms it, and a thread too (see Fix the $5 build)."))
+
   test("keeps periods in decimals and abbreviations"):
     val chunks = Speech.splitSpeechChunks("Version 3.5 ships, e.g. at 9 a.m. in the U.S.")
-    assertEquals(chunks.map(_.text), List("Version 3.5 ships, e.g. at 9 a.m. in the U.S."))
+    assertEquals(chunks.map(_.text), List("Version 3.5 ships, e.g. at nine a.m. in the U.S."))
 
   test("list items become one chunk per line"):
     val chunks = Speech.splitSpeechChunks("Steps:\n\n- First step\n- Second step")
