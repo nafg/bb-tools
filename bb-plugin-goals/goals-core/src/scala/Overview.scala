@@ -1,7 +1,15 @@
 package goalscore
 
 /** What the overview needs to know about an open thread. */
-final case class ThreadInfo(id: String, parentId: Option[String], projectId: String, title: String)
+final case class ThreadInfo(
+    id: String,
+    parentId: Option[String],
+    projectId: String,
+    title: String,
+    /** When the thread last did work the user would call activity (epoch ms): bb's latest attention time, which archiving does not move. */
+    activeAt: Long = 0L,
+    archived: Boolean = false
+)
 
 final case class OverviewThread(
     id: String,
@@ -12,6 +20,7 @@ final case class OverviewThread(
     importance: Option[Int],
     blockedBy: List[String],
     seconds: Double,
+    archived: Boolean,
     children: List[OverviewThread]
 )
 
@@ -34,6 +43,12 @@ final case class Resolved(
 )
 
 object Overview:
+  /** Whether a thread belongs in a view of the window starting at `since`: archived or not, it is in when it was last active since then,
+    * received attention in the window, or still carries a "my move" mark.
+    */
+  def active(thread: ThreadInfo, labels: Option[ThreadLabels], seconds: Double, since: Long): Boolean =
+    thread.activeAt >= since || seconds > 0 || labels.exists(_.myMove.isDefined)
+
   /** Every open thread's label, what it was lent, and its importance. `own` may hold closed threads too (ancestors, and anything reached
     * through `blockedBy`), so inheritance and lending can pass through them; only the open ones are returned.
     */
@@ -72,6 +87,7 @@ object Overview:
         importance = r.importance,
         blockedBy = r.blockedBy,
         seconds = seconds.getOrElse(t.id, 0.0),
+        archived = t.archived,
         children = byParent.getOrElse(Some(t.id), Nil).map(node)
       )
 

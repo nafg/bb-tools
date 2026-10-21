@@ -59,8 +59,11 @@ final class Service(bb: BbApi, store: Store):
               Future.unit
         yield ()
 
+  /** How far back `rows` and `bb goals list` look when no window is given. */
+  val DefaultLookbackMs = 30 * 86_400_000L
+
   def rows(): Future[js.Dynamic] =
-    store.snapshot().map { snap =>
+    store.snapshot().map(_.within(js.Date.now().toLong - DefaultLookbackMs, Map.empty)).map { snap =>
       js.Dynamic.literal(
         "rows" -> snap.resolved.toList.map { case (id, r) =>
           js.Dynamic.literal(
@@ -85,7 +88,9 @@ final class Service(bb: BbApi, store: Store):
       names   <- names
       seconds <- attention
     yield
-      val model       = Overview.build(snap.threads, snap.own, snap.ancestors, seconds.toOption.flatten.getOrElse(Map.empty))
+      val attention   = seconds.toOption.flatten.getOrElse(Map.empty)
+      val shown       = snap.within(from.toLong, attention)
+      val model       = Overview.build(shown.threads, shown.own, shown.ancestors, attention)
       val recorderOut = seconds match
         case Right(Some(_)) => js.Dynamic.literal("state" -> "ok")
         case Right(None)    => js.Dynamic.literal("state" -> "missing")
@@ -253,7 +258,11 @@ def plugin(bb: BbApi): Unit =
           "usage" -> "bb goals set [thread-id] [--goal X] [--value N] [--blocked-by ids] [--my-move quick|focus|later|none]"
         ),
         js.Dynamic
-          .literal("name" -> "list", "summary" -> "Print every open thread's effective label, one per line", "usage" -> "bb goals list"),
+          .literal(
+            "name"    -> "list",
+            "summary" -> "Print the effective label of every thread active in the last 30 days, archived included, one per line",
+            "usage"   -> "bb goals list"
+          ),
         js.Dynamic.literal(
           "name"    -> "import",
           "summary" -> "Write goals from a CSV with thread_id, goal, and value columns; rows without a goal are skipped",
@@ -292,7 +301,7 @@ private object Cli:
           case Right((id, edit)) =>
             service.edit(id, edit).map { case (own, eff) => ok(s"$id: ${describe(own, eff)}") }
       case "list" :: Nil =>
-        store.snapshot().map { snap =>
+        store.snapshot().map(_.within(js.Date.now().toLong - service.DefaultLookbackMs, Map.empty)).map { snap =>
           val resolved = snap.resolved
           val lines    = snap.threads.sortBy(_.title).map { t =>
             val label = resolved(t.id).label

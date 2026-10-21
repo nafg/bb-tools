@@ -67,6 +67,7 @@ object Out:
       "importance" -> t.importance.map(v => v: js.Any).orNull,
       "blockedBy"  -> t.blockedBy.toJSArray,
       "seconds"    -> t.seconds,
+      "archived"   -> t.archived,
       "children"   -> t.children.map(thread).toJSArray
     )
 

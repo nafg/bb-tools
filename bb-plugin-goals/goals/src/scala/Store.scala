@@ -14,17 +14,22 @@ final class Store(bb: BbApi)(using ExecutionContext):
   private val PageSize  = 200
   private val BatchSize = 200
 
-  /** Every open, visible thread. Pages until a page comes back empty, however large the server lets a page be. */
-  def openThreads(): Future[List[ThreadInfo]] =
-    def page(offset: Int, acc: List[ThreadInfo]): Future[List[ThreadInfo]] =
+  /** Every visible thread, archived ones included: a finished thread may still owe billing or labeling. Pages until a page comes back
+    * empty, however large the server lets a page be.
+    */
+  def allThreads(): Future[List[ThreadInfo]] =
+    def page(archived: Boolean, offset: Int, acc: List[ThreadInfo]): Future[List[ThreadInfo]] =
       bb.sdk.threads
-        .list(js.Dynamic.literal("archived" -> false, "limit" -> PageSize, "offset" -> offset))
+        .list(js.Dynamic.literal("archived" -> archived, "limit" -> PageSize, "offset" -> offset))
         .toFuture
         .flatMap { rows =>
           if rows.isEmpty then Future.successful(acc)
-          else page(offset + rows.length, acc ++ rows.toList.flatMap(threadInfo))
+          else page(archived, offset + rows.length, acc ++ rows.toList.flatMap(threadInfo))
         }
-    page(0, Nil)
+    for
+      open     <- page(archived = false, 0, Nil)
+      archived <- page(archived = true, 0, Nil)
+    yield open ++ archived
 
   private def threadInfo(row: js.Dynamic): Option[ThreadInfo] =
     for
@@ -34,7 +39,9 @@ final class Store(bb: BbApi)(using ExecutionContext):
       id = id,
       parentId = Js.optStr(row.parentThreadId),
       projectId = projectId,
-      title = Js.optStr(row.title).orElse(Js.optStr(row.titleFallback)).getOrElse(id)
+      title = Js.optStr(row.title).orElse(Js.optStr(row.titleFallback)).getOrElse(id),
+      activeAt = Dyn.number(row.latestAttentionAt).orElse(Dyn.number(row.updatedAt)).map(_.toLong).getOrElse(0L),
+      archived = Dyn.number(row.archivedAt).isDefined
     )
 
   def projectNames(): Future[Map[String, String]] =
@@ -109,15 +116,17 @@ final class Store(bb: BbApi)(using ExecutionContext):
       .toFuture
       .map(Js.labelsOf)
 
-  /** The open threads with the labels inheritance and lending read: theirs, their ancestors', and those of every thread reachable through
-    * `blockedBy`.
+  /** Every thread with the labels inheritance and lending read: theirs, their ancestors', and those of every thread reachable through
+    * `blockedBy`. `within` keeps the threads active in a window (see `Overview.active`), given each one's attention seconds there.
     */
   final case class Snapshot(threads: List[ThreadInfo], own: Map[String, ThreadLabels], ancestors: Map[String, List[String]]):
-    def resolved: Map[String, Resolved] = Overview.resolve(threads, own, ancestors)
+    def resolved: Map[String, Resolved]                             = Overview.resolve(threads, own, ancestors)
+    def within(since: Long, seconds: Map[String, Double]): Snapshot =
+      copy(threads = threads.filter(t => Overview.active(t, own.get(t.id), seconds.getOrElse(t.id, 0.0), since)))
 
   def snapshot(): Future[Snapshot] =
     for
-      threads <- openThreads()
+      threads <- allThreads()
       ids = threads.map(_.id)
       anc <- ancestors(ids)
       own <- labelsWithBlockers(ids ++ anc.values.flatten)

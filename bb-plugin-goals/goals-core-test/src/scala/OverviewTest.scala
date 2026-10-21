@@ -87,3 +87,13 @@ class OverviewTest extends munit.FunSuite:
     // Too many threads for the minimum to fit: still equal-floor, never negative or NaN.
     val crowded = Treemap.floorWeights(List.fill(200)(0.0) :+ 50.0, areaPx = 1000, minPx = 100)
     assert(crowded.forall(w => w > 0 && !w.isNaN))
+
+  test("a thread is active in a window when it was last active then, got attention, or carries a my-move mark, archived or not"):
+    val old    = ThreadInfo("old", None, "p", "old", activeAt = 100L, archived = true)
+    val fresh  = ThreadInfo("fresh", None, "p", "fresh", activeAt = 900L, archived = true)
+    val marked = ThreadLabels(None, None, Nil, myMove = Some(MyMove.Focus))
+    val since  = 500L
+    assert(!Overview.active(old, None, seconds = 0.0, since))
+    assert(Overview.active(fresh, None, seconds = 0.0, since))
+    assert(Overview.active(old, None, seconds = 30.0, since))
+    assert(Overview.active(old, Some(marked), seconds = 0.0, since))

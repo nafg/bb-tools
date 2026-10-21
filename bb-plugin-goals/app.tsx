@@ -71,6 +71,8 @@ interface OverviewThread {
   id: string;
   title: string;
   projectId: string;
+  /** Archived in bb, but still active in the window (changed, attended, or marked). */
+  archived: boolean;
   label: EffectiveLabel | null;
   lent: LentLabel[];
   importance: number | null;
@@ -769,7 +771,7 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
           ))}
         </div>
         <span className="text-xs text-muted-foreground">
-          Attention time per thread, parallel threads each counted in full. Box area follows it; darker fill is a bigger lever; a dot means your turn; a ring means the open thread.
+          Threads active in the window, archived ones included. Box area is attention time, parallel threads each counted in full; darker fill is a bigger lever; a dot means your turn; a ring means the open thread.
         </span>
       </div>
       {overview?.recorder.state === "missing" && (
@@ -968,7 +970,10 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
             style={{ left: Math.min(hover.x + 12, Math.max(0, mapSize.width - 260)), top: hover.y + 12 }}
           >
             <div className="font-medium">{hover.thread.title}</div>
-            <div className="text-muted-foreground">{overview?.projects[hover.thread.projectId] ?? hover.thread.projectId}</div>
+            <div className="text-muted-foreground">
+              {overview?.projects[hover.thread.projectId] ?? hover.thread.projectId}
+              {hover.thread.archived ? " · archived" : ""}
+            </div>
             <div>{describeLabel(hover.thread.label)}</div>
             <div>
               {LIVE_STATE_TEXT[liveStateOf(live.get(hover.thread.id))]}
@@ -1013,7 +1018,10 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
                     </td>
                     <td className="py-0.5 pr-2 tabular-nums">{t.importance ?? "–"}</td>
                     <td className="py-0.5 pr-2 tabular-nums">{t.label ? shortLabel(t.label) : "–"}</td>
-                    <td className="py-0.5 pr-2">{t.title}</td>
+                    <td className="py-0.5 pr-2">
+                      {t.title}
+                      {t.archived && <span className="ml-1 text-muted-foreground">(archived)</span>}
+                    </td>
                     <td className="py-0.5 pr-2 text-muted-foreground">{overview.projects[t.projectId] ?? t.projectId}</td>
                     <td className="py-0.5 pr-2 text-right tabular-nums">{formatDuration(t.seconds)}</td>
                   </tr>
@@ -1043,7 +1051,10 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
           <span className="min-w-0 flex-1 truncate font-medium">
             {selected ? selected.title : <ThreadTitle threadId={selectedId} />}
             {selected && (
-              <span className="ml-2 font-normal text-muted-foreground">{overview?.projects[selected.projectId] ?? selected.projectId}</span>
+              <span className="ml-2 font-normal text-muted-foreground">
+                {overview?.projects[selected.projectId] ?? selected.projectId}
+                {selected.archived ? " · archived" : ""}
+              </span>
             )}
           </span>
           <button type="button" className={buttonClass} onClick={() => navigate.toThread(selectedId)}>
