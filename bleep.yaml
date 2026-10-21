@@ -48,6 +48,14 @@ projects:
     dependencies:
     - org.scalameta::munit:1.1.1
     folder: ./bb-plugin-converse/converse-core-test
+  converse-roundtrip:
+    dependsOn: converse-core
+    extends:
+    - template-common
+    - template-jvm
+    dependencies:
+    - com.lihaoyi::ujson:4.4.3
+    folder: ./bb-plugin-converse/converse-roundtrip
   converse-app:
     dependsOn: converse-core
     extends:
