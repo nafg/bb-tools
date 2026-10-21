@@ -1779,7 +1779,14 @@ def plugin(bb: BbApi): Unit =
       },
       "reportBrowserState" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val sessionId = str(input.sessionId)
-        if sessionId.nonEmpty then state.browserStates.update(sessionId, (input.state, js.Date.now()))
+        if sessionId.nonEmpty then
+          // Logged so a recording that reached an unexpected thread can be
+          // traced to where the session was routing speech at the time.
+          val target   = str(input.state.threadId)
+          val previous = state.browserStates.get(sessionId).map((reported, _) => str(reported.threadId))
+          if !previous.contains(target) then
+            bb.log.info(s"session $sessionId now routes speech to ${if target.isEmpty then "no thread" else target}")
+          state.browserStates.update(sessionId, (input.state, js.Date.now()))
         js.Dynamic.literal("ok" -> true)
       },
       "reportSessionEnd" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
