@@ -557,6 +557,104 @@ const byImportance = (a: OverviewThread, b: OverviewThread): number =>
 
 const PANEL_PATH = "goals";
 
+/** One slice of the donut: a goal (or unlabeled) with its share of the day's attention. */
+const arcPath = (cx: number, cy: number, r0: number, r1: number, a0: number, a1: number): string => {
+  const p = (r: number, a: number) => [cx + r * Math.sin(a), cy - r * Math.cos(a)] as const;
+  const [x0, y0] = p(r1, a0);
+  const [x1, y1] = p(r1, a1);
+  const [x2, y2] = p(r0, a1);
+  const [x3, y3] = p(r0, a0);
+  const large = a1 - a0 > Math.PI ? 1 : 0;
+  return `M ${x0} ${y0} A ${r1} ${r1} 0 ${large} 1 ${x1} ${y1} L ${x2} ${y2} A ${r0} ${r0} 0 ${large} 0 ${x3} ${y3} Z`;
+};
+
+/** Where attention went in the window: a donut by goal with its legend, and the threads that received it, most first. */
+function DayView({
+  overview,
+  dark,
+  selectedId,
+  onSelect,
+}: {
+  overview: Overview;
+  dark: boolean;
+  selectedId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  const all = flatten(overview.groups.flatMap((g) => g.threads));
+  const total = overview.groups.reduce((sum, g) => sum + g.seconds, 0);
+  const slices = [...GOALS.map((g) => g.letter), null]
+    .map((letter) => ({ letter, seconds: overview.groups.find((g) => g.goal === letter)?.seconds ?? 0 }))
+    .filter((s) => s.seconds > 0);
+  let angle = 0;
+  const arcs = slices.map((s) => {
+    const a0 = angle;
+    angle += (s.seconds / total) * 2 * Math.PI;
+    return { ...s, a0, a1: angle };
+  });
+  const threads = all.filter((t) => t.seconds > 0).sort((a, b) => b.seconds - a.seconds);
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-auto">
+      <div className="flex flex-wrap items-start gap-6">
+        <svg width={220} height={220} role="img" aria-label="Attention by goal in the last 24 hours">
+          {arcs.map((a) => (
+            <path key={a.letter ?? "none"} d={arcPath(110, 110, 62, 104, a.a0, a.a1 - 0.012)} fill={goalColor(a.letter, dark)} />
+          ))}
+          <text x={110} y={106} textAnchor="middle" fontSize={20} fontWeight={600} fill="currentColor">
+            {formatDuration(total)}
+          </text>
+          <text x={110} y={126} textAnchor="middle" fontSize={11} fill="currentColor" opacity={0.7}>
+            {total > 0 ? "of attention" : "nothing recorded"}
+          </text>
+        </svg>
+        <table className="text-xs">
+          <caption className="sr-only">Attention by goal</caption>
+          <tbody>
+            {slices.map((s) => (
+              <tr key={s.letter ?? "none"}>
+                <td className="py-0.5 pr-3">
+                  <span className="mr-1 inline-block h-2 w-2 rounded-sm align-middle" style={{ background: goalColor(s.letter, dark) }} />
+                  {s.letter ? `${s.letter} ${goalInfo(s.letter)?.title}` : "Unlabeled"}
+                </td>
+                <td className="py-0.5 pr-3 text-right tabular-nums">{Math.round((s.seconds / total) * 100)}%</td>
+                <td className="py-0.5 text-right tabular-nums">{formatDuration(s.seconds)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <table className="w-full text-xs">
+        <caption className="sr-only">Threads by attention</caption>
+        <thead>
+          <tr className="text-left text-muted-foreground">
+            <th className="py-0.5 pr-2 font-normal">Label</th>
+            <th className="py-0.5 pr-2 font-normal">Thread</th>
+            <th className="py-0.5 pr-2 font-normal">Project</th>
+            <th className="py-0.5 pr-2 text-right font-normal">Attention</th>
+            <th className="py-0.5 pr-2 text-right font-normal">Share</th>
+          </tr>
+        </thead>
+        <tbody>
+          {threads.map((t) => (
+            <tr key={t.id} className={`cursor-pointer hover:bg-accent ${t.id === selectedId ? "bg-accent" : ""}`} onClick={() => onSelect(t.id)}>
+              <td className="py-0.5 pr-2 tabular-nums">
+                <span className="mr-1 inline-block h-2 w-2 rounded-sm align-middle" style={{ background: goalColor(t.label?.goal, dark) }} />
+                {t.label ? shortLabel(t.label) : "–"}
+              </td>
+              <td className="py-0.5 pr-2">
+                {t.title}
+                {t.archived && <span className="ml-1 text-muted-foreground">(archived)</span>}
+              </td>
+              <td className="py-0.5 pr-2 text-muted-foreground">{overview.projects[t.projectId] ?? t.projectId}</td>
+              <td className="py-0.5 pr-2 text-right tabular-nums">{formatDuration(t.seconds)}</td>
+              <td className="py-0.5 pr-2 text-right tabular-nums">{Math.round((t.seconds / total) * 100)}%</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 /** How much of the page the thread pane takes; remembered per browser. */
 const PANE_FRACTION_KEY = "goals.paneFraction";
 const DEFAULT_PANE_FRACTION = 0.6;
@@ -638,6 +736,14 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
   const dark = useDarkMode();
   const { version } = useLabelState();
   const [window_, setWindow] = useState<Window>("7d");
+  const [view, setView] = useState<"map" | "day">("map");
+  // The day view follows the recorder's live timer, so it refetches once a minute.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    if (view !== "day") return;
+    const id = window.setInterval(() => setTick((n) => n + 1), 60_000);
+    return () => window.clearInterval(id);
+  }, [view]);
   const [overview, setOverview] = useState<Overview | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hover, setHover] = useState<{ x: number; y: number; thread: OverviewThread } | null>(null);
@@ -650,7 +756,7 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
   useEffect(() => {
     let cancelled = false;
     const to = Date.now();
-    const from = to - (WINDOWS.find((w) => w.id === window_)?.ms ?? 0);
+    const from = to - (view === "day" ? 86_400_000 : (WINDOWS.find((w) => w.id === window_)?.ms ?? 0));
     rpc
       .call("overview", { from, to })
       .then((result) => {
@@ -665,7 +771,7 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [rpc, window_, version]);
+  }, [rpc, window_, version, view, tick]);
 
   const threadsById = useMemo(() => {
     const map = new Map<string, OverviewThread>();
@@ -763,15 +869,27 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
     <div ref={pageRef} className="flex h-full min-h-0 flex-row">
     <div className="flex h-full min-h-0 min-w-0 flex-1 flex-col gap-3 p-4">
       <div className="flex flex-wrap items-center gap-2">
-        <div role="group" aria-label="Time window" className="flex gap-1">
-          {WINDOWS.map((w) => (
-            <ChoiceButton key={w.id} selected={window_ === w.id} onClick={() => setWindow(w.id)}>
-              {w.label}
-            </ChoiceButton>
-          ))}
+        <div role="group" aria-label="View" className="flex gap-1">
+          <ChoiceButton selected={view === "map"} onClick={() => setView("map")}>
+            Map
+          </ChoiceButton>
+          <ChoiceButton selected={view === "day"} onClick={() => setView("day")}>
+            Last 24 hours
+          </ChoiceButton>
         </div>
+        {view === "map" && (
+          <div role="group" aria-label="Time window" className="flex gap-1">
+            {WINDOWS.map((w) => (
+              <ChoiceButton key={w.id} selected={window_ === w.id} onClick={() => setWindow(w.id)}>
+                {w.label}
+              </ChoiceButton>
+            ))}
+          </div>
+        )}
         <span className="text-xs text-muted-foreground">
-          Threads active in the window, archived ones included. Box area is attention time, parallel threads each counted in full; darker fill is a bigger lever; a dot means your turn; a ring means the open thread.
+          {view === "map"
+            ? "Threads active in the window, archived ones included. Box area is attention time, parallel threads each counted in full; darker fill is a bigger lever; a dot means your turn; a ring means the open thread."
+            : "Where your attention went in the last 24 hours, by goal and by thread; parallel threads each counted in full. Refreshes every minute."}
         </span>
       </div>
       {overview?.recorder.state === "missing" && (
@@ -786,7 +904,11 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
       )}
       {error && <div className="text-xs text-destructive">{error}</div>}
 
-      {overview && (
+      {overview && view === "day" && (
+        <DayView overview={overview} dark={dark} selectedId={selectedId} onSelect={select} />
+      )}
+
+      {overview && view === "map" && (
         <table className="w-full text-xs">
           <caption className="sr-only">Attention by goal</caption>
           <tbody>
@@ -819,6 +941,7 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
         </table>
       )}
 
+      {view === "map" && (
       <details open className="rounded border text-xs">
         <summary className="flex cursor-pointer items-center gap-2 px-3 py-1.5">
           <span className="font-medium">Waiting on you ({waiting.length})</span>
@@ -862,7 +985,9 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
           </ul>
         )}
       </details>
+      )}
 
+      {view === "map" && (
       <div ref={mapRef} className="relative min-h-[320px] flex-1 overflow-hidden rounded border" onMouseLeave={() => setHover(null)}>
         {cells.length > 0 && (
           <svg width={mapSize.width} height={mapSize.height} role="img" aria-label="Threads as nested boxes, grouped by goal">
@@ -991,7 +1116,9 @@ function GoalsPage({ subPath }: PluginNavPanelProps) {
         )}
       </div>
 
-      {overview && (
+      )}
+
+      {overview && view === "map" && (
         <details className="text-xs">
           <summary className="cursor-pointer text-muted-foreground">All threads as a table, most important first</summary>
           <table className="mt-2 w-full">
