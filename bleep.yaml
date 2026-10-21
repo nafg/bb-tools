@@ -92,6 +92,34 @@ projects:
     - template-common
     - template-js
     folder: ./bb-plugin-wbs/wbs
+  subscriptions-core:
+    cross:
+      jvm3:
+        extends:
+        - template-common
+        - template-jvm
+      js3:
+        extends:
+        - template-common
+        - template-js
+    folder: ./bb-plugin-subscriptions/subscriptions-core
+  subscriptions-core-test:
+    dependsOn: subscriptions-core
+    extends:
+    - template-common
+    - template-jvm
+    isTestProject: true
+    dependencies:
+    - org.scalameta::munit:1.1.1
+    folder: ./bb-plugin-subscriptions/subscriptions-core-test
+  subscriptions:
+    dependsOn:
+    - bb-plugin-facades
+    - subscriptions-core
+    extends:
+    - template-common
+    - template-js
+    folder: ./bb-plugin-subscriptions/subscriptions
 templates:
   template-jvm:
     platform:
