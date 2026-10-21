@@ -9,6 +9,16 @@ package converse
   * frozen with about 1.45 GB free), otherwise the CPU, on four threads so
   * bb's window stays responsive.
   *
+  * Transcribed whole, Parakeet now and then skips a stretch of speech
+  * without any sign but the gap in its words' timestamps: in 198 stored
+  * recordings, it skipped real speech in 4 (up to 30 seconds of it) and
+  * fillers like "um" in many more. So a gap of over `HOLE_SECONDS` between
+  * words where the audio is loud is transcribed again with the audio around
+  * it, keeping the words that fall inside the gap; when that too comes back
+  * empty, the gap is transcribed on its own. Gaps transcribed on their own
+  * first invented words twice in those recordings, which the surrounding
+  * audio prevented.
+  *
   * It answers 413 for audio it cannot take whole: longer than `MaxSeconds`,
   * or more than its GPU memory cap allows at the moment. The cap keeps a long
   * recording from leaving gigabytes reserved after it is done. Measured on an
@@ -118,6 +128,58 @@ private object ParakeetServer:
       |    return "BFCArena" in str(error) or "Failed to allocate" in str(error)
       |
       |SAMPLE_RATE = 16000
+      |timed = model.with_timestamps()
+      |# A gap between words longer than this, where the audio is loud, is a
+      |# stretch Parakeet may have skipped.
+      |HOLE_SECONDS = 2.0
+      |CONTEXT_SECONDS = 3.0
+      |
+      |
+      |def loud_seconds(audio, start, end, threshold):
+      |    window = audio[int(start * SAMPLE_RATE):int(end * SAMPLE_RATE)]
+      |    n = len(window) // 1600
+      |    if n == 0:
+      |        return 0.0
+      |    rms = np.sqrt((window[:n * 1600].reshape(n, 1600) ** 2).mean(axis=1))
+      |    return float((rms > threshold).sum()) * 0.1
+      |
+      |
+      |# The words in a skipped stretch, with a leading space; empty if none.
+      |def recover(audio, start, end):
+      |    duration = len(audio) / SAMPLE_RATE
+      |    lo, hi = max(start - CONTEXT_SECONDS, 0.0), min(end + CONTEXT_SECONDS, duration)
+      |    around = timed.recognize(audio[int(lo * SAMPLE_RATE):int(hi * SAMPLE_RATE)], sample_rate=SAMPLE_RATE)
+      |    inside = [token for token, t in zip(around.tokens, around.timestamps) if start + 0.15 < lo + t < end - 0.05]
+      |    while inside and not inside[0].startswith(" "):  # the rest of the word before the gap
+      |        inside.pop(0)
+      |    text = "".join(inside)
+      |    if text.strip():
+      |        return text
+      |    alone = timed.recognize(audio[int((start + 0.2) * SAMPLE_RATE):int(end * SAMPLE_RATE)], sample_rate=SAMPLE_RATE).text.strip()
+      |    return " " + alone if alone else ""
+      |
+      |
+      |def recognize(audio):
+      |    result = timed.recognize(audio, sample_rate=SAMPLE_RATE)
+      |    duration = len(audio) / SAMPLE_RATE
+      |    n = len(audio) // 1600
+      |    if n == 0:
+      |        return result.text
+      |    # Loud: over a quarter of the recording's 95th-percentile level.
+      |    threshold = 0.25 * np.percentile(np.sqrt((audio[:n * 1600].reshape(n, 1600) ** 2).mean(axis=1)), 95)
+      |    bounds = [0.0] + list(result.timestamps) + [duration]
+      |    parts = []
+      |    for i, (start, end) in enumerate(zip(bounds, bounds[1:])):
+      |        if i > 0:
+      |            parts.append(result.tokens[i - 1])
+      |        if end - start > HOLE_SECONDS and loud_seconds(audio, start + 0.2, end, threshold) >= 0.5:
+      |            words = recover(audio, start, end)
+      |            if words:
+      |                print(f"recovered {start:.1f}-{end:.1f} s:{words}", flush=True)
+      |                parts.append(words)
+      |    return "".join(parts).strip()
+      |
+      |
       |app = FastAPI()
       |# One recording on the GPU at a time, so two cannot exhaust its memory together.
       |recognizing = threading.Lock()
@@ -140,7 +202,7 @@ private object ParakeetServer:
       |        raise HTTPException(413, f"{seconds:.0f} s is longer than the {args.max_seconds:.0f} s this server transcribes")
       |    try:
       |        with recognizing:
-      |            text = model.recognize(audio, sample_rate=SAMPLE_RATE) if len(audio) else ""
+      |            text = recognize(audio) if len(audio) else ""
       |    except Exception as error:
       |        if out_of_memory(error):
       |            raise HTTPException(413, f"not enough GPU memory for {seconds:.0f} s of audio") from error
