@@ -1,0 +1,18 @@
+{
+  "name": "bb-plugin-subscriptions",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "bbPluginSdk": "^0.6.0" },
+  "scripts": {
+    "build": "bleep --directory .. link subscriptions && cp ../.bleep/builds/normal/.bloop/subscriptions/link-output/debug/js/main.js server.js",
+    "test": "bleep --directory .. test subscriptions-core-test",
+    "reload": "npm run build && bb plugin reload subscriptions"
+  },
+  "bb": {
+    "name": "Subscriptions",
+    "description": "Threads subscribe to GitHub pull requests and GitLab merge requests and get a message when one merges, closes or finishes CI.",
+    "branding": { "icon": "BellRing" },
+    "server": "./server.js",
+    "skills": ["skills"]
+  }
+}
