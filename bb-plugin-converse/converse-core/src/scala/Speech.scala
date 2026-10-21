@@ -22,6 +22,13 @@ object Speech:
   // two characters must follow so decimals (3.5) and dotted abbreviations
   // (e.g., a.m., U.S.) keep their periods.
   private val IdentifierDot  = "([A-Za-z0-9_])\\.(?=[A-Za-z_][A-Za-z0-9_])".r
+  // A short word with no vowels, such as a tool's name (sbt, npm, ssh) or an
+  // acronym (PR).
+  private val VowellessWord  = "\\b[b-df-hj-np-tv-xzB-DF-HJ-NP-TV-XZ]{2,5}\\b".r
+  // Vowelless words that are said as words.
+  private val SaidAsWords    =
+    Set("mr", "mrs", "dr", "sr", "jr", "st", "lt", "sgt", "pvt", "vs", "nth") ++
+      Set("hm", "hmm", "mm", "mhm", "shh", "psst", "pst", "tsk", "brr", "grr", "pfft", "zzz")
   // A number marked with "#", as in issue and pull request references.
   private val HashNumber     = "(^|[^\\w#])#(\\d+)\\b".r
 
@@ -49,10 +56,17 @@ object Speech:
   /** TTS engines end a sentence at every period, so speak the ones inside
     * identifiers as the word "dot". Pocket TTS garbles a number written with
     * "#" (it dropped the numbers and repeated the words around them), so
-    * "#233" is spoken as "number 233".
+    * "#233" is spoken as "number 233"; and it says a short word with no vowels
+    * as a word ("sbt" as "sess B T", "ssh" as "set"), so such a word is
+    * spelled out ("S B T").
     */
   private def speakable(text: String): String =
-    HashNumber.replaceAllIn(IdentifierDot.replaceAllIn(text, "$1 dot "), "$1number $2")
+    val dotted   = IdentifierDot.replaceAllIn(text, "$1 dot ")
+    val numbered = HashNumber.replaceAllIn(dotted, "$1number $2")
+    VowellessWord.replaceAllIn(
+      numbered,
+      m => if SaidAsWords(m.matched.toLowerCase) then m.matched else m.matched.toUpperCase.mkString(" ")
+    )
 
   private def splitSentences(text: String): List[String] =
     val words     = text.split("\\s+").toList.filter(_.nonEmpty)

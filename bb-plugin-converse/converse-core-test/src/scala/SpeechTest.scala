@@ -34,6 +34,10 @@ class SpeechTest extends munit.FunSuite:
     val chunks = Speech.splitSpeechChunks("[#233](https://example.com/pull/233) is merged, and C# is fine.")
     assertEquals(chunks.map(_.text), List("number 233 is merged, and C# is fine."))
 
+  test("spells out short words with no vowels, except titles and sounds said as words"):
+    val chunks = Speech.splitSpeechChunks("Run sbt and npm over SSH, then open a PR. Mr Smith said hmm, mm.")
+    assertEquals(chunks.map(_.text), List("Run S B T and N P M over S S H, then open a P R.", "Mr Smith said hmm, mm."))
+
   test("keeps periods in decimals and abbreviations"):
     val chunks = Speech.splitSpeechChunks("Version 3.5 ships, e.g. at 9 a.m. in the U.S.")
     assertEquals(chunks.map(_.text), List("Version 3.5 ships, e.g. at 9 a.m. in the U.S."))
