@@ -12,11 +12,8 @@ trait AudioOutput:
 
 object AudioOutput:
   /** Call-style output on Android, which needs it to reach a Bluetooth
-    * headset (see [[CallAudioOutput]]); the context's own output elsewhere.
-    * Call-style output is not used everywhere because Chromium plays a media
-    * stream in an audio element at a varying rate: measured on this plugin's
-    * replies, a sentence started after the first ten seconds or so came out
-    * up to nearly a semitone flat, drifting back over the following seconds.
+    * headset (see [[CallAudioOutput]]); the context's own output elsewhere,
+    * since call-style output passes the sound through lossy compression.
     */
   def forThisDevice(ctx: AudioContext, onError: String => Unit): AudioOutput =
     if Platform.isAndroid then
