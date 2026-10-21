@@ -13,11 +13,16 @@ final class CallAudioOutput(ctx: AudioContext, onError: String => Unit) extends 
   private val stream  = ctx.createMediaStreamDestination()
   private val element = js.Dynamic.newInstance(js.Dynamic.global.Audio)()
   element.srcObject = stream.stream
+  private var startFailure: Option[String] = None
   element.play().asInstanceOf[js.Promise[Unit]].toFuture.failed.foreach { e =>
+    startFailure = Some(e.getMessage)
     onError(s"call-style audio output could not start: ${e.getMessage}")
   }
 
   def input: AudioNode = stream
+
+  def report: String =
+    "call-style (a media stream played by an audio element)" + startFailure.fold("")(e => s"; could not start: $e")
 
   def close(): Unit =
     val _ = element.pause()

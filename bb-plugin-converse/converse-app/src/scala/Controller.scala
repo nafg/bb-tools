@@ -64,6 +64,9 @@ final class Controller(
 
   // Audio graph
   private var micStream: MediaStream        = null
+  // The audio devices the browser offered when listening began, as
+  // "kind: label", for diagnostics.
+  private var audioDevices: js.Array[String] = js.Array()
   private var analysisStream: MediaStream   = null
   private var recordingStream: MediaStream  = null
   private var audioContext: AudioContext    = null
@@ -250,7 +253,11 @@ final class Controller(
         "repliesHeld"         -> player.isHeld,
         "playerSpeaking"      -> player.isSpeaking,
         "playerQueued"        -> player.queuedThreads.toJSArray,
-        "notice"              -> notice
+        "notice"              -> notice,
+        "userAgent"           -> js.Dynamic.global.navigator.userAgent,
+        "audioOutput"         -> player.outputReport,
+        "microphone"          -> Option(micStream).flatMap(_.getTracks().headOption).map(_.label).orNull,
+        "audioDevices"        -> audioDevices
       )
       val json = js.JSON.stringify(report)
       if json != lastReportedState then
@@ -518,6 +525,14 @@ final class Controller(
     else
       micStream = stream
       analysisStream = stream.cloneStream()
+      js.Dynamic.global.navigator.mediaDevices.enumerateDevices().asInstanceOf[js.Promise[js.Array[js.Dynamic]]]
+        .toFuture
+        .foreach { devices =>
+          audioDevices = devices
+            .filter(d => d.kind.asInstanceOf[String].startsWith("audio"))
+            .map(d => s"${d.kind}: ${d.label}")
+          reportBrowserState()
+        }
       audioContext.resume().toFuture.onComplete { result =>
         val state = if audioContext == null then "closed" else audioContext.state
         debug(s"audio context state after resume: $state ($result)")

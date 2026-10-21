@@ -66,6 +66,9 @@ final class Player(
     audioContext = ctx
     output = if ctx == null then null else AudioOutput.forThisDevice(ctx, debug)
 
+  /** Which audio output replies play through, for diagnostics. */
+  def outputReport: String = if output == null then null else output.report
+
   def isSpeaking: Boolean = speakingActive
 
   def isHeld: Boolean = held

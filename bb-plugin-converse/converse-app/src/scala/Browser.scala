@@ -16,6 +16,8 @@ trait MediaStream extends js.Object:
 @js.native
 trait MediaStreamTrack extends js.Object:
   def stop(): Unit = js.native
+  /** The device's name, such as a headset's. */
+  val label: String = js.native
 
 @js.native
 @JSGlobal
