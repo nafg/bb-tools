@@ -22,6 +22,8 @@ object Speech:
   // two characters must follow so decimals (3.5) and dotted abbreviations
   // (e.g., a.m., U.S.) keep their periods.
   private val IdentifierDot  = "([A-Za-z0-9_])\\.(?=[A-Za-z_][A-Za-z0-9_])".r
+  // A number marked with "#", as in issue and pull request references.
+  private val HashNumber     = "(^|[^\\w#])#(\\d+)\\b".r
 
   // No (?m)/(?s) flags: Scala.js rejects MULTILINE and DOTALL on the default
   // ES target, so line anchors are handled by splitting instead.
@@ -45,10 +47,12 @@ object Speech:
     out.trim
 
   /** TTS engines end a sentence at every period, so speak the ones inside
-    * identifiers as the word "dot".
+    * identifiers as the word "dot". Pocket TTS garbles a number written with
+    * "#" (it dropped the numbers and repeated the words around them), so
+    * "#233" is spoken as "number 233".
     */
   private def speakable(text: String): String =
-    IdentifierDot.replaceAllIn(text, "$1 dot ")
+    HashNumber.replaceAllIn(IdentifierDot.replaceAllIn(text, "$1 dot "), "$1number $2")
 
   private def splitSentences(text: String): List[String] =
     val words     = text.split("\\s+").toList.filter(_.nonEmpty)

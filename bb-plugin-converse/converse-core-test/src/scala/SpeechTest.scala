@@ -30,6 +30,10 @@ class SpeechTest extends munit.FunSuite:
     val chunks = Speech.splitSpeechChunks("Call object.method from Widget.scala.")
     assertEquals(chunks.map(_.text), List("Call object dot method from Widget dot scala."))
 
+  test("speaks a number marked with # as 'number', leaving other uses of # alone"):
+    val chunks = Speech.splitSpeechChunks("[#233](https://example.com/pull/233) is merged, and C# is fine.")
+    assertEquals(chunks.map(_.text), List("number 233 is merged, and C# is fine."))
+
   test("keeps periods in decimals and abbreviations"):
     val chunks = Speech.splitSpeechChunks("Version 3.5 ships, e.g. at 9 a.m. in the U.S.")
     assertEquals(chunks.map(_.text), List("Version 3.5 ships, e.g. at 9 a.m. in the U.S."))
