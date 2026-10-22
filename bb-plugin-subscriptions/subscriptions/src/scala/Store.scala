@@ -15,6 +15,9 @@ final case class Subscription(
     checkError: Option[String]
 )
 
+/** A thread that subscribed to a target; `since` is when it last subscribed, in Unix seconds. */
+final case class Subscriber(threadId: String, since: Long, active: Boolean)
+
 final class Store(db: SqliteDb):
   /** Left when the row can't be read back, with the row id and the reason. */
   private def toSubscription(row: js.Dynamic): Either[String, Subscription] =
@@ -48,6 +51,15 @@ final class Store(db: SqliteDb):
   def get(id: Int): Option[Subscription] =
     db.prepare("SELECT * FROM subscriptions WHERE id = ? AND ended_at IS NULL").get(id).toOption
       .flatMap(toSubscription(_).toOption)
+
+  /** Every thread that has subscribed to `target`, current subscriptions first, newest first within each. */
+  def subscribersOf(target: Target): Seq[Subscriber] =
+    db.prepare(
+      """SELECT thread_id, max(created_at) AS since, max(ended_at IS NULL) AS active FROM subscriptions
+        |WHERE url = ? GROUP BY thread_id ORDER BY active DESC, since DESC""".stripMargin
+    ).all(target.url).toSeq.map { row =>
+      Subscriber(row.thread_id.asInstanceOf[String], row.since.asInstanceOf[Double].toLong, row.active.asInstanceOf[Double] == 1)
+    }
 
   def add(threadId: String, target: Target, seen: WatchState): Int =
     val result = db

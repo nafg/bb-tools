@@ -22,6 +22,10 @@ this.
 | `subscriptions_add` | `bb subscriptions add <url> [--thread <id>]` | Subscribe; returns the current state at once |
 | `subscriptions_list` | `bb subscriptions list [--thread <id> \| --all]` | Show active subscriptions and what was last seen |
 | `subscriptions_cancel` | `bb subscriptions cancel <id>` | Cancel one |
+| `subscriptions_who` | `bb subscriptions who <url>` | List threads that subscribed to a URL, now or before |
+
+`who` answers "which thread is working on this MR?". Subscribing suggests, but doesn't prove, that a thread works on
+it: a coordinator may subscribe to MRs it doesn't own. The list links each thread, current subscribers first.
 
 `--thread` subscribes another thread, for example a subthread that should hear about its own MR.
 

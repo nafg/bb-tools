@@ -98,7 +98,34 @@ final class Poller(bb: BbApi, store: Store):
     announce.map(_ => store.recordCheckError(s.id, error))
 
 /** The actions the agent tools and the CLI share. Each returns the text to show the caller. */
-final class Actions(store: Store):
+final class Actions(bb: BbApi, store: Store):
+  private def threadTitle(threadId: String): Future[String] =
+    bb.sdk.threads.get(js.Dynamic.literal("threadId" -> threadId)).toFuture
+      .map { t =>
+        Seq(t.title, t.titleFallback)
+          .collectFirst { case v if !js.isUndefined(v) && v != null && v.asInstanceOf[String].nonEmpty => v.asInstanceOf[String] }
+          .getOrElse("(untitled)")
+      }
+      .recover { case _ => "(thread not found)" }
+
+  /** Threads that subscribed to `url`, now or before. Subscribing suggests, but doesn't prove, that a thread is
+    * working on the target.
+    */
+  def who(url: String): Future[Either[String, String]] =
+    Target.parse(url) match
+      case Left(e) => Future.successful(Left(e))
+      case Right(target) =>
+        val subscribers = store.subscribersOf(target)
+        if subscribers.isEmpty then Future.successful(Right(s"No thread has subscribed to ${target.label}."))
+        else
+          Future.traverse(subscribers) { s =>
+            threadTitle(s.threadId).map { title =>
+              val date   = new js.Date(s.since * 1000.0).toISOString().take(10)
+              val status = if s.active then s"subscribed since $date" else s"subscribed on $date, since ended"
+              s"@thread:${s.threadId} $title ($status)"
+            }
+          }.map(lines => Right(s"Threads that subscribed to ${target.label}:\n" + lines.mkString("\n")))
+
   def add(threadId: String, url: String): Future[Either[String, String]] =
     Target.parse(url) match
       case Left(e) => Future.successful(Left(e))
@@ -180,6 +207,29 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
   )
   bb.agents.registerTool(
     js.Dynamic.literal(
+      "name" -> "subscriptions_who",
+      "description" ->
+        ("List the threads that subscribed to a pull or merge request, branch or tags URL, now or before, with " +
+          "their titles and links. Use it to find which thread is likely working on or waiting for something. " +
+          "Subscribing suggests, but doesn't prove, that a thread is working on it."),
+      "presentation" -> js.Dynamic.literal(
+        "label" -> js.Dynamic.literal("pending" -> "Finding subscribed threads", "completed" -> "Found subscribed threads")
+      ),
+      "parameters" -> js.Dynamic.literal(
+        "type" -> "object",
+        "properties" -> js.Dynamic.literal(
+          "url" -> js.Dynamic.literal("type" -> "string", "description" -> s"The URL: ${Target.supported}")
+        ),
+        "required"             -> js.Array("url"),
+        "additionalProperties" -> false
+      ),
+      "execute" -> ((input: js.Dynamic, _: js.Dynamic) =>
+        actions.who(input.url.asInstanceOf[String]).map(fromEither).toJSPromise
+      )
+    )
+  )
+  bb.agents.registerTool(
+    js.Dynamic.literal(
       "name"        -> "subscriptions_list",
       "description" -> "List this thread's active subscriptions with what was last seen for each.",
       "presentation" -> js.Dynamic.literal(
@@ -221,6 +271,7 @@ private val Usage =
     |  bb subscriptions add <url> [--thread <thread-id>]
     |    <url>: a PR or MR, a branch (…/tree/<branch>), or a repository's tags (…/tags)
     |  bb subscriptions list [--thread <thread-id> | --all]
+    |  bb subscriptions who <url>
     |  bb subscriptions cancel <id>""".stripMargin
 
 private def cliOk(stdout: String): js.Dynamic  = js.Dynamic.literal("exitCode" -> 0, "stdout" -> (stdout + "\n"))
@@ -254,6 +305,7 @@ private def runCli(store: Store, actions: Actions, argv: List[String], ctx: js.D
             case None      => cliOk(actions.list(store.active(), showThread = true))
             case Some(tid) => cliOk(actions.list(store.activeFor(tid), showThread = false))
       )
+    case "who" :: url :: Nil => actions.who(url).map(_.fold(cliErr, cliOk))
     case "cancel" :: id :: Nil =>
       Future.successful(id.stripPrefix("#").toIntOption match
         case None    => cliErr(s"not a subscription number: $id")
@@ -267,7 +319,7 @@ def plugin(bb: BbApi): Unit =
   val db = bb.storage.database()
   bb.storage.migrate(db, Store.migrations)
   val store   = Store(db)
-  val actions = Actions(store)
+  val actions = Actions(bb, store)
   val poller  = Poller(bb, store)
 
   registerTools(bb, store, actions)
@@ -286,6 +338,11 @@ def plugin(bb: BbApi): Unit =
           "name"    -> "list",
           "summary" -> "List this thread's active subscriptions, another thread's, or all of them",
           "usage"   -> "bb subscriptions list [--thread <thread-id> | --all]"
+        ),
+        js.Dynamic.literal(
+          "name"    -> "who",
+          "summary" -> "List the threads that subscribed to a URL, now or before, with titles and links",
+          "usage"   -> "bb subscriptions who <url>"
         ),
         js.Dynamic.literal(
           "name"    -> "cancel",
