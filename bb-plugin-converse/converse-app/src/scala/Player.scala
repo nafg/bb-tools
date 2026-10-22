@@ -60,16 +60,41 @@ final class Player(
 
   private var output: AudioOutput = null
 
-  /** Must be called inside a user gesture, so playback is allowed to start. */
+  /** Must be called inside a user gesture, so playback is allowed to start.
+    * The context must be the player's alone: pausing suspends it.
+    */
   def setAudioContext(ctx: AudioContext): Unit =
     if output != null then output.close()
     audioContext = ctx
+    paused = false
     output = if ctx == null then null else AudioOutput.forThisDevice(ctx, debug)
 
   /** Which audio output replies play through, for diagnostics. */
   def outputReport: String = if output == null then null else output.report
 
+  /** A reply is playing or paused partway. */
   def isSpeaking: Boolean = speakingActive
+
+  private var paused = false
+
+  def isPaused: Boolean = paused
+
+  /** Holds the speech playing now exactly where it is, until [[resume]] or
+    * [[stop]]; speech still to come waits behind it.
+    */
+  def pause(): Unit =
+    if speakingActive && !paused then
+      paused = true
+      if audioContext != null then { val _ = audioContext.suspend() }
+      if !js.isUndefined(js.Dynamic.global.speechSynthesis) then { val _ = js.Dynamic.global.speechSynthesis.pause() }
+      onChange()
+
+  def resume(): Unit =
+    if paused then
+      paused = false
+      if audioContext != null then { val _ = audioContext.resume() }
+      if !js.isUndefined(js.Dynamic.global.speechSynthesis) then { val _ = js.Dynamic.global.speechSynthesis.resume() }
+      onChange()
 
   def isHeld: Boolean = held
 
@@ -189,6 +214,9 @@ final class Player(
       try { val _ = currentAudio.stop() }
       catch { case _: Throwable => () }
       currentAudio = null
+    if paused then
+      paused = false
+      if audioContext != null then { val _ = audioContext.resume() }
     if wasActive then onChange()
 
   private def delay(seconds: Double): Future[Unit] =

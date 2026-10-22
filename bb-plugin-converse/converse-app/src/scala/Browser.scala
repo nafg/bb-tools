@@ -33,6 +33,7 @@ class AudioContext extends js.Object:
   val sampleRate: Double                                      = js.native
   def close(): js.Promise[Unit]                               = js.native
   def resume(): js.Promise[Unit]                              = js.native
+  def suspend(): js.Promise[Unit]                             = js.native
   val state: String                                           = js.native
   val currentTime: Double                                     = js.native
   val destination: AudioNode                                  = js.native

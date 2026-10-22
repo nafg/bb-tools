@@ -70,6 +70,12 @@ final class Controller(
   private var analysisStream: MediaStream   = null
   private var recordingStream: MediaStream  = null
   private var audioContext: AudioContext    = null
+  // Replies play in a context of their own, so pausing one (by suspending
+  // it) leaves the microphone running.
+  private var playbackContext: AudioContext = null
+  // The reply paused by speech that started during it, until that speech's
+  // outcome is known.
+  private var replyPause: Option[ReplyPause] = None
   private var speechDetector: SpeechDetector = null
   private var speechProbabilityThreshold: Double = 0.3
   private var endOfSpeechSilenceMs: Double = 3000.0
@@ -310,7 +316,9 @@ final class Controller(
     settle()
 
   private def playerChanged(): Unit =
-    if session.isDefined then update(_.playingNow(player.isSpeaking)) else refreshSnapshot()
+    // A reply stopped some other way (replaced by a replay, say) ends its pause.
+    if !player.isSpeaking then replyPause = None
+    if session.isDefined then update(_.playingNow(player.isSpeaking && !player.isPaused)) else refreshSnapshot()
 
   private def syncReplyHold(): Unit =
     val hold = session.exists(_.holdsReplies)
@@ -408,8 +416,10 @@ final class Controller(
   private def ensureAudioContext(): Unit =
     if audioContext == null then
       audioContext = new AudioContext
-      player.setAudioContext(audioContext)
+      playbackContext = new AudioContext
+      player.setAudioContext(playbackContext)
     val _ = audioContext.resume()
+    if !player.isPaused then { val _ = playbackContext.resume() }
     cues.ensureReady()
 
   private val RestoreIntentKey = "converse.voiceSessionRestore"
@@ -602,12 +612,14 @@ final class Controller(
 
   private def closeAudioContext(): Unit =
     if audioContext != null then
-      val ctx = audioContext
+      val contexts = Seq(audioContext, playbackContext)
       audioContext = null
+      playbackContext = null
       player.setAudioContext(null)
-      ctx.close().toFuture.failed.foreach(_ => ())
+      contexts.foreach(_.close().toFuture.failed.foreach(_ => ()))
 
   private def stopInternal(end: VoiceSessionRestore.SessionEnd, detail: Option[String] = None): Unit =
+    replyPause = None
     player.stop()
     abandonCapture()
     session = None
@@ -667,9 +679,12 @@ final class Controller(
       case SpeechDetectorEvent.SpeechStart =>
         if beginCapture() then
           if player.isSpeaking then
-            debug("barge-in: stopping playback")
+            // Paused, not stopped: the sound may not be speech at all, and
+            // its outcome decides (see settleReplyPause).
+            debug("barge-in: pausing playback")
             captureInterrupted = Option(player.speakingThread).map(ReplyInterruption.SpeakingReply(_, Option(player.speakingSentence).getOrElse("")))
-            player.stop()
+            replyPause = Some(replyPause.fold(ReplyPause.forSpeech)(_.speechStarted))
+            player.pause()
           update(_.captureAt(CaptureStage.Speech))
       case SpeechDetectorEvent.PreviewPoint =>
         // Previews are best-effort extra transcription load; throttle them so
@@ -718,6 +733,7 @@ final class Controller(
           true
 
   private def abandonCapture(): Unit =
+    replyPause.foreach(pause => settleReplyPause(pause.captureEnded(tooLongToSend = false)))
     if captureActive then noteCapture(active = false)
     update(_.captureAt(CaptureStage.Idle))
     stopPreviewRecorder()
@@ -944,10 +960,12 @@ final class Controller(
       val minutes = (evidence.frameCount.asInstanceOf[Double] * SpeechDetector.FrameSeconds / 60).round
       debug(s"utterance of $bytes bytes exceeds the upload limit; not sent")
       notice = s"that recording was too long to send (about $minutes minutes); please say it again in parts"
+      replyPause.foreach(pause => settleReplyPause(pause.captureEnded(tooLongToSend = true)))
       update(_.recordingDropped)
     else if sessionId != null then
       val route = if utteranceRoute != null then utteranceRoute else UtteranceRoute.ToThread(threadId)
       val recordingId = js.Dynamic.global.crypto.randomUUID().asInstanceOf[String]
+      replyPause = replyPause.map(_.recordingQueued(recordingId))
       update(_.recordingQueued(recordingId, PendingUpload(sessionId, route, blob, evidence, captureInterrupted, speechStartAt, speechEndAt)))
       uploadNext()
 
@@ -1017,6 +1035,7 @@ final class Controller(
       else None
     session.flatMap(_.outcome(recordingId, deliveredTo)).foreach { next =>
       session = Some(next)
+      replyPause.foreach(pause => settleReplyPause(pause.outcome(recordingId, reachedAgent = kind == "sent" || kind == "failed")))
       kind match
         case "sent" =>
           heardText = p.text.asInstanceOf[js.UndefOr[String]].getOrElse("")
@@ -1041,6 +1060,18 @@ final class Controller(
             val _ = cues.play(SoundCue.SayAgain)
       settle()
     }
+
+  private def settleReplyPause(next: Either[ReplyPauseEnd, ReplyPause]): Unit =
+    next match
+      case Right(pause) => replyPause = Some(pause)
+      case Left(ReplyPauseEnd.Resume) =>
+        debug("the speech came to nothing: resuming playback")
+        replyPause = None
+        player.resume()
+      case Left(ReplyPauseEnd.Stop) =>
+        debug("barge-in: stopping playback")
+        replyPause = None
+        player.stop()
 
   /** Brings the session in step with the backend's records: how its unsettled
     * recordings ended, and which threads still owe it a reply.
