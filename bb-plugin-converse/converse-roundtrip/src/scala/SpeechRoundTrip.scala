@@ -20,7 +20,8 @@ import scala.io.Source
   * session.
   *
   * Options: `--voice <name>` (a Pocket voice; default alba), `--keep <dir>`
-  * (also writes each piece's audio there, as 1.wav, 2.wav, ...).
+  * (also writes each piece's audio there, as 1.wav, 2.wav, ...), `--pieces-only` (prints
+  * the pieces without synthesizing them).
   */
 @main def speechRoundTrip(args: String*): Unit =
   val options = args.grouped(2).collect { case Seq(name, value) => name -> value }.toMap
@@ -29,7 +30,9 @@ import scala.io.Source
   keep.foreach(Files.createDirectories(_))
   val reply  = Source.stdin.mkString
   val titles = Speech.threadsReferredTo(reply).flatMap(id => threadTitle(id).map(id -> _)).toMap
-  for (chunk, p) <- Speech.splitSpeechChunks(reply, titles).zipWithIndex do
+  val chunks = Speech.splitSpeechChunks(reply, titles)
+  if args.contains("--pieces-only") then chunks.foreach(chunk => println(s"sent:  ${chunk.text}"))
+  else for (chunk, p) <- chunks.zipWithIndex do
     val audio = Services.synthesize(chunk.text, voice)
     keep.foreach(dir => Files.write(dir.resolve(s"${p + 1}.wav"), audio))
     println(s"sent:  ${chunk.text}")
