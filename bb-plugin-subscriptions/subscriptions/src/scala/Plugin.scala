@@ -52,25 +52,39 @@ final class Poller(bb: BbApi, store: Store):
       .flatMap { archived =>
         if archived then Future.unit
         else
-          Forges.snapshot(s.changeRequest).transformWith {
+          Forges.state(s.target).transformWith {
             case scala.util.Success(now) => report(s, now)
             case scala.util.Failure(e)   => reportCheckError(s, e.getMessage)
           }
       }
       .recover { case e => bb.log.warn(s"subscription #${s.id}: ${e.getMessage}") }
 
-  private def report(s: Subscription, now: Snapshot): Future[Unit] =
-    val changes  = Changes.between(s.lastSeen, now)
-    val finished = Changes.isFinished(now)
-    val lines =
-      s.checkError.map(_ => s"Checking ${s.changeRequest.label} works again.").toList ++
-        changes.map(Changes.describe(s.changeRequest, _)) ++
-        (if finished then List("This subscription has ended.") else Nil)
-    val delivered =
+  /** A branch move is described with the commits it brought, when the forge can list them. */
+  private def describe(s: Subscription, event: Event): Future[String] = (s.target, event) match
+    case (Target.Branch(repo, _), Event.BranchMoved(from, to)) =>
+      Forges.commitsBetween(repo, from, to)
+        .map(Some(_))
+        .recover { case e =>
+          bb.log.warn(s"subscription #${s.id}: could not list commits $from..$to: ${e.getMessage}")
+          None
+        }
+        .map(Watch.describe(s.target, event, _))
+    case _ => Future.successful(Watch.describe(s.target, event))
+
+  private def report(s: Subscription, now: WatchState): Future[Unit] =
+    val events   = Watch.between(s.lastSeen, now)
+    val finished = Watch.isFinished(now)
+    Future.sequence(events.map(describe(s, _))).flatMap { described =>
+      val lines =
+        s.checkError.map(_ => s"Checking ${s.target.label} works again.").toList ++
+          described ++
+          (if finished then List("This subscription has ended.") else Nil)
       if lines.isEmpty then Future.unit
-      else send(s.threadId, (messagePrefix(s) :: lines).mkString(" ") + s"\n${s.changeRequest.url}")
-    // Recorded only after delivery, so a failed send is retried on the next check.
-    delivered.map(_ => store.recordSeen(s.id, now, finished))
+      else send(s.threadId, (messagePrefix(s) :: lines).mkString(" ") + s"\n${s.target.url}")
+    }.map { _ =>
+      // Recorded only after delivery, so a failed send is retried on the next check.
+      store.recordSeen(s.id, now, finished)
+    }
 
   private def reportCheckError(s: Subscription, error: String): Future[Unit] =
     val announce =
@@ -78,7 +92,7 @@ final class Poller(bb: BbApi, store: Store):
       else
         send(
           s.threadId,
-          s"${messagePrefix(s)} Checking ${s.changeRequest.label} failed: $error\n" +
+          s"${messagePrefix(s)} Checking ${s.target.label} failed: $error\n" +
             "The subscription stays active. This thread will hear when checking works again."
         )
     announce.map(_ => store.recordCheckError(s.id, error))
@@ -86,26 +100,25 @@ final class Poller(bb: BbApi, store: Store):
 /** The actions the agent tools and the CLI share. Each returns the text to show the caller. */
 final class Actions(store: Store):
   def add(threadId: String, url: String): Future[Either[String, String]] =
-    ChangeRequest.parse(url) match
+    Target.parse(url) match
       case Left(e) => Future.successful(Left(e))
-      case Right(cr) =>
-        store.find(threadId, cr) match
+      case Right(target) =>
+        store.find(threadId, target) match
           case Some(existing) =>
             Future.successful(
-              Right(s"Already subscribed as #${existing.id}. Last known: ${Changes.describe(existing.lastSeen)}.")
+              Right(s"Already subscribed as #${existing.id}. Last known: ${Watch.describe(existing.lastSeen)}.")
             )
           case None =>
-            Forges.snapshot(cr).map { now =>
-              if Changes.isFinished(now) then
-                Right(s"${cr.label} is already ${Changes.describe(now)}. Nothing to wait for, so no subscription was made.")
+            Forges.state(target).map { now =>
+              if Watch.isFinished(now) then
+                Right(s"${target.label} is already ${Watch.describe(now)}. Nothing to wait for, so no subscription was made.")
               else
-                val id = store.add(threadId, cr, now)
+                val id = store.add(threadId, target, now)
                 Right(
-                  s"Subscribed as #$id to ${cr.label}. Now: ${Changes.describe(now)}. " +
-                    "This thread will get a message when it is merged or closed, and each time CI finishes on a " +
-                    "new result or commit. Checks run every minute."
+                  s"Subscribed as #$id to ${target.label}. Now: ${Watch.describe(now)}. ${Watch.promise(target)} " +
+                    "Checks run every minute."
                 )
-            }.recover { case e => Left(s"Could not read ${cr.label}: ${e.getMessage}") }
+            }.recover { case e => Left(s"Could not read ${target.label}: ${e.getMessage}") }
 
   def list(subscriptions: Seq[Subscription], showThread: Boolean): String =
     if subscriptions.isEmpty then "No active subscriptions."
@@ -113,7 +126,7 @@ final class Actions(store: Store):
       subscriptions.map { s =>
         val thread = if showThread then s" (thread ${s.threadId})" else ""
         val error  = s.checkError.fold("")(e => s" Checking is failing: $e")
-        s"#${s.id}$thread ${s.changeRequest.label}: ${Changes.describe(s.lastSeen)}.$error\n  ${s.changeRequest.url}"
+        s"#${s.id}$thread ${s.target.label}: ${Watch.describe(s.lastSeen)}.$error\n  ${s.target.url}"
       }.mkString("\n")
 
   /** Cancels a subscription; `threadId` restricts it to that thread's own subscriptions. */
@@ -122,7 +135,7 @@ final class Actions(store: Store):
       case None => Left(s"No active subscription #$id${threadId.fold("")(_ => " for this thread")}.")
       case Some(s) =>
         store.end(id)
-        Right(s"Canceled subscription #$id to ${s.changeRequest.label}.")
+        Right(s"Canceled subscription #$id to ${s.target.label}.")
 
 private def textResult(text: String, isError: Boolean = false): js.Dynamic =
   js.Dynamic.literal(
@@ -137,14 +150,15 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
     js.Dynamic.literal(
       "name" -> "subscriptions_add",
       "description" ->
-        ("Subscribe this thread to a GitHub pull request or GitLab merge request. Returns at once with its " +
-          "current state. Afterwards bb checks it every minute and sends this thread a message when it is " +
-          "merged or closed, or when CI finishes on a new result or commit. The subscription ends by itself " +
-          "once it is merged or closed. If checking fails, this thread is told instead of hearing nothing."),
+        ("Subscribe this thread to something on GitHub or GitLab, given its URL, and return at once with its " +
+          "current state. A pull or merge request: a message when it is merged or closed, or when CI finishes on " +
+          "a new result or commit; the subscription ends when it is merged or closed. A branch (…/tree/<branch>): " +
+          "a message with the new commits each time it moves. A repository's tags (…/tags): a message for each " +
+          "new tag. bb checks every minute. If checking fails, this thread is told instead of hearing nothing."),
       "instructions" ->
-        ("To wait for a pull or merge request to merge, close or finish CI, call subscriptions_add instead of " +
-          "polling gh or glab in a loop or a background command. Then end your turn: a message arrives when " +
-          "something happens."),
+        ("To wait for a pull or merge request to merge, close or finish CI, for new commits on a branch, or for " +
+          "a new tag, call subscriptions_add instead of polling gh or glab in a loop, a background command or a " +
+          "gitlab-watch. Then end your turn: a message arrives when something happens."),
       "presentation" -> js.Dynamic.literal(
         "label" -> js.Dynamic.literal("pending" -> "Subscribing", "completed" -> "Subscribed")
       ),
@@ -153,7 +167,7 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
         "properties" -> js.Dynamic.literal(
           "url" -> js.Dynamic.literal(
             "type"        -> "string",
-            "description" -> "The pull request or merge request URL"
+            "description" -> s"The URL: ${Target.supported}"
           )
         ),
         "required"             -> js.Array("url"),
@@ -204,7 +218,8 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
 
 private val Usage =
   """Usage:
-    |  bb subscriptions add <pr-or-mr-url> [--thread <thread-id>]
+    |  bb subscriptions add <url> [--thread <thread-id>]
+    |    <url>: a PR or MR, a branch (…/tree/<branch>), or a repository's tags (…/tags)
     |  bb subscriptions list [--thread <thread-id> | --all]
     |  bb subscriptions cancel <id>""".stripMargin
 
@@ -260,12 +275,12 @@ def plugin(bb: BbApi): Unit =
   bb.cli.register(
     js.Dynamic.literal(
       "name"    -> "subscriptions",
-      "summary" -> "Subscribe a thread to a pull or merge request; it is messaged when it merges, closes or CI finishes",
+      "summary" -> "Subscribe a thread to a PR, MR, branch or tags; it is messaged when something changes",
       "commands" -> js.Array(
         js.Dynamic.literal(
           "name"    -> "add",
-          "summary" -> "Subscribe this thread (or --thread) to a GitHub PR or GitLab MR URL",
-          "usage"   -> "bb subscriptions add <pr-or-mr-url> [--thread <thread-id>]"
+          "summary" -> "Subscribe this thread (or --thread) to a GitHub or GitLab PR, MR, branch or tags URL",
+          "usage"   -> "bb subscriptions add <url> [--thread <thread-id>]"
         ),
         js.Dynamic.literal(
           "name"    -> "list",

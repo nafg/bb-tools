@@ -5,12 +5,12 @@ import subscriptionscore.*
 
 import scala.scalajs.js
 
-/** One thread's subscription to a pull or merge request, with what the plugin last told it. */
+/** One thread's subscription to a target, with what the plugin last told it. */
 final case class Subscription(
     id: Int,
     threadId: String,
-    changeRequest: ChangeRequest,
-    lastSeen: Snapshot,
+    target: Target,
+    lastSeen: WatchState,
     /** Set while checking fails; cleared when a check succeeds again. */
     checkError: Option[String]
 )
@@ -19,19 +19,16 @@ final class Store(db: SqliteDb):
   /** Left when the row can't be read back, with the row id and the reason. */
   private def toSubscription(row: js.Dynamic): Either[String, Subscription] =
     val id = row.id.asInstanceOf[Double].toInt
-    scala.util.Try {
-      Subscription(
-        id = id,
-        threadId = row.thread_id.asInstanceOf[String],
-        changeRequest = ChangeRequest.parse(row.url.asInstanceOf[String]).fold(e => throw IllegalStateException(e), identity),
-        lastSeen = Snapshot(
-          Lifecycle.valueOf(row.lifecycle.asInstanceOf[String]),
-          CiResult.valueOf(row.ci.asInstanceOf[String]),
-          row.head_sha.asInstanceOf[String]
-        ),
-        checkError = Option(row.check_error.asInstanceOf[String | Null]).map(_.nn)
-      )
-    }.toEither.left.map(e => s"subscription #$id is unreadable: ${e.getMessage}")
+    (for
+      target <- Target.parse(row.url.asInstanceOf[String])
+      state  <- WatchState.decode(row.state.asInstanceOf[String])
+    yield Subscription(
+      id = id,
+      threadId = row.thread_id.asInstanceOf[String],
+      target = target,
+      lastSeen = state,
+      checkError = Option(row.check_error.asInstanceOf[String | Null]).map(_.nn)
+    )).left.map(e => s"subscription #$id is unreadable: $e")
 
   /** Every active subscription, plus a description of each row that couldn't be read. */
   def activeWithProblems(): (Seq[Subscription], Seq[String]) =
@@ -45,26 +42,26 @@ final class Store(db: SqliteDb):
     db.prepare("SELECT * FROM subscriptions WHERE ended_at IS NULL AND thread_id = ? ORDER BY id")
       .all(threadId).toSeq.map(toSubscription).collect { case Right(s) => s }
 
-  def find(threadId: String, cr: ChangeRequest): Option[Subscription] =
-    activeFor(threadId).find(_.changeRequest == cr)
+  def find(threadId: String, target: Target): Option[Subscription] =
+    activeFor(threadId).find(_.target == target)
 
   def get(id: Int): Option[Subscription] =
     db.prepare("SELECT * FROM subscriptions WHERE id = ? AND ended_at IS NULL").get(id).toOption
       .flatMap(toSubscription(_).toOption)
 
-  def add(threadId: String, cr: ChangeRequest, seen: Snapshot): Int =
+  def add(threadId: String, target: Target, seen: WatchState): Int =
     val result = db
-      .prepare("INSERT INTO subscriptions (thread_id, url, lifecycle, ci, head_sha) VALUES (?, ?, ?, ?, ?)")
-      .run(threadId, cr.url, seen.lifecycle.toString, seen.ci.toString, seen.headSha)
+      .prepare("INSERT INTO subscriptions (thread_id, url, state) VALUES (?, ?, ?)")
+      .run(threadId, target.url, seen.encode)
     result.lastInsertRowid.asInstanceOf[Double].toInt
 
-  def recordSeen(id: Int, seen: Snapshot, ended: Boolean): Unit =
+  def recordSeen(id: Int, seen: WatchState, ended: Boolean): Unit =
     val _ = db
       .prepare(
-        """UPDATE subscriptions SET lifecycle = ?, ci = ?, head_sha = ?, check_error = NULL,
+        """UPDATE subscriptions SET state = ?, check_error = NULL,
           |  ended_at = CASE WHEN ? THEN unixepoch() ELSE NULL END WHERE id = ?""".stripMargin
       )
-      .run(seen.lifecycle.toString, seen.ci.toString, seen.headSha, if ended then 1 else 0, id)
+      .run(seen.encode, if ended then 1 else 0, id)
 
   def recordCheckError(id: Int, error: String): Unit =
     val _ = db.prepare("UPDATE subscriptions SET check_error = ? WHERE id = ?").run(error, id)
@@ -77,6 +74,7 @@ final class Store(db: SqliteDb):
       .run(threadId)
 
 object Store:
+  /** Append-only: bb records each statement by position and rejects edits to applied ones. */
   val migrations: js.Array[String] = js.Array(
     """CREATE TABLE IF NOT EXISTS subscriptions (
       |  id INTEGER PRIMARY KEY,
@@ -88,5 +86,11 @@ object Store:
       |  check_error TEXT,
       |  created_at INTEGER NOT NULL DEFAULT (unixepoch()),
       |  ended_at INTEGER
-      |)""".stripMargin
+      |)""".stripMargin,
+    // The per-kind columns became one encoded `state` (see WatchState.encode).
+    "ALTER TABLE subscriptions ADD COLUMN state TEXT",
+    "UPDATE subscriptions SET state = 'change ' || lifecycle || ' ' || ci || ' ' || head_sha",
+    "ALTER TABLE subscriptions DROP COLUMN lifecycle",
+    "ALTER TABLE subscriptions DROP COLUMN ci",
+    "ALTER TABLE subscriptions DROP COLUMN head_sha"
   )

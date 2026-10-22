@@ -45,9 +45,65 @@ object Forges:
   private def orFail[A](e: Either[String, A]): Future[A] =
     e.fold(msg => Future.failed(ForgeCliException(msg)), Future.successful)
 
-  def snapshot(cr: ChangeRequest)(using ExecutionContext): Future[Snapshot] = cr.forge match
-    case Forge.GitHub => gitHub(cr)
-    case Forge.GitLab => gitLab(cr)
+  private def glProject(repo: Repo): String = js.URIUtils.encodeURIComponent(repo.project)
+
+  private def glApi(repo: Repo, path: String): Future[js.Dynamic] =
+    run("glab", "api", "--hostname", repo.host, s"projects/${glProject(repo)}/$path").map(js.JSON.parse(_))
+
+  private def ghApi(repo: Repo, args: String*): Future[js.Dynamic] =
+    run("gh", (Seq("api", "--hostname", repo.host) ++ args)*).map(js.JSON.parse(_))
+
+  /** What the target looks like now. */
+  def state(target: Target)(using ExecutionContext): Future[WatchState] = target match
+    case Target.Change(cr) =>
+      (cr.repo.forge match
+        case Forge.GitHub => gitHub(cr)
+        case Forge.GitLab => gitLab(cr)
+      ).map(WatchState.Change(_))
+    case Target.Branch(repo, name) => branchHead(repo, name).map(WatchState.Branch(_))
+    case Target.Tags(repo)         => newestTags(repo).map(WatchState.Tags(_))
+
+  private def branchHead(repo: Repo, name: String)(using ExecutionContext): Future[String] =
+    val head = repo.forge match
+      case Forge.GitHub => ghApi(repo, s"repos/${repo.project}/branches/$name").map(j => str(j.commit.sha))
+      case Forge.GitLab =>
+        glApi(repo, s"repository/branches/${js.URIUtils.encodeURIComponent(name)}").map(j => str(j.commit.id))
+    head.flatMap(sha => orFail(sha.toRight(s"no commit found for branch $name of ${repo.project}")))
+
+  private val TagCount = 100
+
+  /** The names of the most recent tags, newest first. */
+  private def newestTags(repo: Repo)(using ExecutionContext): Future[List[String]] = repo.forge match
+    case Forge.GitHub =>
+      val Array(owner, name) = repo.project.split("/", 2)
+      val query =
+        s"""query($$o: String!, $$r: String!) { repository(owner: $$o, name: $$r) {
+           |  refs(refPrefix: "refs/tags/", first: $TagCount, orderBy: {field: TAG_COMMIT_DATE, direction: DESC}) {
+           |    nodes { name } } } }""".stripMargin
+      ghApi(repo, "graphql", "-f", s"query=$query", "-F", s"o=$owner", "-F", s"r=$name").flatMap { j =>
+        val repository = j.data.repository
+        if js.isUndefined(repository) || repository == null then orFail(Left(s"repository ${repo.project} not found"))
+        else Future.successful(repository.refs.nodes.asInstanceOf[js.Array[js.Dynamic]].toList.flatMap(n => str(n.name)))
+      }
+    case Forge.GitLab =>
+      glApi(repo, s"repository/tags?order_by=updated&per_page=$TagCount")
+        .map(_.asInstanceOf[js.Array[js.Dynamic]].toList.flatMap(t => str(t.name)))
+
+  /** The commits reachable from `to` but not from `from`, if the forge can say. */
+  def commitsBetween(repo: Repo, from: String, to: String)(using ExecutionContext): Future[CommitsSummary] =
+    def subject(message: js.Dynamic) = str(message).getOrElse("").linesIterator.nextOption().getOrElse("")
+    repo.forge match
+      case Forge.GitHub =>
+        ghApi(repo, s"repos/${repo.project}/compare/$from...$to").map { j =>
+          val commits = j.commits.asInstanceOf[js.Array[js.Dynamic]].toList
+          // GitHub lists oldest first; newest first reads better in a message.
+          CommitsSummary(j.total_commits.asInstanceOf[Double].toInt, commits.reverse.map(c => subject(c.commit.message)))
+        }
+      case Forge.GitLab =>
+        glApi(repo, s"repository/compare?from=$from&to=$to").map { j =>
+          val commits = j.commits.asInstanceOf[js.Array[js.Dynamic]].toList
+          CommitsSummary(commits.size, commits.reverse.map(c => subject(c.title)))
+        }
 
   private def gitHub(cr: ChangeRequest)(using ExecutionContext): Future[Snapshot] =
     run("gh", "pr", "view", cr.url, "--json", "state,headRefOid,statusCheckRollup").flatMap { out =>
@@ -70,9 +126,7 @@ object Forges:
     }
 
   private def gitLab(cr: ChangeRequest)(using ExecutionContext): Future[Snapshot] =
-    val project = js.URIUtils.encodeURIComponent(cr.project)
-    run("glab", "api", "--hostname", cr.host, s"projects/$project/merge_requests/${cr.number}").flatMap { out =>
-      val json  = js.JSON.parse(out)
+    glApi(cr.repo, s"merge_requests/${cr.number}").flatMap { json =>
       val mrSha = str(json.sha).getOrElse("")
       val p     = json.head_pipeline
       val pipeline =
