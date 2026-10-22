@@ -16,32 +16,41 @@ final case class Subscription(
 )
 
 final class Store(db: SqliteDb):
-  private def toSubscription(row: js.Dynamic): Subscription =
-    val url = row.url.asInstanceOf[String]
-    Subscription(
-      id = row.id.asInstanceOf[Double].toInt,
-      threadId = row.thread_id.asInstanceOf[String],
-      changeRequest = ChangeRequest.parse(url).fold(e => throw IllegalStateException(e), identity),
-      lastSeen = Snapshot(
-        Lifecycle.valueOf(row.lifecycle.asInstanceOf[String]),
-        CiResult.valueOf(row.ci.asInstanceOf[String]),
-        row.head_sha.asInstanceOf[String]
-      ),
-      checkError = Option(row.check_error.asInstanceOf[String | Null]).map(_.nn)
-    )
+  /** Left when the row can't be read back, with the row id and the reason. */
+  private def toSubscription(row: js.Dynamic): Either[String, Subscription] =
+    val id = row.id.asInstanceOf[Double].toInt
+    scala.util.Try {
+      Subscription(
+        id = id,
+        threadId = row.thread_id.asInstanceOf[String],
+        changeRequest = ChangeRequest.parse(row.url.asInstanceOf[String]).fold(e => throw IllegalStateException(e), identity),
+        lastSeen = Snapshot(
+          Lifecycle.valueOf(row.lifecycle.asInstanceOf[String]),
+          CiResult.valueOf(row.ci.asInstanceOf[String]),
+          row.head_sha.asInstanceOf[String]
+        ),
+        checkError = Option(row.check_error.asInstanceOf[String | Null]).map(_.nn)
+      )
+    }.toEither.left.map(e => s"subscription #$id is unreadable: ${e.getMessage}")
 
-  def active(): Seq[Subscription] =
-    db.prepare("SELECT * FROM subscriptions WHERE ended_at IS NULL ORDER BY id").all().toSeq.map(toSubscription)
+  /** Every active subscription, plus a description of each row that couldn't be read. */
+  def activeWithProblems(): (Seq[Subscription], Seq[String]) =
+    val rows = db.prepare("SELECT * FROM subscriptions WHERE ended_at IS NULL ORDER BY id").all().toSeq
+    val read = rows.map(toSubscription)
+    (read.collect { case Right(s) => s }, read.collect { case Left(e) => e })
+
+  def active(): Seq[Subscription] = activeWithProblems()._1
 
   def activeFor(threadId: String): Seq[Subscription] =
     db.prepare("SELECT * FROM subscriptions WHERE ended_at IS NULL AND thread_id = ? ORDER BY id")
-      .all(threadId).toSeq.map(toSubscription)
+      .all(threadId).toSeq.map(toSubscription).collect { case Right(s) => s }
 
   def find(threadId: String, cr: ChangeRequest): Option[Subscription] =
     activeFor(threadId).find(_.changeRequest == cr)
 
   def get(id: Int): Option[Subscription] =
-    db.prepare("SELECT * FROM subscriptions WHERE id = ? AND ended_at IS NULL").get(id).toOption.map(toSubscription)
+    db.prepare("SELECT * FROM subscriptions WHERE id = ? AND ended_at IS NULL").get(id).toOption
+      .flatMap(toSubscription(_).toOption)
 
   def add(threadId: String, cr: ChangeRequest, seen: Snapshot): Int =
     val result = db

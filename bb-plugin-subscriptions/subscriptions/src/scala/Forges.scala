@@ -54,8 +54,12 @@ object Forges:
       val json = js.JSON.parse(out)
       val checks = json.statusCheckRollup.asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]].toOption
         .filter(_ != null).map(_.toSeq).getOrElse(Nil).map { c =>
-          if str(c.__typename).contains("StatusContext") then GitHubCheck.StatusContext(str(c.state).getOrElse(""))
-          else GitHubCheck.CheckRun(str(c.status).getOrElse(""), str(c.conclusion))
+          if str(c.__typename).contains("StatusContext") then
+            GitHubCheck.StatusContext(str(c.context).getOrElse(""), str(c.state).getOrElse(""))
+          else
+            // A workflow's job names repeat across workflows, so the workflow is part of the identity.
+            val name = s"${str(c.workflowName).getOrElse("")}/${str(c.name).getOrElse("")}"
+            GitHubCheck.CheckRun(name, str(c.startedAt), str(c.status).getOrElse(""), str(c.conclusion))
         }
       orFail(
         for
@@ -68,13 +72,19 @@ object Forges:
   private def gitLab(cr: ChangeRequest)(using ExecutionContext): Future[Snapshot] =
     val project = js.URIUtils.encodeURIComponent(cr.project)
     run("glab", "api", "--hostname", cr.host, s"projects/$project/merge_requests/${cr.number}").flatMap { out =>
-      val json     = js.JSON.parse(out)
-      val pipeline = json.head_pipeline
-      val status   = if js.isUndefined(pipeline) || pipeline == null then None else str(pipeline.status)
+      val json  = js.JSON.parse(out)
+      val mrSha = str(json.sha).getOrElse("")
+      val p     = json.head_pipeline
+      val pipeline =
+        if js.isUndefined(p) || p == null then None
+        else
+          Some(
+            Snapshot.GitLabPipeline(str(p.status).getOrElse(""), str(p.sha).getOrElse(""), str(p.ref).getOrElse(""))
+          )
       orFail(
         for
           lifecycle <- Snapshot.lifecycleFromGitLab(str(json.state).getOrElse(""))
-          ci        <- Snapshot.ciFromGitLab(status)
-        yield Snapshot(lifecycle, ci, str(json.sha).getOrElse(""))
+          ci        <- Snapshot.ciFromGitLab(pipeline, mrSha)
+        yield Snapshot(lifecycle, ci, mrSha)
       )
     }

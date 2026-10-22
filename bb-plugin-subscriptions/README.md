@@ -26,4 +26,11 @@ After changing sources: `npm run reload`.
 - A failed check is reported to the thread once, and again when checking recovers.
 - Subscriptions live in the plugin's SQLite database.
 
+## Checking it in production
+
+`scripts/verify.sh [days]` checks that the plugin is running and logging no errors, compares each active
+subscription's stored state with GitHub and GitLab (worked out independently of the plugin's code), and lists the
+messages each thread received, flagging duplicates and missing "ended" messages. It needs network access and the
+`bb` CLI, so run it outside any sandbox.
+
 See `skills/subscriptions/SKILL.md` for the agent-facing usage.

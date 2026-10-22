@@ -20,8 +20,12 @@ final class Poller(bb: BbApi, store: Store):
     if running then Future.unit
     else
       running = true
-      store.active()
-        .foldLeft(Future.unit)((prev, s) => prev.flatMap(_ => pollOne(s)))
+      // Future.apply catches a synchronous throw, so the guard is always reset.
+      Future(store.activeWithProblems())
+        .flatMap { (subscriptions, problems) =>
+          problems.foreach(bb.log.error)
+          subscriptions.foldLeft(Future.unit)((prev, s) => prev.flatMap(_ => pollOne(s)))
+        }
         .andThen(_ => running = false)
 
   private def send(threadId: String, text: String): Future[Unit] =

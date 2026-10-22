@@ -25,26 +25,41 @@ class SubscriptionsCoreTest extends munit.FunSuite:
     assertEquals(cr.label, "chesednow/disp!530")
 
   test("GitHub CI: failure wins over pending, cancellation over pending, nothing means no CI"):
-    val done    = GitHubCheck.CheckRun("COMPLETED", Some("SUCCESS"))
-    val running = GitHubCheck.CheckRun("IN_PROGRESS", None)
-    val failed  = GitHubCheck.CheckRun("COMPLETED", Some("FAILURE"))
-    val cancel  = GitHubCheck.CheckRun("COMPLETED", Some("CANCELLED"))
+    val done    = GitHubCheck.CheckRun("a", None, "COMPLETED", Some("SUCCESS"))
+    val running = GitHubCheck.CheckRun("b", None, "IN_PROGRESS", None)
+    val failed  = GitHubCheck.CheckRun("c", None, "COMPLETED", Some("FAILURE"))
+    val cancel  = GitHubCheck.CheckRun("c", None, "COMPLETED", Some("CANCELLED"))
     assertEquals(Snapshot.ciFromGitHub(Seq(done, running, failed)), Right(CiResult.Failed))
-    assertEquals(Snapshot.ciFromGitHub(Seq(done, running, cancel)), Right(CiResult.Canceled))
+    assertEquals(Snapshot.ciFromGitHub(Seq(done, running, GitHubCheck.CheckRun("d", None, "COMPLETED", Some("CANCELLED")))), Right(CiResult.Canceled))
     assertEquals(Snapshot.ciFromGitHub(Seq(done, running)), Right(CiResult.Pending))
-    assertEquals(Snapshot.ciFromGitHub(Seq(done, GitHubCheck.StatusContext("SUCCESS"))), Right(CiResult.Passed))
+    assertEquals(Snapshot.ciFromGitHub(Seq(done, GitHubCheck.StatusContext("ci/x", "SUCCESS"))), Right(CiResult.Passed))
     assertEquals(Snapshot.ciFromGitHub(Nil), Right(CiResult.NoCi))
 
   test("unrecognized values are errors, not guesses"):
-    assert(Snapshot.ciFromGitHub(Seq(GitHubCheck.CheckRun("COMPLETED", Some("SOMETHING_NEW")))).isLeft)
-    assert(Snapshot.ciFromGitLab(Some("something_new")).isLeft)
+    assert(Snapshot.ciFromGitHub(Seq(GitHubCheck.CheckRun("a", None, "COMPLETED", Some("SOMETHING_NEW")))).isLeft)
+    assert(Snapshot.ciFromGitLab(Some(Snapshot.GitLabPipeline("something_new", "s", "main")), "s").isLeft)
     assert(Snapshot.lifecycleFromGitHub("DRAFT").isLeft)
 
+  test("only the latest attempt of a re-run GitHub check counts"):
+    // From nafg/simple-router#345: a run cancelled by a newer run of the same job, which passed.
+    val cancelled = GitHubCheck.CheckRun("build", Some("2026-10-22T06:42:08Z"), "COMPLETED", Some("CANCELLED"))
+    val rerun     = GitHubCheck.CheckRun("build", Some("2026-10-22T06:42:10Z"), "COMPLETED", Some("SUCCESS"))
+    assertEquals(Snapshot.ciFromGitHub(Seq(cancelled, rerun)), Right(CiResult.Passed))
+    assertEquals(Snapshot.ciFromGitHub(Seq(rerun, cancelled)), Right(CiResult.Passed))
+
+  private def pipeline(status: String, sha: String = "new", ref: String = "feature") =
+    Some(Snapshot.GitLabPipeline(status, sha, ref))
+
   test("GitLab pipeline statuses"):
-    assertEquals(Snapshot.ciFromGitLab(None), Right(CiResult.NoCi))
-    assertEquals(Snapshot.ciFromGitLab(Some("running")), Right(CiResult.Pending))
-    assertEquals(Snapshot.ciFromGitLab(Some("success")), Right(CiResult.Passed))
-    assertEquals(Snapshot.ciFromGitLab(Some("canceled")), Right(CiResult.Canceled))
+    assertEquals(Snapshot.ciFromGitLab(None, "new"), Right(CiResult.NoCi))
+    assertEquals(Snapshot.ciFromGitLab(pipeline("running"), "new"), Right(CiResult.Pending))
+    assertEquals(Snapshot.ciFromGitLab(pipeline("success"), "new"), Right(CiResult.Passed))
+    assertEquals(Snapshot.ciFromGitLab(pipeline("canceled"), "new"), Right(CiResult.Canceled))
+
+  test("a GitLab pipeline for an earlier commit is not the new commit's result"):
+    assertEquals(Snapshot.ciFromGitLab(pipeline("success", sha = "old"), "new"), Right(CiResult.Pending))
+    val mergedResults = pipeline("success", sha = "merge-commit", ref = "refs/merge-requests/25/merge")
+    assertEquals(Snapshot.ciFromGitLab(mergedResults, "new"), Right(CiResult.Passed))
 
   private val open = Snapshot(Lifecycle.Open, CiResult.Pending, "aaa")
 
