@@ -23,7 +23,7 @@ After changing sources: `npm run reload`.
 - A bb schedule runs every minute in the bb server. For each active subscription it reads the target through `gh` or
   `glab`, using their existing logins, and compares it with the state last reported to the thread. Each check of a
   GitHub target costs about one point of GitHub's 5,000-point hourly allowance, which every other `gh` use shares.
-- Reviews and comments cost three more GitHub calls (one on GitLab), so they are fetched only when the request's
+- Reviews, comments and reactions cost four more GitHub calls (two on GitLab), so they are fetched only when the request's
   updated time changed, and for every subscription once every 15 runs as a safety net.
 - Changes are delivered with `bb.sdk.threads.send`. The new state is recorded only after delivery succeeds, so a
   failed delivery is retried on the next run.

@@ -105,10 +105,20 @@ object Forges:
           s"$base/issues/${cr.number}/comments?per_page=100",
           ".[] | {id, login: .user.login, body, url: .html_url} | tojson"
         ).map(_.map(c => DiscussionItem(ItemKind.Comment, id(c.id), s(c.login), s(c.body), s(c.url))))
-        for r <- reviews; i <- inline; c <- comments yield r ++ i ++ c
+        val reactions = ghLines(
+          cr.repo,
+          s"$base/issues/${cr.number}/reactions?per_page=100",
+          ".[] | {id, login: .user.login, content} | tojson"
+        ).map(_.map(e => DiscussionItem(ItemKind.Reaction, id(e.id), s(e.login), s(e.content), cr.url)))
+        for r <- reviews; i <- inline; c <- comments; e <- reactions yield r ++ i ++ c ++ e
       case Forge.GitLab =>
+        val awards = glApi(cr.repo, s"merge_requests/${cr.number}/award_emoji?per_page=100").map { j =>
+          j.asInstanceOf[js.Array[js.Dynamic]].toList.map { a =>
+            DiscussionItem(ItemKind.Reaction, id(a.id), s(a.user.username), s(a.name), cr.url)
+          }
+        }
         // The newest 100 notes. System notes ("added 1 commit", approvals) are GitLab's own and are skipped.
-        glApi(cr.repo, s"merge_requests/${cr.number}/notes?per_page=100&sort=desc&order_by=created_at").map { j =>
+        val notes = glApi(cr.repo, s"merge_requests/${cr.number}/notes?per_page=100&sort=desc&order_by=created_at").map { j =>
           j.asInstanceOf[js.Array[js.Dynamic]].toList.reverse.collect {
             case n if !n.system.asInstanceOf[Boolean] =>
               val url = s"${cr.url}#note_${id(n.id)}"
@@ -121,6 +131,7 @@ object Forges:
               else DiscussionItem(ItemKind.Comment, id(n.id), author, s(n.body), url)
           }
         }
+        for n <- notes; a <- awards yield n ++ a
 
   private def branchHead(repo: Repo, name: String)(using ExecutionContext): Future[String] =
     val head = repo.forge match

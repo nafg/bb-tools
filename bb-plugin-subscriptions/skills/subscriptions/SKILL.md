@@ -11,7 +11,7 @@ this.
 
 | Subscribe to | URL | The thread hears |
 |---|---|---|
-| A pull or merge request | its page | merged, closed or reopened; CI passed, failed or canceled on a commit; its latest commit changed; each new review or comment, with its text |
+| A pull or merge request | its page | merged, closed or reopened; CI passed, failed or canceled on a commit; its latest commit changed; each new review or comment, with its text; each new emoji reaction on the PR or MR itself |
 | A branch | `…/tree/<branch>` (GitLab `…/-/tree/<branch>`) | each time it moves, with the new commits' subjects |
 | A repository's tags | `…/tags` (GitLab `…/-/tags`) | each new tag |
 
@@ -44,6 +44,8 @@ Messages start with `[bb subscription #<id>]` and end with the URL.
   include the file and line. Comments this thread posted are skipped only if they carry this thread's marker (see
   the forge-comments skill); otherwise bb can't tell them from the user's own comments, so they are reported. GitLab's own system notes, including approvals, are not reported. Edits to
   existing comments are not reported.
+- New emoji reactions on the PR or MR itself: who reacted, and with what. Reactions on individual comments and
+  removed reactions are not reported.
 - A branch moved: the old and new commit, how many commits are new, and the subjects of up to ten.
 - New tags appeared. Deleted tags are not reported. Only the newest 100 tags are compared.
 - Checking failed, with the error, and later that checking works again. A failed check is never treated as "nothing

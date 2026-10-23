@@ -7,6 +7,8 @@ enum ItemKind(val code: Char):
   case InlineComment extends ItemKind('i')
   /** A comment on the pull or merge request as a whole. */
   case Comment extends ItemKind('c')
+  /** An emoji reaction on the pull or merge request itself; `body` holds the emoji's name, such as `+1`. */
+  case Reaction extends ItemKind('e')
 
 /** A review or comment on a pull or merge request.
   *
