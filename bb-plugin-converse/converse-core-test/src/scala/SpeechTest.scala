@@ -55,6 +55,10 @@ class SpeechTest extends munit.FunSuite:
       List("Set S M S Chat and Entrance Group V two S M S Config dot S R C Number on the H T T P Server.")
     )
 
+  test("keeps contractions and possessives whole"):
+    val chunks = Speech.splitSpeechChunks("I'll check, we'll see, you'd agree it's the PR's and sbt's fault.")
+    assertEquals(chunks.map(_.text), List("I'll check, we'll see, you'd agree it's the P R's and S B T's fault."))
+
   test("spells a plural acronym out with its plural on the last letter"):
     val chunks = Speech.splitSpeechChunks("The IDs, URLs and PRs in EntranceGroupIDs.")
     assertEquals(chunks.map(_.text), List("The I D's, U R L's and P R's in Entrance Group I D's."))

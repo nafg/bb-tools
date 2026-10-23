@@ -24,14 +24,15 @@ object Speech:
   private val IdentifierDot  = "([A-Za-z0-9_])\\.(?=[A-Za-z_][A-Za-z0-9_])".r
   // A short word with no vowels, such as a tool's name (sbt, npm, ssh) or an
   // acronym (PR).
-  private val VowellessWord  = "\\b[b-df-hj-np-tv-xzB-DF-HJ-NP-TV-XZ]{2,5}\\b".r
+  private val VowellessWord  = "[b-df-hj-np-tv-xzB-DF-HJ-NP-TV-XZ]{2,5}".r
   // Vowelless words that are said as words.
   private val SaidAsWords    =
     Set("mr", "mrs", "dr", "sr", "jr", "st", "lt", "sgt", "pvt", "vs", "nth") ++
       Set("hm", "hmm", "mm", "mhm", "shh", "psst", "pst", "tsk", "brr", "grr", "pfft", "zzz")
   // A number marked with "#", as in issue and pull request references.
   private val HashNumber     = "(^|[^\\w#])#(\\d+)\\b".r
-  private val Word           = "\\b[A-Za-z0-9]+\\b".r
+  // A word, with what follows an apostrophe (I'll, PR's) kept in it.
+  private val Word           = "\\b[A-Za-z0-9]+(?:['’][A-Za-z]+)*".r
   private val Digits         = "\\d+".r
   // A bb thread: a mention (with or without a message) or a bare id.
   private val ThreadReference = "@thread:(thr_[a-z0-9]+)(?:#msg=\\d+)?|\\b(thr_[a-z0-9]+)\\b".r
@@ -76,15 +77,24 @@ object Speech:
   private def speakable(text: String): String =
     val dotted   = IdentifierDot.replaceAllIn(text, "$1 dot ")
     val numbered = HashNumber.replaceAllIn(dotted, "$1number $2")
-    val split = Word.replaceAllIn(
-      numbered,
-      m => if isId(m.matched) then spelled(m.matched) else words(m.matched).split(" ").map(pluralAcronym).mkString(" ")
-    )
-    val acronyms = VowellessWord.replaceAllIn(
-      split,
-      m => if SaidAsWords(m.matched.toLowerCase) then m.matched else spelled(m.matched)
-    )
-    Digits.replaceAllIn(acronyms, m => if leftAsDigits(acronyms, m.start, m.end) then m.matched else NumberWords(m.matched))
+    val worded   = Word.replaceAllIn(numbered, m => spoken(m.matched))
+    Digits.replaceAllIn(worded, m => if leftAsDigits(worded, m.start, m.end) then m.matched else NumberWords(m.matched))
+
+  /** A word as it is spoken. What follows an apostrophe is kept as it is
+    * (the "ll" of "I'll" is no word to spell out), and the rest is spoken
+    * like any word.
+    */
+  private def spoken(token: String): String =
+    val apostrophe = token.indexWhere(c => c == '\'' || c == '’')
+    if apostrophe >= 0 then spoken(token.take(apostrophe)) + token.drop(apostrophe)
+    else if isId(token) then spelled(token)
+    else words(token).split(" ").map(spokenWord).mkString(" ")
+
+  /** One word of a name, spelled out if it is an acronym or has no vowels. */
+  private def spokenWord(word: String): String =
+    if word.length >= 3 && word.last == 's' && word.init.forall(_.isUpper) then spelled(word.init) + "'s"
+    else if VowellessWord.matches(word) && !SaidAsWords(word.toLowerCase) then spelled(word)
+    else word
 
   /** The words of a name run together: split where a lowercase letter meets a
     * capital (smsChat), a run of capitals meets a capitalized word
@@ -105,13 +115,6 @@ object Speech:
         if joint then out += ' '
       out += c
     out.result()
-
-  /** A plural acronym spelled out with its plural kept on the last letter
-    * ("IDs" as "I D's"); any other word as it is.
-    */
-  private def pluralAcronym(word: String): String =
-    if word.length >= 3 && word.last == 's' && word.init.forall(_.isUpper) then spelled(word.init) + "'s"
-    else word
 
   /** Digits spoken as they are: part of a decimal or version number (2.13,
     * 3.5), or an amount of money ($5).
