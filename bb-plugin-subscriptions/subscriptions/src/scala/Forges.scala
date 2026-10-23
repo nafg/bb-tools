@@ -53,15 +53,74 @@ object Forges:
   private def ghApi(repo: Repo, args: String*): Future[js.Dynamic] =
     run("gh", (Seq("api", "--hostname", repo.host) ++ args)*).map(js.JSON.parse(_))
 
-  /** What the target looks like now. */
-  def state(target: Target)(using ExecutionContext): Future[WatchState] = target match
-    case Target.Change(cr) =>
-      (cr.repo.forge match
-        case Forge.GitHub => gitHub(cr)
-        case Forge.GitLab => gitLab(cr)
-      ).map(WatchState.Change(_))
-    case Target.Branch(repo, name) => branchHead(repo, name).map(WatchState.Branch(_))
-    case Target.Tags(repo)         => newestTags(repo).map(WatchState.Tags(_))
+  /** Checks the target. For a pull or merge request, reviews and comments are fetched only when
+    * [[Watch.needsDiscussion]] says so, given what was remembered before (`None` when subscribing).
+    */
+  def observe(target: Target, before: Option[WatchState], force: Boolean)(using ExecutionContext): Future[Observed] =
+    target match
+      case Target.Change(cr) =>
+        val head = cr.repo.forge match
+          case Forge.GitHub => gitHub(cr)
+          case Forge.GitLab => gitLab(cr)
+        head.flatMap { (snapshot, updatedAt) =>
+          val discussion =
+            if Watch.needsDiscussion(before, updatedAt, force) then discussionOf(cr).map(Some(_))
+            else Future.successful(None)
+          discussion.map(Observed.Change(snapshot, updatedAt, _))
+        }
+      case Target.Branch(repo, name) => branchHead(repo, name).map(Observed.Branch(_))
+      case Target.Tags(repo)         => newestTags(repo).map(Observed.Tags(_))
+
+  /** Runs a paginated `gh api` call whose jq filter emits one JSON object per line. */
+  private def ghLines(repo: Repo, path: String, jq: String)(using ExecutionContext): Future[List[js.Dynamic]] =
+    run("gh", "api", "--hostname", repo.host, "--paginate", path, "--jq", jq)
+      .map(_.linesIterator.filter(_.nonEmpty).map(js.JSON.parse(_)).toList)
+
+  private def discussionOf(cr: ChangeRequest)(using ExecutionContext): Future[List[DiscussionItem]] =
+    def s(v: js.Dynamic) = str(v).getOrElse("")
+    def id(v: js.Dynamic) = v.asInstanceOf[Double].toLong.toString
+    cr.repo.forge match
+      case Forge.GitHub =>
+        val base = s"repos/${cr.repo.project}"
+        val reviews = ghLines(
+          cr.repo,
+          s"$base/pulls/${cr.number}/reviews?per_page=100",
+          ".[] | {id, login: .user.login, state, body, url: .html_url} | tojson"
+        ).map(_.collect {
+          // A pending review is an unsubmitted draft. A COMMENTED review with no summary only groups inline
+          // comments, which are reported themselves.
+          case r if s(r.state) != "PENDING" && !(s(r.state) == "COMMENTED" && s(r.body).trim.isEmpty) =>
+            DiscussionItem(ItemKind.Review, id(r.id), s(r.login), s(r.body), s(r.url), reviewState = str(r.state))
+        })
+        val inline = ghLines(
+          cr.repo,
+          s"$base/pulls/${cr.number}/comments?per_page=100",
+          ".[] | {id, login: .user.login, body, path, line: (.line // .original_line), url: .html_url} | tojson"
+        ).map(_.map { c =>
+          val line = if js.isUndefined(c.line) || c.line == null then "" else s":${id(c.line)}"
+          DiscussionItem(ItemKind.InlineComment, id(c.id), s(c.login), s(c.body), s(c.url), location = Some(s(c.path) + line))
+        })
+        val comments = ghLines(
+          cr.repo,
+          s"$base/issues/${cr.number}/comments?per_page=100",
+          ".[] | {id, login: .user.login, body, url: .html_url} | tojson"
+        ).map(_.map(c => DiscussionItem(ItemKind.Comment, id(c.id), s(c.login), s(c.body), s(c.url))))
+        for r <- reviews; i <- inline; c <- comments yield r ++ i ++ c
+      case Forge.GitLab =>
+        // The newest 100 notes. System notes ("added 1 commit", approvals) are GitLab's own and are skipped.
+        glApi(cr.repo, s"merge_requests/${cr.number}/notes?per_page=100&sort=desc&order_by=created_at").map { j =>
+          j.asInstanceOf[js.Array[js.Dynamic]].toList.reverse.collect {
+            case n if !n.system.asInstanceOf[Boolean] =>
+              val url = s"${cr.url}#note_${id(n.id)}"
+              val author = s(n.author.username)
+              if s(n.`type`) == "DiffNote" && !js.isUndefined(n.position) && n.position != null then
+                val path = str(n.position.new_path).orElse(str(n.position.old_path)).getOrElse("")
+                val line = Seq(n.position.new_line, n.position.old_line)
+                  .collectFirst { case l if !js.isUndefined(l) && l != null => s":${id(l)}" }.getOrElse("")
+                DiscussionItem(ItemKind.InlineComment, id(n.id), author, s(n.body), url, location = Some(path + line))
+              else DiscussionItem(ItemKind.Comment, id(n.id), author, s(n.body), url)
+          }
+        }
 
   private def branchHead(repo: Repo, name: String)(using ExecutionContext): Future[String] =
     val head = repo.forge match
@@ -105,8 +164,9 @@ object Forges:
           CommitsSummary(commits.size, commits.reverse.map(c => subject(c.title)))
         }
 
-  private def gitHub(cr: ChangeRequest)(using ExecutionContext): Future[Snapshot] =
-    run("gh", "pr", "view", cr.url, "--json", "state,headRefOid,statusCheckRollup").flatMap { out =>
+  /** The request's state and its last-updated time. */
+  private def gitHub(cr: ChangeRequest)(using ExecutionContext): Future[(Snapshot, String)] =
+    run("gh", "pr", "view", cr.url, "--json", "state,headRefOid,statusCheckRollup,updatedAt").flatMap { out =>
       val json = js.JSON.parse(out)
       val checks = json.statusCheckRollup.asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]].toOption
         .filter(_ != null).map(_.toSeq).getOrElse(Nil).map { c =>
@@ -121,11 +181,12 @@ object Forges:
         for
           lifecycle <- Snapshot.lifecycleFromGitHub(str(json.state).getOrElse(""))
           ci        <- Snapshot.ciFromGitHub(checks)
-        yield Snapshot(lifecycle, ci, str(json.headRefOid).getOrElse(""))
+        yield (Snapshot(lifecycle, ci, str(json.headRefOid).getOrElse("")), str(json.updatedAt).getOrElse(""))
       )
     }
 
-  private def gitLab(cr: ChangeRequest)(using ExecutionContext): Future[Snapshot] =
+  /** The request's state and its last-updated time. */
+  private def gitLab(cr: ChangeRequest)(using ExecutionContext): Future[(Snapshot, String)] =
     glApi(cr.repo, s"merge_requests/${cr.number}").flatMap { json =>
       val mrSha = str(json.sha).getOrElse("")
       val p     = json.head_pipeline
@@ -139,6 +200,6 @@ object Forges:
         for
           lifecycle <- Snapshot.lifecycleFromGitLab(str(json.state).getOrElse(""))
           ci        <- Snapshot.ciFromGitLab(pipeline, mrSha)
-        yield Snapshot(lifecycle, ci, mrSha)
+        yield (Snapshot(lifecycle, ci, mrSha), str(json.updated_at).getOrElse(""))
       )
     }

@@ -11,7 +11,7 @@ this.
 
 | Subscribe to | URL | The thread hears |
 |---|---|---|
-| A pull or merge request | its page | merged, closed or reopened; CI passed, failed or canceled on a commit |
+| A pull or merge request | its page | merged, closed or reopened; CI passed, failed or canceled on a commit; its latest commit changed; each new review or comment, with its text |
 | A branch | `…/tree/<branch>` (GitLab `…/-/tree/<branch>`) | each time it moves, with the new commits' subjects |
 | A repository's tags | `…/tags` (GitLab `…/-/tags`) | each new tag |
 
@@ -36,6 +36,12 @@ Messages start with `[bb subscription #<id>]` and end with the URL.
 - A PR or MR was merged, closed without merging, or reopened.
 - CI on a PR or MR finished on a commit: passed, failed or canceled. Each result is reported once per commit. Pending
   CI is not reported.
+- A PR's or MR's latest commit changed: a push, rebase in the web interface, or force-push. Your own pushes are
+  reported too. Update the local branch before pushing again.
+- New reviews and comments: who wrote each, its link, and up to 1,500 characters of its text. Inline comments
+  include the file and line. Comments by the user's own account are included, including ones this thread posted,
+  because bb can't tell them apart. GitLab's own system notes, including approvals, are not reported. Edits to
+  existing comments are not reported.
 - A branch moved: the old and new commit, how many commits are new, and the subjects of up to ten.
 - New tags appeared. Deleted tags are not reported. Only the newest 100 tags are compared.
 - Checking failed, with the error, and later that checking works again. A failed check is never treated as "nothing
@@ -51,5 +57,7 @@ subscribed branch is deleted, the thread is told that checking failed.
 - Archived threads are skipped until they are unarchived; they then hear what changed. Deleting a thread ends its
   subscriptions.
 - It reads through the `gh` and `glab` logins of the user running bb, so it sees what they can see.
-- Reviews, comments, individual CI jobs, releases and whole-repo subscriptions are not covered yet.
+- Reviews and comments are read when the PR or MR's updated time changes, and every 15 minutes regardless, so one
+  can occasionally arrive up to 15 minutes late.
+- Individual CI jobs, releases, description edits and whole-repo subscriptions are not covered yet.
 - Branch moves are reported as the new commits since the last check, not one message per push.

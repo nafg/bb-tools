@@ -1,8 +1,8 @@
 # bb-plugin-subscriptions
 
 A [bb](https://github.com/get-bb/bb) plugin that lets a thread subscribe, by URL, to a GitHub or GitLab pull/merge
-request, branch or repository's tags, and get a message when it merges, closes or finishes CI, when the branch gets
-new commits, or when a new tag appears. It replaces agents' own polling loops, which ran in
+request, branch or repository's tags, and get a message when it merges, closes, finishes CI, gets a new commit, review
+or comment, when the branch gets new commits, or when a new tag appears. It replaces agents' own polling loops, which ran in
 sandboxes, hit background-command time limits, and could mistake a failed check for "not merged yet".
 
 Written in Scala.js, like the other plugins in this repo. `subscriptions-core` holds the platform-independent logic
@@ -23,6 +23,8 @@ After changing sources: `npm run reload`.
 - A bb schedule runs every minute in the bb server. For each active subscription it reads the target through `gh` or
   `glab`, using their existing logins, and compares it with the state last reported to the thread. Each check of a
   GitHub target costs about one point of GitHub's 5,000-point hourly allowance, which every other `gh` use shares.
+- Reviews and comments cost three more GitHub calls (one on GitLab), so they are fetched only when the request's
+  updated time changed, and for every subscription once every 15 runs as a safety net.
 - Changes are delivered with `bb.sdk.threads.send`. The new state is recorded only after delivery succeeds, so a
   failed delivery is retried on the next run.
 - A failed check is reported to the thread once, and again when checking recovers.

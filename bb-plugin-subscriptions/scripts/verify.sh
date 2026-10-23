@@ -101,7 +101,14 @@ active=$(sqlite3 -separator $'\t' "$DB" "SELECT id, thread_id, url, state, ifnul
 while IFS=$'\t' read -r id thread url stored check_error; do
   [[ -z ${id:-} ]] && continue
   live=$(live_state "$url" 2>&1)
+  if [[ $stored == change\ * ]]; then
+    # The stored form also holds the updated time and the reviews and comments already reported; compare the rest.
+    read -r k l c sha updated seen <<<"$stored"
+    stored="$k $l $c $sha"
+    seen_count=$([[ $seen == seen:* ]] && tr ',' '\n' <<<"${seen#seen:}" | grep -c . || echo "not yet read")
+  fi
   echo "  #$id $url (thread $thread)"
+  [[ $stored == change\ * ]] && echo "    reviews and comments already reported: $seen_count"
   echo "    stored: ${stored:0:160}"
   echo "    live:   ${live:0:160}"
   [[ -n $check_error ]] && problem "#$id is currently failing to check: $check_error"

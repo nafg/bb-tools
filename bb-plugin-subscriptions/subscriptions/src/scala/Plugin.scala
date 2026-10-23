@@ -15,16 +15,24 @@ private def messagePrefix(s: Subscription): String = s"[bb subscription #${s.id}
 /** Checks every active subscription and tells each thread what changed since it last heard. */
 final class Poller(bb: BbApi, store: Store):
   private var running = false
+  private var runs    = 0
+
+  /** Reviews and comments are normally fetched only when a request's updated time changes. Every this many runs
+    * they are fetched regardless, in case a forge doesn't bump that time for some kind of comment.
+    */
+  private val ForceDiscussionEvery = 15
 
   def pollAll(): Future[Unit] =
     if running then Future.unit
     else
       running = true
+      runs += 1
+      val force = runs % ForceDiscussionEvery == 0
       // Future.apply catches a synchronous throw, so the guard is always reset.
       Future(store.activeWithProblems())
         .flatMap { (subscriptions, problems) =>
           problems.foreach(bb.log.error)
-          subscriptions.foldLeft(Future.unit)((prev, s) => prev.flatMap(_ => pollOne(s)))
+          subscriptions.foldLeft(Future.unit)((prev, s) => prev.flatMap(_ => pollOne(s, force)))
         }
         .andThen(_ => running = false)
 
@@ -47,12 +55,12 @@ final class Poller(bb: BbApi, store: Store):
     }
 
   /** An archived thread's subscriptions are skipped, so what happened meanwhile reaches it once it is unarchived. */
-  private def pollOne(s: Subscription): Future[Unit] =
+  private def pollOne(s: Subscription, force: Boolean): Future[Unit] =
     isArchived(s.threadId)
       .flatMap { archived =>
         if archived then Future.unit
         else
-          Forges.state(s.target).transformWith {
+          Forges.observe(s.target, Some(s.lastSeen), force).transformWith {
             case scala.util.Success(now) => report(s, now)
             case scala.util.Failure(e)   => reportCheckError(s, e.getMessage)
           }
@@ -71,7 +79,7 @@ final class Poller(bb: BbApi, store: Store):
         .map(Watch.describe(s.target, event, _))
     case _ => Future.successful(Watch.describe(s.target, event))
 
-  private def report(s: Subscription, now: WatchState): Future[Unit] =
+  private def report(s: Subscription, now: Observed): Future[Unit] =
     val events   = Watch.between(s.lastSeen, now)
     val finished = Watch.isFinished(now)
     Future.sequence(events.map(describe(s, _))).flatMap { described =>
@@ -80,10 +88,10 @@ final class Poller(bb: BbApi, store: Store):
           described ++
           (if finished then List("This subscription has ended.") else Nil)
       if lines.isEmpty then Future.unit
-      else send(s.threadId, (messagePrefix(s) :: lines).mkString(" ") + s"\n${s.target.url}")
+      else send(s.threadId, s"${messagePrefix(s)} ${lines.mkString("\n")}\n${s.target.url}")
     }.map { _ =>
       // Recorded only after delivery, so a failed send is retried on the next check.
-      store.recordSeen(s.id, now, finished)
+      store.recordSeen(s.id, Watch.remember(Some(s.lastSeen), now), finished)
     }
 
   private def reportCheckError(s: Subscription, error: String): Future[Unit] =
@@ -136,8 +144,9 @@ final class Actions(bb: BbApi, store: Store):
               Right(s"Already subscribed as #${existing.id}. Last known: ${Watch.describe(existing.lastSeen)}.")
             )
           case None =>
-            Forges.state(target).map { now =>
-              if Watch.isFinished(now) then
+            Forges.observe(target, None, force = true).map { observed =>
+              val now = Watch.remember(None, observed)
+              if Watch.isFinished(observed) then
                 Right(s"${target.label} is already ${Watch.describe(now)}. Nothing to wait for, so no subscription was made.")
               else
                 val id = store.add(threadId, target, now)
@@ -178,12 +187,14 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
       "name" -> "subscriptions_add",
       "description" ->
         ("Subscribe this thread to something on GitHub or GitLab, given its URL, and return at once with its " +
-          "current state. A pull or merge request: a message when it is merged or closed, or when CI finishes on " +
-          "a new result or commit; the subscription ends when it is merged or closed. A branch (…/tree/<branch>): " +
+          "current state. A pull or merge request: a message when it is merged or closed, when CI finishes on " +
+          "a new result or commit, when its latest commit changes (push, rebase, force-push), and for each new " +
+          "review or comment, with its text; the subscription ends when it is merged or closed. A branch (…/tree/<branch>): " +
           "a message with the new commits each time it moves. A repository's tags (…/tags): a message for each " +
           "new tag. bb checks every minute. If checking fails, this thread is told instead of hearing nothing."),
       "instructions" ->
-        ("To wait for a pull or merge request to merge, close or finish CI, for new commits on a branch, or for " +
+        ("To wait for a pull or merge request to merge, close, finish CI or get reviews and comments, for new " +
+          "commits on a branch, or for " +
           "a new tag, call subscriptions_add instead of polling gh or glab in a loop, a background command or a " +
           "gitlab-watch. Then end your turn: a message arrives when something happens."),
       "presentation" -> js.Dynamic.literal(

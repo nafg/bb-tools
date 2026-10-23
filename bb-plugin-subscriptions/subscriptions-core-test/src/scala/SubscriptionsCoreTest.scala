@@ -42,14 +42,20 @@ class SubscriptionsCoreTest extends munit.FunSuite:
     targets.foreach(t => assertEquals(Target.parse(t.url), Right(t)))
     assertEquals(ChangeRequest(config, 530).label, "chesednow/config!530")
 
-  test("stored states round-trip"):
+  test("stored states round-trip, and states stored before reviews were tracked still read"):
     val states = List(
-      WatchState.Change(Snapshot(Lifecycle.Open, CiResult.Pending, "abc")),
+      WatchState.Change(Snapshot(Lifecycle.Open, CiResult.Pending, "abc"), "2026-10-22T06:44:52Z", Some(Set("r1", "c2"))),
+      WatchState.Change(Snapshot(Lifecycle.Open, CiResult.Pending, "abc"), "", None),
+      WatchState.Change(Snapshot(Lifecycle.Open, CiResult.Pending, "abc"), "t", Some(Set())),
       WatchState.Branch("abc"),
       WatchState.Tags(List("v2", "v1")),
       WatchState.Tags(Nil)
     )
     states.foreach(st => assertEquals(WatchState.decode(st.encode), Right(st)))
+    assertEquals(
+      WatchState.decode("change Open Passed abc"),
+      Right(WatchState.Change(Snapshot(Lifecycle.Open, CiResult.Passed, "abc"), "", None))
+    )
     assert(WatchState.decode("change Open Nope abc").isLeft)
 
   test("GitHub CI: failure wins over pending, cancellation over pending, nothing means no CI"):
@@ -90,17 +96,21 @@ class SubscriptionsCoreTest extends munit.FunSuite:
     assertEquals(Snapshot.ciFromGitLab(mergedResults, "new"), Right(CiResult.Passed))
 
   private val open = Snapshot(Lifecycle.Open, CiResult.Pending, "aaa")
-  private def between(a: Snapshot, b: Snapshot) = Watch.between(WatchState.Change(a), WatchState.Change(b))
+  private def between(a: Snapshot, b: Snapshot) =
+    Watch.between(WatchState.Change(a, "t", Some(Set())), Observed.Change(b, "t", None))
 
   test("a finished CI result is reported once per commit"):
     val passed = open.copy(ci = CiResult.Passed)
     assertEquals(between(open, passed), List(Event.CiFinished(CiResult.Passed, "aaa")))
     assertEquals(between(passed, passed), Nil)
     val newCommitPassed = passed.copy(headSha = "bbb")
-    assertEquals(between(passed, newCommitPassed), List(Event.CiFinished(CiResult.Passed, "bbb")))
+    assertEquals(
+      between(passed, newCommitPassed),
+      List(Event.HeadMoved("aaa", "bbb"), Event.CiFinished(CiResult.Passed, "bbb"))
+    )
 
   test("pending and missing CI are not reported"):
-    assertEquals(between(open.copy(ci = CiResult.Passed), open.copy(headSha = "bbb")), Nil)
+    assertEquals(between(open.copy(ci = CiResult.Passed), open.copy(headSha = "bbb")), List(Event.HeadMoved("aaa", "bbb")))
     assertEquals(between(open, open.copy(ci = CiResult.NoCi)), Nil)
 
   test("merge, close and reopen are reported, CI first"):
@@ -108,18 +118,64 @@ class SubscriptionsCoreTest extends munit.FunSuite:
     assertEquals(between(open, merged), List(Event.CiFinished(CiResult.Passed, "aaa"), Event.Merged))
     assertEquals(between(open, open.copy(lifecycle = Lifecycle.Closed)), List(Event.Closed))
     assertEquals(between(open.copy(lifecycle = Lifecycle.Closed), open), List(Event.Reopened))
-    assert(Watch.isFinished(WatchState.Change(merged)))
-    assert(!Watch.isFinished(WatchState.Change(open)))
+    assert(Watch.isFinished(Observed.Change(merged, "t", None)))
+    assert(!Watch.isFinished(Observed.Change(open, "t", None)))
+
+  private def item(kind: ItemKind, id: String) = DiscussionItem(kind, id, "copilot", "body", s"https://x/$id")
+
+  test("new reviews and comments are reported once each, including a review submitted after newer ones"):
+    val r1 = item(ItemKind.Review, "100")
+    val c1 = item(ItemKind.Comment, "5")
+    val before = WatchState.Change(open, "t1", Some(Set(c1.key, "r101")))
+    // Review 100 was started before review 101 but submitted after it; ids don't order submission.
+    val now = Observed.Change(open, "t2", Some(List(c1, r1)))
+    assertEquals(Watch.between(before, now), List(Event.NewDiscussion(List(r1))))
+    val after = Watch.remember(Some(before), now)
+    assertEquals(Watch.between(after, now), Nil)
+
+  test("reviews and comments that existed when first read are not replayed"):
+    val legacy = WatchState.Change(open, "", None)
+    val now    = Observed.Change(open, "t", Some(List(item(ItemKind.Comment, "1"))))
+    assertEquals(Watch.between(legacy, now), Nil)
+    assertEquals(Watch.remember(Some(legacy), now), WatchState.Change(open, "t", Some(Set("c1"))))
+
+  test("reviews and comments are fetched when never read, when the request was updated, or when forced"):
+    val read = Some(WatchState.Change(open, "t1", Some(Set())))
+    assert(!Watch.needsDiscussion(read, "t1", force = false))
+    assert(Watch.needsDiscussion(read, "t2", force = false))
+    assert(Watch.needsDiscussion(read, "t1", force = true))
+    assert(Watch.needsDiscussion(Some(WatchState.Change(open, "t1", None)), "t1", force = false))
+    assert(Watch.needsDiscussion(None, "t1", force = false))
+
+  test("a check that didn't fetch reviews keeps what was seen"):
+    val before = WatchState.Change(open, "t1", Some(Set("c1")))
+    assertEquals(Watch.remember(Some(before), Observed.Change(open, "t1", None)), before)
+
+  test("new reviews and comments are described with author, link and body, capped"):
+    val review = DiscussionItem(ItemKind.Review, "1", "alice", "Looks good", "https://x/r1", reviewState = Some("APPROVED"))
+    val inline = DiscussionItem(ItemKind.InlineComment, "2", "copilot", "Use foo\nnot bar", "https://x/i2", location = Some("A.scala:12"))
+    val text   = Watch.describe(Target.Change(ChangeRequest(slick, 1)), Event.NewDiscussion(List(review, inline)))
+    assertEquals(
+      text,
+      """2 new reviews or comments on slick/slick#1:
+        |- Review by alice, approved: https://x/r1
+        |  Looks good
+        |- Comment by copilot on A.scala:12: https://x/i2
+        |  Use foo
+        |  not bar""".stripMargin
+    )
+    val many = Watch.describe(Target.Change(ChangeRequest(slick, 1)), Event.NewDiscussion((1 to 12).map(i => item(ItemKind.Comment, i.toString)).toList))
+    assert(many.endsWith("…and 2 more on https://github.com/slick/slick/pull/1"), many)
 
   test("a branch reports each move, and never finishes"):
-    assertEquals(Watch.between(WatchState.Branch("a"), WatchState.Branch("b")), List(Event.BranchMoved("a", "b")))
-    assertEquals(Watch.between(WatchState.Branch("a"), WatchState.Branch("a")), Nil)
-    assert(!Watch.isFinished(WatchState.Branch("a")))
+    assertEquals(Watch.between(WatchState.Branch("a"), Observed.Branch("b")), List(Event.BranchMoved("a", "b")))
+    assertEquals(Watch.between(WatchState.Branch("a"), Observed.Branch("a")), Nil)
+    assert(!Watch.isFinished(Observed.Branch("a")))
 
   test("new tags are reported, deleted ones are not"):
     val before = WatchState.Tags(List("v2", "v1"))
-    assertEquals(Watch.between(before, WatchState.Tags(List("v3", "v2", "v1"))), List(Event.NewTags(List("v3"))))
-    assertEquals(Watch.between(before, WatchState.Tags(List("v1"))), Nil)
+    assertEquals(Watch.between(before, Observed.Tags(List("v3", "v2", "v1"))), List(Event.NewTags(List("v3"))))
+    assertEquals(Watch.between(before, Observed.Tags(List("v1"))), Nil)
 
   test("branch moves list commit subjects, capped"):
     val target = Target.Branch(config, "main")

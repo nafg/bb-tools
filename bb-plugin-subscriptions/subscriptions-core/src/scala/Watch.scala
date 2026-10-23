@@ -1,23 +1,45 @@
 package subscriptionscore
 
-/** What the plugin last saw of a subscription's target. Its kind always matches the target's. */
-enum WatchState:
-  case Change(snapshot: Snapshot)
+/** What a check of a subscription's target found. Its kind always matches the target's. */
+enum Observed:
+  /** `updatedAt` is the forge's last-updated time for the request. `discussion` is `None` when this check didn't
+    * fetch reviews and comments (see [[Watch.needsDiscussion]]).
+    */
+  case Change(snapshot: Snapshot, updatedAt: String, discussion: Option[List[DiscussionItem]])
   case Branch(headSha: String)
   /** The newest tags, by name. */
   case Tags(names: List[String])
 
-  /** A one-line form for storage. Shas, enum names and git ref names contain no spaces. */
+/** What the plugin remembers of a subscription's target between checks. */
+enum WatchState:
+  /** `seen` holds the keys of the reviews and comments already reported, or `None` before they were first read. */
+  case Change(snapshot: Snapshot, updatedAt: String, seen: Option[Set[String]])
+  case Branch(headSha: String)
+  case Tags(names: List[String])
+
+  /** A one-line form for storage. Shas, timestamps, enum names, item keys and git ref names contain no spaces. */
   def encode: String = this match
-    case Change(Snapshot(l, ci, sha)) => s"change $l $ci $sha"
-    case Branch(sha)                  => s"branch $sha"
-    case Tags(names)                  => ("tags" :: names).mkString(" ")
+    case Change(Snapshot(l, ci, sha), updatedAt, seen) =>
+      val seenField = seen.fold("-")(keys => "seen:" + keys.toList.sorted.mkString(","))
+      s"change $l $ci $sha ${if updatedAt.isEmpty then "-" else updatedAt} $seenField"
+    case Branch(sha) => s"branch $sha"
+    case Tags(names) => ("tags" :: names).mkString(" ")
 
 object WatchState:
   def decode(s: String): Either[String, WatchState] =
+    def change(l: String, ci: String, sha: String, updatedAt: String, seen: Option[Set[String]]) =
+      scala.util.Try(Change(Snapshot(Lifecycle.valueOf(l), CiResult.valueOf(ci), sha), updatedAt, seen)).toEither
+        .left.map(_.getMessage)
     s.split(' ').toList match
-      case "change" :: l :: ci :: sha :: Nil =>
-        scala.util.Try(Change(Snapshot(Lifecycle.valueOf(l), CiResult.valueOf(ci), sha))).toEither.left.map(_.getMessage)
+      // Stored before reviews and comments were tracked.
+      case "change" :: l :: ci :: sha :: Nil => change(l, ci, sha, "", None)
+      case "change" :: l :: ci :: sha :: updatedAt :: seenField :: Nil =>
+        val updated = if updatedAt == "-" then "" else updatedAt
+        seenField match
+          case "-" => change(l, ci, sha, updated, None)
+          case f if f.startsWith("seen:") =>
+            change(l, ci, sha, updated, Some(f.stripPrefix("seen:").split(',').filter(_.nonEmpty).toSet))
+          case other => Left(s"unreadable seen field: $other")
       case "branch" :: sha :: Nil => Right(Branch(sha))
       case "tags" :: names        => Right(Tags(names))
       case _                      => Left(s"unreadable stored state: $s")
@@ -29,6 +51,9 @@ enum Event:
   case Reopened
   /** CI on `sha` reached a final result: passed, failed or canceled. */
   case CiFinished(result: CiResult, sha: String)
+  /** A pull or merge request's latest commit changed: a push, rebase or force-push. */
+  case HeadMoved(from: String, to: String)
+  case NewDiscussion(items: List[DiscussionItem])
   case BranchMoved(from: String, to: String)
   case NewTags(names: List[String])
 
@@ -36,18 +61,41 @@ enum Event:
 final case class CommitsSummary(count: Int, subjects: List[String])
 
 object Watch:
-  /** What happened between two observations of the same target.
-    *
-    * A CI result is reported once per commit, when it becomes final. Results that are still pending, or that
-    * report no CI, are not reported. Deleted tags are not reported.
+  /** Whether a check should also fetch a pull or merge request's reviews and comments. They are fetched when they
+    * have never been read, when the request's updated time changed, or when `force` asks for it.
     */
-  def between(before: WatchState, after: WatchState): List[Event] = (before, after) match
-    case (WatchState.Change(b), WatchState.Change(a)) => changeEvents(b, a)
-    case (WatchState.Branch(b), WatchState.Branch(a)) => if a != b then List(Event.BranchMoved(b, a)) else Nil
-    case (WatchState.Tags(b), WatchState.Tags(a)) =>
+  def needsDiscussion(before: Option[WatchState], updatedAt: String, force: Boolean): Boolean = before match
+    case Some(WatchState.Change(_, beforeUpdated, Some(_))) => force || beforeUpdated != updatedAt
+    case _                                                   => true
+
+  /** What happened between the last remembered state and this check.
+    *
+    * A CI result is reported once per commit, when it becomes final; pending and missing CI are not reported.
+    * Reviews and comments are reported once each, and only after they were first read, so subscribing doesn't
+    * replay old ones. Deleted tags are not reported.
+    */
+  def between(before: WatchState, now: Observed): List[Event] = (before, now) match
+    case (WatchState.Change(b, _, seen), Observed.Change(a, _, discussion)) =>
+      val fresh = (seen, discussion) match
+        case (Some(keys), Some(items)) => items.filterNot(i => keys(i.key))
+        case _                         => Nil
+      changeEvents(b, a) ++ (if fresh.nonEmpty then List(Event.NewDiscussion(fresh)) else Nil)
+    case (WatchState.Branch(b), Observed.Branch(a)) => if a != b then List(Event.BranchMoved(b, a)) else Nil
+    case (WatchState.Tags(b), Observed.Tags(a)) =>
       val added = a.filterNot(b.toSet)
       if added.nonEmpty then List(Event.NewTags(added)) else Nil
     case _ => Nil
+
+  /** The state to remember after a check. Reviews and comments that weren't fetched keep their earlier record. */
+  def remember(before: Option[WatchState], now: Observed): WatchState = now match
+    case Observed.Change(snapshot, updatedAt, discussion) =>
+      val earlier = before.collect { case WatchState.Change(_, _, seen) => seen }.flatten
+      val seen    = discussion.map(_.map(_.key).toSet).orElse(earlier)
+      // Without a fresh read, keep the old updated time so the next check reads them.
+      val updated = if discussion.isDefined then updatedAt else before.collect { case c: WatchState.Change => c.updatedAt }.getOrElse("")
+      WatchState.Change(snapshot, updated, seen)
+    case Observed.Branch(sha) => WatchState.Branch(sha)
+    case Observed.Tags(names) => WatchState.Tags(names)
 
   private def changeEvents(before: Snapshot, after: Snapshot): List[Event] =
     val lifecycle = (before.lifecycle, after.lifecycle) match
@@ -55,21 +103,46 @@ object Watch:
       case (_, Lifecycle.Merged) => List(Event.Merged)
       case (_, Lifecycle.Closed) => List(Event.Closed)
       case (_, Lifecycle.Open)   => List(Event.Reopened)
+    val head =
+      if before.headSha.nonEmpty && after.headSha.nonEmpty && before.headSha != after.headSha then
+        List(Event.HeadMoved(before.headSha, after.headSha))
+      else Nil
     val ciIsFinal = Set(CiResult.Passed, CiResult.Failed, CiResult.Canceled)
     val ci =
       if ciIsFinal(after.ci) && (after.ci != before.ci || after.headSha != before.headSha) then
         List(Event.CiFinished(after.ci, after.headSha))
       else Nil
-    ci ++ lifecycle
+    head ++ ci ++ lifecycle
 
   /** True once nothing more can happen worth waiting for: a pull or merge request was merged or closed. Branches
     * and tags never finish.
     */
-  def isFinished(s: WatchState): Boolean = s match
-    case WatchState.Change(snapshot) => snapshot.lifecycle != Lifecycle.Open
-    case _                           => false
+  def isFinished(o: Observed): Boolean = o match
+    case Observed.Change(snapshot, _, _) => snapshot.lifecycle != Lifecycle.Open
+    case _                               => false
 
-  private val MaxSubjects = 10
+  private val MaxSubjects    = 10
+  private val MaxItems       = 10
+  private val MaxBodyChars   = 1500
+
+  private def excerpt(body: String): String =
+    val trimmed = body.trim
+    if trimmed.length <= MaxBodyChars then trimmed else trimmed.take(MaxBodyChars) + "… (cut; open the link for the rest)"
+
+  private def describeItem(item: DiscussionItem): String =
+    val heading = item.kind match
+      case ItemKind.Review =>
+        val verdict = item.reviewState match
+          case Some("APPROVED")          => "approved"
+          case Some("CHANGES_REQUESTED") => "requested changes"
+          case Some("DISMISSED")         => "review dismissed"
+          case _                         => "reviewed"
+        s"Review by ${item.author}, $verdict"
+      case ItemKind.InlineComment => s"Comment by ${item.author} on ${item.location.getOrElse("the diff")}"
+      case ItemKind.Comment       => s"Comment by ${item.author}"
+    val body = excerpt(item.body)
+    val text = if body.isEmpty then "" else "\n" + body.linesIterator.map("  " + _).mkString("\n")
+    s"- $heading: ${item.url}$text"
 
   /** `commits` describes a `BranchMoved` event; it is ignored for other events. */
   def describe(target: Target, event: Event, commits: Option[CommitsSummary] = None): String =
@@ -87,6 +160,14 @@ object Watch:
           case CiResult.Canceled => "was canceled"
           case other             => other.toString.toLowerCase
         s"CI $verb on ${target.label} at commit ${sha.take(10)}."
+      case (_, Event.HeadMoved(from, to)) =>
+        s"The latest commit of ${target.label} changed from ${from.take(10)} to ${to.take(10)} " +
+          "(a push, rebase or force-push). A local branch may need updating before the next push."
+      case (_, Event.NewDiscussion(items)) =>
+        val shown = items.take(MaxItems)
+        val more  = if items.size > shown.size then s"\n…and ${items.size - shown.size} more on ${target.url}" else ""
+        val noun  = if items.size == 1 then "review or comment" else "reviews or comments"
+        s"${items.size} new $noun on ${target.label}:\n" + shown.map(describeItem).mkString("\n") + more
       case (_, Event.BranchMoved(from, to)) =>
         val moved = s"${target.label} moved from ${from.take(10)} to ${to.take(10)}."
         commits match
@@ -102,7 +183,7 @@ object Watch:
       case (_, other) => s"${target.label}: $other."
 
   def describe(s: WatchState): String = s match
-    case WatchState.Change(snapshot) =>
+    case WatchState.Change(snapshot, _, _) =>
       val lifecycle = snapshot.lifecycle match
         case Lifecycle.Open   => "open"
         case Lifecycle.Merged => "merged"
@@ -121,6 +202,7 @@ object Watch:
   /** What a thread subscribed to `target` will be told about. */
   def promise(target: Target): String = target match
     case Target.Change(_) =>
-      "This thread will get a message when it is merged or closed, and each time CI finishes on a new result or commit."
+      "This thread will get a message when it is merged or closed, when CI finishes on a new result or commit, " +
+        "when its latest commit changes, and for each new review or comment."
     case Target.Branch(_, _) => "This thread will get a message each time the branch gets new commits."
     case Target.Tags(_)      => "This thread will get a message each time a new tag appears."
