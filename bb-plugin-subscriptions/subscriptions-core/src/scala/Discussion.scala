@@ -23,3 +23,12 @@ final case class DiscussionItem(
 ):
   /** Unique among one pull or merge request's items. */
   def key: String = s"${kind.code}$id"
+
+  /** The bb thread that says it posted this, from a [[DiscussionItem.threadMarker]] in the text. */
+  def postedByThread: Option[String] = DiscussionItem.MarkerPattern.findFirstMatchIn(body).map(_.group(1))
+
+object DiscussionItem:
+  private[subscriptionscore] val MarkerPattern = """<!--\s*bb-thread:\s*([A-Za-z0-9_-]+)\s*-->""".r
+
+  /** An invisible line a thread adds to the comments it posts, so its own subscriptions don't report them back. */
+  def threadMarker(threadId: String): String = s"<!-- bb-thread: $threadId -->"

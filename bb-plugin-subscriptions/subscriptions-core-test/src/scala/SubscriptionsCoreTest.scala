@@ -151,6 +151,17 @@ class SubscriptionsCoreTest extends munit.FunSuite:
     val before = WatchState.Change(open, "t1", Some(Set("c1")))
     assertEquals(Watch.remember(Some(before), Observed.Change(open, "t1", None)), before)
 
+  test("a thread's own marked comments are not reported back to it, but are to other threads"):
+    val own   = item(ItemKind.Comment, "1").copy(body = "Done.\n\n" + DiscussionItem.threadMarker("thr_me"))
+    val other = item(ItemKind.Comment, "2").copy(body = "LGTM <!--bb-thread:thr_other-->")
+    val plain = item(ItemKind.Comment, "3")
+    assertEquals(own.postedByThread, Some("thr_me"))
+    assertEquals(other.postedByThread, Some("thr_other"))
+    assertEquals(plain.postedByThread, None)
+    val events = List(Event.Merged, Event.NewDiscussion(List(own, other, plain)))
+    assertEquals(Watch.withoutOwnPosts(events, "thr_me"), List(Event.Merged, Event.NewDiscussion(List(other, plain))))
+    assertEquals(Watch.withoutOwnPosts(List(Event.NewDiscussion(List(own))), "thr_me"), Nil)
+
   test("hidden HTML comments and runs of blank lines are dropped from quoted text"):
     assertEquals(
       Watch.visibleText("<!-- marker -->\n\n**Use 2.7.0.**\n\n\n\n<details>\n<!-- a\nb -->x  \n</details>\n"),

@@ -80,7 +80,7 @@ final class Poller(bb: BbApi, store: Store):
     case _ => Future.successful(Watch.describe(s.target, event))
 
   private def report(s: Subscription, now: Observed): Future[Unit] =
-    val events   = Watch.between(s.lastSeen, now)
+    val events   = Watch.withoutOwnPosts(Watch.between(s.lastSeen, now), s.threadId)
     val finished = Watch.isFinished(now)
     Future.sequence(events.map(describe(s, _))).flatMap { described =>
       val lines =

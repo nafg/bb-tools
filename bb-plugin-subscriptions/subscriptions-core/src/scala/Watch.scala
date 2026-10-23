@@ -86,6 +86,16 @@ object Watch:
       if added.nonEmpty then List(Event.NewTags(added)) else Nil
     case _ => Nil
 
+  /** Drops the reviews and comments that `threadId` marked as its own, since that thread already knows about them.
+    * A new-discussion event left with nothing to report is dropped too.
+    */
+  def withoutOwnPosts(events: List[Event], threadId: String): List[Event] = events.flatMap {
+    case Event.NewDiscussion(items) =>
+      val others = items.filterNot(_.postedByThread.contains(threadId))
+      if others.isEmpty then Nil else List(Event.NewDiscussion(others))
+    case other => List(other)
+  }
+
   /** The state to remember after a check. Reviews and comments that weren't fetched keep their earlier record. */
   def remember(before: Option[WatchState], now: Observed): WatchState = now match
     case Observed.Change(snapshot, updatedAt, discussion) =>
