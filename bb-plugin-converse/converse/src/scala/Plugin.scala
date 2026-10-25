@@ -589,6 +589,11 @@ def plugin(bb: BbApi): Unit =
           "with its application default credentials)"),
         "default" -> ""
       ),
+      "googleSpeakingRate" -> js.Dynamic.literal(
+        "type"    -> "string",
+        "label"   -> "GOOGLE CLOUD TTS: speaking rate (1 is normal; 0.25 to 4)",
+        "default" -> "1"
+      ),
       "googleTtsApiKey" -> js.Dynamic.literal(
         "type"   -> "string",
         "label"  -> "GOOGLE CLOUD TTS: API key restricted to the Text-to-Speech API (empty: use gcloud's credentials)",
@@ -816,7 +821,7 @@ def plugin(bb: BbApi): Unit =
             js.Dynamic.literal(
               "method"  -> "POST",
               "headers" -> auth.headers,
-              "body"    -> js.JSON.stringify(GoogleCloudTts.synthesizeRequest(ssml, chosen))
+              "body"    -> js.JSON.stringify(GoogleCloudTts.synthesizeRequest(ssml, chosen, GoogleCloudTts.speakingRate(str(currentSettings.googleSpeakingRate))))
             )
           )
           .asInstanceOf[js.Promise[js.Dynamic]]

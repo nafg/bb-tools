@@ -49,12 +49,18 @@ private object GoogleCloudTts:
     * arrives whole anyway, and it is a tenth of WAV's size, which matters when
     * the browser is remote.
     */
-  def synthesizeRequest(ssml: String, voice: GoogleCloudVoice): js.Dynamic =
+  def synthesizeRequest(ssml: String, voice: GoogleCloudVoice, speakingRate: Double): js.Dynamic =
     js.Dynamic.literal(
       "input"       -> js.Dynamic.literal("ssml" -> ssml),
       "voice"       -> js.Dynamic.literal("languageCode" -> voice.languageCode, "name" -> voice.name),
-      "audioConfig" -> js.Dynamic.literal("audioEncoding" -> "MP3")
+      "audioConfig" -> js.Dynamic.literal("audioEncoding" -> "MP3", "speakingRate" -> speakingRate)
     )
+
+  /** The speaking rate a setting asks for, 1 being the voice's normal speed,
+    * within the 0.25 to 4 the API accepts; normal speed when it is not a number.
+    */
+  def speakingRate(setting: String): Double =
+    setting.trim.toDoubleOption.filter(!_.isNaN).fold(1.0)(_.max(0.25).min(4.0))
 
   /** The characters Google bills for `ssml`: all of it but `<mark>` tags,
     * which the plugin does not use.
