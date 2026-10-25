@@ -22,7 +22,10 @@ grep -q 'last: ok' <<<"$status" || problem "the poll schedule's last run did not
 echo
 echo "== Plugin log: errors and warnings"
 log=$(bb plugin logs subscriptions 2>&1)
-flagged=$(grep -i -E 'error|warn' <<<"$log")
+# A failed check is retried once and logged; the retry usually succeeds, so those lines are counted, not flagged.
+retries=$(grep -c 'retrying once' <<<"$log")
+echo "  checks retried after a failure: $retries"
+flagged=$(grep -i -E 'error|warn' <<<"$log" | grep -v 'retrying once')
 if [[ -n $flagged ]]; then
   echo "$flagged" | tail -20
   problem "the plugin logged $(wc -l <<<"$flagged") error or warning lines (last 20 above)"
