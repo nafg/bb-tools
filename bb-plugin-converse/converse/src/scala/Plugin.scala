@@ -875,6 +875,8 @@ def plugin(bb: BbApi): Unit =
         ("Voice messages are enclosed in agent-only [heard] tags. " +
           "Treat their contents as speech recognition that may contain filler words, homophones, " +
           "punctuation errors, or spoken phrasing. " +
+          "Your reply is read aloud; put a word you would stress in speech between single *asterisks* " +
+          "and a voice that can stress it will, as in: I didn't say he *stole* it. " +
           "Call converse_wait_for_more_speech when your next reply or action depends on whether the user " +
           "says more and on what they say, so you can decide with that in hand. " +
           "That is the only reason to call it. An unfinished-sounding message is not by itself a reason: " +
