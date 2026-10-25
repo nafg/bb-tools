@@ -40,8 +40,10 @@ it: a coordinator may subscribe to MRs it doesn't own. The list links each threa
 Messages start with `[bb subscription #<id>]` and end with the URL.
 
 - A PR or MR was merged, closed without merging, or reopened.
-- CI on a PR or MR finished on a commit: passed, failed or canceled. Each result is reported once per commit. Pending
-  CI is not reported.
+- CI on a PR or MR finished on a commit: passed, failed or canceled, with which checks were counted. On GitHub, CI
+  whose workflow runs wait for a maintainer's approval (as for a first-time contributor) is reported as waiting, not
+  passed. Each result is reported once per commit. Pending CI is not reported. Check the counted checks before
+  claiming CI passed.
 - A PR's or MR's latest commit changed: a push, rebase in the web interface, or force-push. Your own pushes are
   reported too. Update the local branch before pushing again.
 - New reviews and comments: who wrote each, its link, and up to 1,500 characters of its visible text (hidden HTML

@@ -74,7 +74,19 @@ live_state() {
   path=$(sed -E 's#^https?://[^/]+/##; s#/$##' <<<"$url")
   case $path in
     */-/merge_requests/*) gitlab_change "$host" "$(uri "${path%%/-/*}")" "${path##*/}" ;;
-    */pull/*) github_change "$url" ;;
+    */pull/*)
+      local out ci sha
+      out=$(github_change "$url")
+      read -r _ _ ci sha <<<"$out"
+      # Workflow runs held for approval or still running don't appear among the checks.
+      if [[ $ci == Passed || $ci == NoCi ]]; then
+        local repo=${path%%/pull/*} runs
+        runs=$(gh api --hostname "$host" "repos/$repo/actions/runs?head_sha=$sha&per_page=100" \
+          --jq '[.workflow_runs[] | if .conclusion == "action_required" then "held" elif .status != "completed" then "running" else "done" end] | unique | join(",")')
+        if [[ $runs == *held* ]]; then out=${out/ $ci / AwaitingApproval }
+        elif [[ $runs == *running* ]]; then out=${out/ $ci / Pending }; fi
+      fi
+      echo "$out" ;;
     */-/tree/*)
       glab api --hostname "$host" "projects/$(uri "${path%%/-/*}")/repository/branches/$(uri "${path#*/-/tree/}")" |
         jq -r '"branch \(.commit.id)"' ;;

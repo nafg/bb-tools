@@ -97,6 +97,37 @@ class SubscriptionsCoreTest extends munit.FunSuite:
     assert(Snapshot.ciFromGitLab(Some(Snapshot.GitLabPipeline("something_new", "s", "main")), "s").isLeft)
     assert(Snapshot.lifecycleFromGitHub("DRAFT").isLeft)
 
+  test("workflow runs held for approval or still running mean CI hasn't passed"):
+    import Snapshot.WorkflowRun
+    // From slick/slick#3928: only Mergify's checks had finished; every workflow awaited a maintainer's approval.
+    val mergify = Seq(
+      GitHubCheck.CheckRun("/Mergify Merge Queue", None, "COMPLETED", Some("NEUTRAL")),
+      GitHubCheck.CheckRun("/Summary", None, "COMPLETED", Some("SUCCESS"))
+    )
+    val held = Seq(WorkflowRun("CI", "completed", Some("action_required")), WorkflowRun("Version Policy Check", "completed", Some("action_required")))
+    val fromChecks = Snapshot.ciFromGitHub(mergify).toOption.get
+    assertEquals(fromChecks, CiResult.Passed)
+    assertEquals(Snapshot.withWorkflowRuns(fromChecks, held), CiResult.AwaitingApproval)
+    assertEquals(Snapshot.withWorkflowRuns(CiResult.Passed, Seq(WorkflowRun("CI", "in_progress", None))), CiResult.Pending)
+    assertEquals(Snapshot.withWorkflowRuns(CiResult.Passed, Seq(WorkflowRun("CI", "completed", Some("success")))), CiResult.Passed)
+    assertEquals(Snapshot.withWorkflowRuns(CiResult.Failed, held), CiResult.Failed)
+    assertEquals(
+      Snapshot.describeGitHubChecks(mergify, held),
+      "passed: Mergify Merge Queue, Summary; awaiting approval: CI, Version Policy Check"
+    )
+
+  test("waiting for approval is reported once, with what was counted"):
+    val before  = WatchState.Change(open, "t", Some(Set()))
+    val waiting = open.copy(ci = CiResult.AwaitingApproval)
+    assertEquals(
+      Watch.between(before, Observed.Change(waiting, "t", None, "awaiting approval: CI")),
+      List(Event.CiFinished(CiResult.AwaitingApproval, "aaa", "awaiting approval: CI"))
+    )
+    assertEquals(
+      Watch.describe(Target.Change(ChangeRequest(slick, 1)), Event.CiFinished(CiResult.AwaitingApproval, "aaa", "awaiting approval: CI")),
+      "CI on slick/slick#1 at commit aaa is waiting for a maintainer to approve its workflow runs; they haven't run yet. Counted: awaiting approval: CI."
+    )
+
   test("only the latest attempt of a re-run GitHub check counts"):
     // From nafg/simple-router#345: a run cancelled by a newer run of the same job, which passed.
     val cancelled = GitHubCheck.CheckRun("build", Some("2026-10-22T06:42:08Z"), "COMPLETED", Some("CANCELLED"))

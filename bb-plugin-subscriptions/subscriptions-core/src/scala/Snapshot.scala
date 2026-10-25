@@ -9,6 +9,10 @@ enum CiResult:
   /** No checks or pipeline exist for the commit. */
   case NoCi
   case Pending, Passed, Failed, Canceled
+  /** Workflow runs exist but haven't run: GitHub holds them for a maintainer's approval, as it does for a
+    * first-time contributor's pull request.
+    */
+  case AwaitingApproval
 
 /** What the plugin knows about a pull or merge request at one moment. `headSha` is its latest commit. */
 final case class Snapshot(lifecycle: Lifecycle, ci: CiResult, headSha: String)
@@ -74,6 +78,44 @@ object Snapshot:
     each.collectFirst { case Left(e) => e } match
       case Some(e) => Left(e)
       case None    => Right(combine(each.collect { case Right(r) => r }))
+
+  /** A GitHub Actions workflow run for the head commit. Runs waiting for approval don't appear among the checks. */
+  final case class WorkflowRun(name: String, status: String, conclusion: Option[String])
+
+  /** Corrects a result the checks alone reported as passed or absent: workflow runs that are held for approval or
+    * haven't finished mean CI hasn't actually passed.
+    */
+  def withWorkflowRuns(fromChecks: CiResult, runs: Seq[WorkflowRun]): CiResult =
+    if fromChecks != CiResult.Passed && fromChecks != CiResult.NoCi then fromChecks
+    else if runs.exists(_.conclusion.contains("action_required")) then CiResult.AwaitingApproval
+    else if runs.exists(_.status != "completed") then CiResult.Pending
+    else fromChecks
+
+  /** Which checks a result was based on, grouped by outcome, for a message. */
+  def describeGitHubChecks(checks: Seq[GitHubCheck], runs: Seq[WorkflowRun]): String =
+    def outcome(c: GitHubCheck): String = c match
+      case GitHubCheck.CheckRun(_, _, "COMPLETED", Some(c)) =>
+        c match
+          case "SUCCESS" | "NEUTRAL" | "SKIPPED" => "passed"
+          case "CANCELLED"                       => "canceled"
+          case _                                 => "failed"
+      case GitHubCheck.CheckRun(_, _, _, _) => "running"
+      case GitHubCheck.StatusContext(_, state) =>
+        state match
+          case "SUCCESS"              => "passed"
+          case "PENDING" | "EXPECTED" => "running"
+          case _                      => "failed"
+    // Check names are stored as "<workflow>/<job>"; checks outside a workflow have an empty prefix.
+    def shortName(c: GitHubCheck) = c.checkName.stripPrefix("/")
+    val fromChecks = latestAttempts(checks).groupBy(outcome).view.mapValues(_.map(shortName).sorted).toMap
+    val held       = runs.filter(_.conclusion.contains("action_required")).map(_.name).sorted
+    val groups     = List("failed", "canceled", "running", "passed").flatMap(k => fromChecks.get(k).map(k -> _)) ++
+      (if held.nonEmpty then List("awaiting approval" -> held) else Nil)
+    groups.map { (label, names) =>
+      val shown = names.take(6)
+      val more  = if names.size > shown.size then s" and ${names.size - shown.size} more" else ""
+      s"$label: ${shown.mkString(", ")}$more"
+    }.mkString("; ")
 
   private def combine(results: Seq[CiResult]): CiResult =
     if results.isEmpty then CiResult.NoCi

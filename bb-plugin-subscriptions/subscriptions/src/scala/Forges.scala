@@ -2,6 +2,7 @@ package subscriptions
 
 import subscriptionscore.*
 import subscriptionscore.Snapshot.GitHubCheck
+import subscriptionscore.Snapshot.WorkflowRun as GitHubWorkflowRun
 
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.scalajs.js
@@ -63,11 +64,11 @@ object Forges:
         val head = cr.repo.forge match
           case Forge.GitHub => gitHub(cr)
           case Forge.GitLab => gitLab(cr)
-        head.flatMap { (snapshot, updatedAt) =>
+        head.flatMap { (snapshot, updatedAt, ciBasis) =>
           val discussion =
             if Watch.needsDiscussion(before, updatedAt, force) then discussionOf(cr).map(Some(_))
             else Future.successful(None)
-          discussion.map(Observed.Change(snapshot, updatedAt, _))
+          discussion.map(Observed.Change(snapshot, updatedAt, _, ciBasis))
         }
       case Target.Branch(repo, name) => branchHead(repo, name).map(Observed.Branch(_))
       case Target.Tags(repo)         => newestTags(repo).map(Observed.Tags(_))
@@ -178,8 +179,14 @@ object Forges:
           CommitsSummary(commits.size, commits.reverse.map(c => subject(c.title)))
         }
 
-  /** The request's state and its last-updated time. */
-  private def gitHub(cr: ChangeRequest)(using ExecutionContext): Future[(Snapshot, String)] =
+  /** The head commit's GitHub Actions workflow runs. Runs held for a maintainer's approval appear only here. */
+  private def workflowRuns(repo: Repo, sha: String)(using ExecutionContext): Future[List[GitHubWorkflowRun]] =
+    ghLines(repo, s"repos/${repo.project}/actions/runs?head_sha=$sha&per_page=100",
+      ".workflow_runs[] | {name, status, conclusion} | tojson"
+    ).map(_.map(r => GitHubWorkflowRun(str(r.name).getOrElse(""), str(r.status).getOrElse(""), str(r.conclusion))))
+
+  /** The request's state, its last-updated time, and which checks the CI result counted. */
+  private def gitHub(cr: ChangeRequest)(using ExecutionContext): Future[(Snapshot, String, String)] =
     run("gh", "pr", "view", cr.url, "--json", "state,headRefOid,statusCheckRollup,updatedAt").flatMap { out =>
       val json = js.JSON.parse(out)
       val checks = json.statusCheckRollup.asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]].toOption
@@ -191,16 +198,26 @@ object Forges:
             val name = s"${str(c.workflowName).getOrElse("")}/${str(c.name).getOrElse("")}"
             GitHubCheck.CheckRun(name, str(c.startedAt), str(c.status).getOrElse(""), str(c.conclusion))
         }
+      val sha = str(json.headRefOid).getOrElse("")
       orFail(
         for
           lifecycle <- Snapshot.lifecycleFromGitHub(str(json.state).getOrElse(""))
           ci        <- Snapshot.ciFromGitHub(checks)
-        yield (Snapshot(lifecycle, ci, str(json.headRefOid).getOrElse("")), str(json.updatedAt).getOrElse(""))
-      )
+        yield (lifecycle, ci)
+      ).flatMap { (lifecycle, fromChecks) =>
+        // Checks alone can look passed while workflow runs wait for approval; look at the runs before saying so.
+        val runs =
+          if fromChecks == CiResult.Passed || fromChecks == CiResult.NoCi then workflowRuns(cr.repo, sha)
+          else Future.successful(Nil)
+        runs.map { rs =>
+          val ci = Snapshot.withWorkflowRuns(fromChecks, rs)
+          (Snapshot(lifecycle, ci, sha), str(json.updatedAt).getOrElse(""), Snapshot.describeGitHubChecks(checks, rs))
+        }
+      }
     }
 
-  /** The request's state and its last-updated time. */
-  private def gitLab(cr: ChangeRequest)(using ExecutionContext): Future[(Snapshot, String)] =
+  /** The request's state, its last-updated time, and which pipeline the CI result counted. */
+  private def gitLab(cr: ChangeRequest)(using ExecutionContext): Future[(Snapshot, String, String)] =
     glApi(cr.repo, s"merge_requests/${cr.number}").flatMap { json =>
       val mrSha = str(json.sha).getOrElse("")
       val p     = json.head_pipeline
@@ -214,7 +231,11 @@ object Forges:
         for
           lifecycle <- Snapshot.lifecycleFromGitLab(str(json.state).getOrElse(""))
           ci        <- Snapshot.ciFromGitLab(pipeline, mrSha)
-        yield (Snapshot(lifecycle, ci, mrSha), str(json.updated_at).getOrElse(""))
+        yield (
+          Snapshot(lifecycle, ci, mrSha),
+          str(json.updated_at).getOrElse(""),
+          pipeline.fold("")(p => s"head pipeline, ${p.status}${if p.sha != mrSha then s" (for commit ${p.sha.take(10)})" else ""}")
+        )
       )
     }
 

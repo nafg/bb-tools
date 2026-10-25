@@ -3,9 +3,9 @@ package subscriptionscore
 /** What a check of a subscription's target found. Its kind always matches the target's. */
 enum Observed:
   /** `updatedAt` is the forge's last-updated time for the request. `discussion` is `None` when this check didn't
-    * fetch reviews and comments (see [[Watch.needsDiscussion]]).
+    * fetch reviews and comments (see [[Watch.needsDiscussion]]). `ciBasis` says which checks the CI result counted.
     */
-  case Change(snapshot: Snapshot, updatedAt: String, discussion: Option[List[DiscussionItem]])
+  case Change(snapshot: Snapshot, updatedAt: String, discussion: Option[List[DiscussionItem]], ciBasis: String = "")
   case Branch(headSha: String)
   /** The newest tags, by name. */
   case Tags(names: List[String])
@@ -60,8 +60,10 @@ enum Event:
   case Merged
   case Closed
   case Reopened
-  /** CI on `sha` reached a final result: passed, failed or canceled. */
-  case CiFinished(result: CiResult, sha: String)
+  /** CI on `sha` reached a result worth reporting: passed, failed, canceled or waiting for approval. `basis` says
+    * which checks it counted.
+    */
+  case CiFinished(result: CiResult, sha: String, basis: String = "")
   /** A pull or merge request's latest commit changed: a push, rebase or force-push. */
   case HeadMoved(from: String, to: String)
   case NewDiscussion(items: List[DiscussionItem])
@@ -92,14 +94,14 @@ object Watch:
     * replay old ones. Deleted tags are not reported.
     */
   def between(before: WatchState, now: Observed): List[Event] = (before, now) match
-    case (WatchState.Change(b, _, seen), Observed.Change(a, _, discussion)) =>
+    case (WatchState.Change(b, _, seen), Observed.Change(a, _, discussion, basis)) =>
       val fresh = (seen, discussion) match
         case (Some(keys), Some(items)) =>
           // Reactions were tracked later than reviews and comments; until a state records that it tracks them,
           // existing reactions are taken as already seen.
           items.filterNot(i => keys(i.key) || (i.kind == ItemKind.Reaction && !keys(ReactionsTracked)))
         case _ => Nil
-      changeEvents(b, a) ++ (if fresh.nonEmpty then List(Event.NewDiscussion(fresh)) else Nil)
+      changeEvents(b, a, basis) ++ (if fresh.nonEmpty then List(Event.NewDiscussion(fresh)) else Nil)
     case (WatchState.Branch(b), Observed.Branch(a)) => if a != b then List(Event.BranchMoved(b, a)) else Nil
     case (WatchState.Tags(b), Observed.Tags(a)) =>
       val added = a.filterNot(b.toSet)
@@ -122,7 +124,7 @@ object Watch:
 
   /** The state to remember after a check. Reviews and comments that weren't fetched keep their earlier record. */
   def remember(before: Option[WatchState], now: Observed): WatchState = now match
-    case Observed.Change(snapshot, updatedAt, discussion) =>
+    case Observed.Change(snapshot, updatedAt, discussion, _) =>
       val earlier = before.collect { case WatchState.Change(_, _, seen) => seen }.flatten
       val seen    = discussion.map(_.map(_.key).toSet + ReactionsTracked).orElse(earlier)
       // Without a fresh read, keep the old updated time so the next check reads them.
@@ -133,7 +135,7 @@ object Watch:
     case Observed.MavenVersion(a)        => WatchState.MavenVersion(a)
     case Observed.MavenVersions(versions) => WatchState.MavenVersions(versions)
 
-  private def changeEvents(before: Snapshot, after: Snapshot): List[Event] =
+  private def changeEvents(before: Snapshot, after: Snapshot, ciBasis: String): List[Event] =
     val lifecycle = (before.lifecycle, after.lifecycle) match
       case (a, b) if a == b      => Nil
       case (_, Lifecycle.Merged) => List(Event.Merged)
@@ -143,10 +145,10 @@ object Watch:
       if before.headSha.nonEmpty && after.headSha.nonEmpty && before.headSha != after.headSha then
         List(Event.HeadMoved(before.headSha, after.headSha))
       else Nil
-    val ciIsFinal = Set(CiResult.Passed, CiResult.Failed, CiResult.Canceled)
+    val ciIsFinal = Set(CiResult.Passed, CiResult.Failed, CiResult.Canceled, CiResult.AwaitingApproval)
     val ci =
       if ciIsFinal(after.ci) && (after.ci != before.ci || after.headSha != before.headSha) then
-        List(Event.CiFinished(after.ci, after.headSha))
+        List(Event.CiFinished(after.ci, after.headSha, ciBasis))
       else Nil
     head ++ ci ++ lifecycle
 
@@ -154,7 +156,7 @@ object Watch:
     * and tags never finish.
     */
   def isFinished(o: Observed): Boolean = o match
-    case Observed.Change(snapshot, _, _) => snapshot.lifecycle != Lifecycle.Open
+    case Observed.Change(snapshot, _, _, _) => snapshot.lifecycle != Lifecycle.Open
     case Observed.MavenVersion(available) => available
     case _                               => false
 
@@ -225,13 +227,19 @@ object Watch:
       case (Target.Change(cr), Event.Merged)   => s"${kind(cr)} ${cr.label} was merged."
       case (Target.Change(cr), Event.Closed)   => s"${kind(cr)} ${cr.label} was closed without being merged."
       case (Target.Change(cr), Event.Reopened) => s"${kind(cr)} ${cr.label} was reopened."
-      case (_, Event.CiFinished(result, sha)) =>
-        val verb = result match
-          case CiResult.Passed   => "passed"
-          case CiResult.Failed   => "failed"
-          case CiResult.Canceled => "was canceled"
-          case other             => other.toString.toLowerCase
-        s"CI $verb on ${target.label} at commit ${sha.take(10)}."
+      case (_, Event.CiFinished(result, sha, basis)) =>
+        val counted = if basis.isEmpty then "" else s" Counted: $basis."
+        val where   = s"${target.label} at commit ${sha.take(10)}"
+        result match
+          case CiResult.AwaitingApproval =>
+            s"CI on $where is waiting for a maintainer to approve its workflow runs; they haven't run yet.$counted"
+          case _ =>
+            val verb = result match
+              case CiResult.Passed   => "passed"
+              case CiResult.Failed   => "failed"
+              case CiResult.Canceled => "was canceled"
+              case other             => other.toString.toLowerCase
+            s"CI $verb on $where.$counted"
       case (_, Event.HeadMoved(from, to)) =>
         s"The latest commit of ${target.label} changed from ${from.take(10)} to ${to.take(10)} " +
           "(a push, rebase or force-push). A local branch may need updating before the next push."
@@ -271,6 +279,7 @@ object Watch:
         case CiResult.Passed   => "CI passed"
         case CiResult.Failed   => "CI failed"
         case CiResult.Canceled => "CI canceled"
+        case CiResult.AwaitingApproval => "CI awaiting a maintainer's approval"
       s"$lifecycle, $ci at commit ${snapshot.headSha.take(10)}"
     case WatchState.Branch(sha) => s"at commit ${sha.take(10)}"
     case WatchState.Tags(names) =>
