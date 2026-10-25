@@ -1,8 +1,8 @@
 # bb-plugin-subscriptions
 
 A [bb](https://github.com/get-bb/bb) plugin that lets a thread subscribe, by URL, to a GitHub or GitLab pull/merge
-request, branch or repository's tags, and get a message when it merges, closes, finishes CI, gets a new commit, review
-or comment, when the branch gets new commits, or when a new tag appears. It replaces agents' own polling loops, which ran in
+request, branch, repository's tags or Maven Central artifact, and get a message when it merges, closes, finishes CI, gets a new commit, review
+or comment, when the branch gets new commits, when a new tag appears, or when a version becomes resolvable on Maven Central. It replaces agents' own polling loops, which ran in
 sandboxes, hit background-command time limits, and could mistake a failed check for "not merged yet".
 
 Written in Scala.js, like the other plugins in this repo. `subscriptions-core` holds the platform-independent logic

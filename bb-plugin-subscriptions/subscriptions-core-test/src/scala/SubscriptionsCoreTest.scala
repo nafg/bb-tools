@@ -25,6 +25,30 @@ class SubscriptionsCoreTest extends munit.FunSuite:
     assertEquals(Target.parse("https://github.com/slick/slick/tags"), Right(Target.Tags(slick)))
     assertEquals(Target.parse("https://gitlab.com/chesednow/config/-/tags/"), Right(Target.Tags(config)))
 
+  test("parses Maven Central artifacts from coordinates and URLs"):
+    val versioned = Right(Target.MavenArtifact("io.github.nafg", "slick-additions_3", Some("0.18.0")))
+    val any       = Right(Target.MavenArtifact("io.github.nafg", "slick-additions_3", None))
+    assertEquals(Target.parse("io.github.nafg:slick-additions_3:0.18.0"), versioned)
+    assertEquals(Target.parse("io.github.nafg:slick-additions_3"), any)
+    assertEquals(Target.parse("https://central.sonatype.com/artifact/io.github.nafg/slick-additions_3/0.18.0"), versioned)
+    assertEquals(Target.parse("https://mvnrepository.com/artifact/io.github.nafg/slick-additions_3"), any)
+    assertEquals(Target.parse("https://repo1.maven.org/maven2/io/github/nafg/slick-additions_3/0.18.0/"), versioned)
+    assertEquals(Target.parse("https://repo1.maven.org/maven2/io/github/nafg/slick-additions_3/"), any)
+    val t = Target.MavenArtifact("org.scala-lang", "scala3-library_3", Some("3.9.0"))
+    assertEquals(Target.parse(t.url), Right(t))
+    assertEquals(t.label, "org.scala-lang:scala3-library_3:3.9.0")
+
+  test("a watched Maven version is reported once when it appears, which ends the subscription"):
+    assertEquals(Watch.between(WatchState.MavenVersion(false), Observed.MavenVersion(true)), List(Event.MavenPublished))
+    assertEquals(Watch.between(WatchState.MavenVersion(false), Observed.MavenVersion(false)), Nil)
+    assert(Watch.isFinished(Observed.MavenVersion(true)))
+    assertEquals(
+      Watch.between(WatchState.MavenVersions(List("1.0")), Observed.MavenVersions(List("1.0", "1.1"))),
+      List(Event.NewMavenVersions(List("1.1")))
+    )
+    List(WatchState.MavenVersion(true), WatchState.MavenVersion(false), WatchState.MavenVersions(List("1.0", "1.1")))
+      .foreach(st => assertEquals(WatchState.decode(st.encode), Right(st)))
+
   test("rejects URLs it can't watch"):
     assert(Target.parse("https://github.com/slick/slick/issues/1").isLeft)
     assert(Target.parse("https://github.com/slick/slick").isLeft)

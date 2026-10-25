@@ -5,6 +5,7 @@ import subscriptionscore.Snapshot.GitHubCheck
 
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.scalajs.js
+import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.annotation.JSImport
 
 @js.native
@@ -70,6 +71,8 @@ object Forges:
         }
       case Target.Branch(repo, name) => branchHead(repo, name).map(Observed.Branch(_))
       case Target.Tags(repo)         => newestTags(repo).map(Observed.Tags(_))
+      case Target.MavenArtifact(g, a, Some(v)) => MavenCentral.isAvailable(g, a, v).map(Observed.MavenVersion(_))
+      case Target.MavenArtifact(g, a, None)    => MavenCentral.versions(g, a).map(Observed.MavenVersions(_))
 
   /** Runs a paginated `gh api` call whose jq filter emits one JSON object per line. */
   private def ghLines(repo: Repo, path: String, jq: String)(using ExecutionContext): Future[List[js.Dynamic]] =
@@ -213,4 +216,36 @@ object Forges:
           ci        <- Snapshot.ciFromGitLab(pipeline, mrSha)
         yield (Snapshot(lifecycle, ci, mrSha), str(json.updated_at).getOrElse(""))
       )
+    }
+
+/** Reads Maven Central's repository directly. Its search API can lag days behind what builds can resolve. */
+object MavenCentral:
+  private val Base = "https://repo1.maven.org/maven2"
+
+  private def artifactUrl(group: String, artifact: String) = s"$Base/${group.replace('.', '/')}/$artifact"
+
+  /** Fetches without the CDN's cached copy, so a version that just appeared isn't hidden by a cached "not found". */
+  private def fetch(url: String, method: String)(using ExecutionContext): Future[js.Dynamic] =
+    val busted = s"$url?bb=${js.Date.now().toLong}"
+    js.Dynamic.global.fetch(busted, js.Dynamic.literal("method" -> method)).asInstanceOf[js.Promise[js.Dynamic]].toFuture
+
+  /** Whether the version's POM can be downloaded, which is what a build resolving that version needs. */
+  def isAvailable(group: String, artifact: String, version: String)(using ExecutionContext): Future[Boolean] =
+    fetch(s"${artifactUrl(group, artifact)}/$version/$artifact-$version.pom", "HEAD").flatMap { r =>
+      r.status.asInstanceOf[Int] match
+        case 200 => Future.successful(true)
+        case 404 => Future.successful(false)
+        case other => Future.failed(ForgeCliException(s"Maven Central answered HTTP $other"))
+    }
+
+  /** Every version the artifact's maven-metadata.xml lists, oldest first; empty if the artifact doesn't exist yet. */
+  def versions(group: String, artifact: String)(using ExecutionContext): Future[List[String]] =
+    fetch(s"${artifactUrl(group, artifact)}/maven-metadata.xml", "GET").flatMap { r =>
+      r.status.asInstanceOf[Int] match
+        case 200 =>
+          r.text().asInstanceOf[js.Promise[String]].toFuture.map { xml =>
+            """<version>\s*([^<\s]+)\s*</version>""".r.findAllMatchIn(xml).map(_.group(1)).toList
+          }
+        case 404   => Future.successful(Nil)
+        case other => Future.failed(ForgeCliException(s"Maven Central answered HTTP $other"))
     }

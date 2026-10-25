@@ -94,13 +94,27 @@ live_state() {
   esac
 }
 
+# Maven Central targets are stored by their central.sonatype.com URL.
+maven_live() {
+  local rest=${1#https://central.sonatype.com/artifact/} g a v base
+  IFS=/ read -r g a v <<<"$rest"
+  base="https://repo1.maven.org/maven2/${g//.//}/$a"
+  if [[ -n $v ]]; then
+    case $(curl -s -o /dev/null -w '%{http_code}' -I "$base/$v/$a-$v.pom?bb=$(date +%s)") in
+      200) echo "maven-version available" ;; 404) echo "maven-version pending" ;; *) echo "Unknown:http" ;;
+    esac
+  else
+    echo "maven-versions $(curl -s "$base/maven-metadata.xml?bb=$(date +%s)" | grep -o '<version>[^<]*</version>' | sed 's/<[^>]*>//g' | tr '\n' ' ' | sed 's/ $//')"
+  fi
+}
+
 echo
 echo "== Active subscriptions: stored state against live state"
 active=$(sqlite3 -separator $'\t' "$DB" "SELECT id, thread_id, url, state, ifnull(check_error, '') FROM subscriptions WHERE ended_at IS NULL ORDER BY id")
 [[ -z $active ]] && echo "  none"
 while IFS=$'\t' read -r id thread url stored check_error; do
   [[ -z ${id:-} ]] && continue
-  live=$(live_state "$url" 2>&1)
+  if [[ $url == https://central.sonatype.com/* ]]; then live=$(maven_live "$url" 2>&1); else live=$(live_state "$url" 2>&1); fi
   if [[ $stored == change\ * ]]; then
     # The stored form also holds the updated time and the reviews and comments already reported; compare the rest.
     read -r k l c sha updated seen <<<"$stored"

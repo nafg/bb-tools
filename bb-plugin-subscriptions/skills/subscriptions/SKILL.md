@@ -1,6 +1,6 @@
 ---
 name: subscriptions
-description: Wait for a GitHub or GitLab pull/merge request to merge, close or finish CI, for new commits on a branch, or for a new tag, without polling. Use whenever a thread needs to know when one of those happens.
+description: Wait for a GitHub or GitLab pull/merge request to merge, close or finish CI, for new commits on a branch, for a new tag, or for a version to become resolvable on Maven Central, without polling. Use whenever a thread needs to know when one of those happens.
 ---
 
 # Subscriptions
@@ -14,6 +14,12 @@ this.
 | A pull or merge request | its page | merged, closed or reopened; CI passed, failed or canceled on a commit; its latest commit changed; each new review or comment, with its text; each new emoji reaction on the PR or MR itself |
 | A branch | `…/tree/<branch>` (GitLab `…/-/tree/<branch>`) | each time it moves, with the new commits' subjects |
 | A repository's tags | `…/tags` (GitLab `…/-/tags`) | each new tag |
+| A Maven Central version | `group:artifact:version`, or its central.sonatype.com, repo1.maven.org or mvnrepository.com URL | when that version can be resolved; then the subscription ends |
+| A Maven Central artifact | `group:artifact`, or its URL without a version | each new version |
+
+For Maven Central, a published version can take a while to become resolvable after the publish job finishes. bb
+checks the repository itself (the POM file, or `maven-metadata.xml`), bypassing its cache, rather than the search
+site, which lags much further behind. For Scala libraries, use the full artifact name, such as `slick-additions_3`.
 
 ## Tools and commands
 
