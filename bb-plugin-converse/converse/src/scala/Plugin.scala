@@ -1925,7 +1925,9 @@ def plugin(bb: BbApi): Unit =
             val speaking = heardContext
               .map(_.interrupted)
               .filter(i => i != null && !js.isUndefined(i))
-              .map(i => ReplyInterruption.SpeakingReply(str(i.threadId), str(i.sentence)))
+              .map(i =>
+                ReplyInterruption.SpeakingReply(str(i.threadId), str(i.sentence), i.atScreen.asInstanceOf[Any] == true)
+              )
             // Decided now, as spoken, not when the recording is delivered: by
             // then the reply may have been read aloud. Unheard: the thread is
             // still answering an earlier utterance, has one not yet delivered

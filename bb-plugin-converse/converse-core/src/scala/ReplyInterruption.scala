@@ -5,8 +5,10 @@ package conversecore
   * before the reply was heard at all.
   */
 object ReplyInterruption:
-  /** A reply being spoken aloud when the utterance began. */
-  final case class SpeakingReply(threadId: String, sentence: String)
+  /** A reply being spoken aloud when the utterance began; `atScreen` says
+    * the user seemed to be at the screen showing it (see [[ScreenPresence]]).
+    */
+  final case class SpeakingReply(threadId: String, sentence: String, atScreen: Boolean)
 
   /** A note the model should see, and which thread it is for. */
   final case class Note(threadId: String, text: String)
@@ -20,7 +22,11 @@ object ReplyInterruption:
       val sentence = reply.sentence.trim
       Note(
         reply.threadId,
-        if sentence.isEmpty then "The user interrupted this reply as it was about to be read aloud; none of it was read aloud."
+        // At the screen the user may have read the whole reply, so where the
+        // audio stopped says little about what they are answering.
+        if reply.atScreen then
+          "The user interrupted this reply while it was being read aloud; they were at the screen, so they may have read all of it."
+        else if sentence.isEmpty then "The user interrupted this reply as it was about to be read aloud; none of it was read aloud."
         else s"The user interrupted this reply while it was being read aloud, during: “$sentence”. The rest was not read aloud."
       )
     }

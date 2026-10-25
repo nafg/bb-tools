@@ -163,6 +163,22 @@ final class Controller(
   // browser throttles a hidden page's timers, so that tick's lateness is not
   // a stall.
   private var hiddenSinceLastTick = false
+  // When the user last used the mouse, keyboard or touch screen on this page.
+  private var lastInputAt = Double.NegativeInfinity
+  locally {
+    val noteInput: js.Function0[Unit] = () => lastInputAt = js.Date.now()
+    for event <- List("pointerdown", "pointermove", "keydown", "wheel") do
+      js.Dynamic.global.document.addEventListener(event, noteInput, js.Dynamic.literal("capture" -> true, "passive" -> true))
+  }
+
+  private def userAtScreen: Boolean =
+    val document = js.Dynamic.global.document
+    ScreenPresence.atScreen(
+      pageVisible = document.visibilityState.asInstanceOf[String] == "visible",
+      pageFocused = document.hasFocus().asInstanceOf[Boolean],
+      msSinceInput = js.Date.now() - lastInputAt
+    )
+
   locally {
     val _ = js.Dynamic.global.document.addEventListener(
       "visibilitychange",
@@ -695,7 +711,9 @@ final class Controller(
             // Paused, not stopped: the sound may not be speech at all, and
             // its outcome decides (see settleReplyPause).
             debug("barge-in: pausing playback")
-            captureInterrupted = Option(player.speakingThread).map(ReplyInterruption.SpeakingReply(_, Option(player.speakingSentence).getOrElse("")))
+            captureInterrupted = Option(player.speakingThread).map(
+              ReplyInterruption.SpeakingReply(_, Option(player.speakingSentence).getOrElse(""), userAtScreen)
+            )
             replyPause = Some(replyPause.fold(ReplyPause.forSpeech)(_.speechStarted))
             player.pause()
           update(_.captureAt(CaptureStage.Speech))
@@ -1007,7 +1025,7 @@ final class Controller(
                       "evidence"    -> upload.evidence,
                       "heardContext" -> js.Dynamic.literal(
                         "interrupted" -> upload.interrupted.fold(null: js.Any)(r =>
-                          js.Dynamic.literal("threadId" -> r.threadId, "sentence" -> r.sentence)
+                          js.Dynamic.literal("threadId" -> r.threadId, "sentence" -> r.sentence, "atScreen" -> r.atScreen)
                         ),
                         "targetReplyUnplayed" -> (tid != null && player.queuedThreads.contains(tid))
                       )
