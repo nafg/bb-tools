@@ -191,10 +191,11 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
           "a new result or commit, when its latest commit changes (push, rebase, force-push), and for each new " +
           "review or comment, with its text; the subscription ends when it is merged or closed. A branch (…/tree/<branch>): " +
           "a message with the new commits each time it moves. A repository's tags (…/tags): a message for each " +
-          "new tag. bb checks every minute. If checking fails, this thread is told instead of hearing nothing."),
+          "new tag. A Maven Central artifact (group:artifact:version or its URL): a message when that version can be " +
+          "resolved; without a version, each new version. bb checks every minute. If checking fails, this thread is told instead of hearing nothing."),
       "instructions" ->
         ("To wait for a pull or merge request to merge, close, finish CI or get reviews and comments, for new " +
-          "commits on a branch, or for " +
+          "commits on a branch, for a Maven Central release, or for " +
           "a new tag, call subscriptions_add instead of polling gh or glab in a loop, a background command or a " +
           "gitlab-watch. Then end your turn: a message arrives when something happens."),
       "presentation" -> js.Dynamic.literal(
@@ -280,7 +281,8 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
 private val Usage =
   """Usage:
     |  bb subscriptions add <url> [--thread <thread-id>]
-    |    <url>: a PR or MR, a branch (…/tree/<branch>), or a repository's tags (…/tags)
+    |    <url>: a PR or MR, a branch (…/tree/<branch>), a repository's tags (…/tags), or a Maven Central
+    |           artifact as group:artifact[:version] or its URL
     |  bb subscriptions list [--thread <thread-id> | --all]
     |  bb subscriptions who <url>
     |  bb subscriptions cancel <id>""".stripMargin
@@ -338,11 +340,11 @@ def plugin(bb: BbApi): Unit =
   bb.cli.register(
     js.Dynamic.literal(
       "name"    -> "subscriptions",
-      "summary" -> "Subscribe a thread to a PR, MR, branch or tags; it is messaged when something changes",
+      "summary" -> "Subscribe a thread to a PR, MR, branch, tags or Maven Central artifact; it is messaged when something changes",
       "commands" -> js.Array(
         js.Dynamic.literal(
           "name"    -> "add",
-          "summary" -> "Subscribe this thread (or --thread) to a GitHub or GitLab PR, MR, branch or tags URL",
+          "summary" -> "Subscribe this thread (or --thread) to a GitHub or GitLab PR, MR, branch or tags URL, or a Maven artifact",
           "usage"   -> "bb subscriptions add <url> [--thread <thread-id>]"
         ),
         js.Dynamic.literal(
