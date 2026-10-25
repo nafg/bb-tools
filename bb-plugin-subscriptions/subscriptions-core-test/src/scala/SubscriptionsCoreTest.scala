@@ -208,7 +208,7 @@ class SubscriptionsCoreTest extends munit.FunSuite:
       List(
         "| Incompatibility | Symbol | Problem |",
         "|---|---|---|",
-        "| Source | `a.b.c` | DirectMissingMethodProblemgone |",
+        "| Source | `a.b.c` | DirectMissingMethodProblem gone |",
         "  indented code"
       ).mkString("\n")
     )

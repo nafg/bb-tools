@@ -168,8 +168,10 @@ object Watch:
   def visibleText(body: String): String =
     body
       .replaceAll("(?s)<!--.*?-->", "")
-      // Inline formatting tags carry no information for an agent; their text stays.
-      .replaceAll("(?i)</?(strong|b|em|i|small|sub|sup|code|p|span|br)\\b[^>]*>", "")
+      // Formatting tags carry no information for an agent; their text stays. Tags that break a line or paragraph
+      // become a space so the words on either side stay apart.
+      .replaceAll("(?i)</?(p|br|div)\\b[^>]*>", " ")
+      .replaceAll("(?i)</?(strong|b|em|i|small|sub|sup|code|span)\\b[^>]*>", "")
       .linesIterator
       .map(compactLine)
       .mkString("\n")
