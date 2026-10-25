@@ -1,9 +1,12 @@
 package conversecore
 
 /** A sentence-or-list-item-sized piece of speakable text with the pause to
-  * insert after speaking it.
+  * insert after speaking it. In `text`, a word the agent marked to be stressed
+  * is still between *asterisks*, as a voice that can stress a word reads it;
+  * [[withoutStressMarks]] is the same text for one that cannot.
   */
-final case class SpeechChunk(text: String, pauseSeconds: Double)
+final case class SpeechChunk(text: String, pauseSeconds: Double):
+  def withoutStressMarks: String = Speech.withoutStressMarks(text)
 
 /** Markdown cleanup and sentence chunking for TTS, ported from
   * claude-converse's text.ts.
@@ -36,6 +39,13 @@ object Speech:
   private val Digits         = "\\d+".r
   // A bb thread: a mention (with or without a message) or a bare id.
   private val ThreadReference = "@thread:(thr_[a-z0-9]+)(?:#msg=\\d+)?|\\b(thr_[a-z0-9]+)\\b".r
+  // Words between single asterisks, which mark them to be stressed.
+  private val StressMark      = "\\*([^*\\s](?:[^*]*[^*\\s])?)\\*".r
+
+  /** `text` with its stress marks removed, for a voice that cannot stress a
+    * word, or for showing the text.
+    */
+  def withoutStressMarks(text: String): String = StressMark.replaceAllIn(text, "$1")
 
   /** The ids of the bb threads `text` refers to, whose titles
     * [[splitSpeechChunks]] speaks in their place.
@@ -45,11 +55,16 @@ object Speech:
 
   // No (?m)/(?s) flags: Scala.js rejects MULTILINE and DOTALL on the default
   // ES target, so line anchors are handled by splitting instead.
+  /** `text` without its markdown, except that a word between single
+    * asterisks keeps them: that is how the agent marks a word to be stressed
+    * when spoken, and how Qwen3-TTS reads it. Bold is only emphasis in print,
+    * so its asterisks go.
+    */
   def stripMarkdown(text: String): String =
     var out = text
     out = out.replaceAll("```[\\S\\s]*?```", " (code omitted) ")
     out = out.replaceAll("`([^`]+)`", "$1")
-    out = out.replaceAll("\\*{1,3}(.+?)\\*{1,3}", "$1")
+    out = out.replaceAll("\\*{2,3}(.+?)\\*{2,3}", "$1")
     out = out.replaceAll("_{1,3}(.+?)_{1,3}", "$1")
     out = out.replaceAll("\\[([^\\]]+)\\]\\([^)]+\\)", "$1")
     out = out.replaceAll("<[^>]+>", "")

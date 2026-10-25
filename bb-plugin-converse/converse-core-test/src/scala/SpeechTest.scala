@@ -10,6 +10,14 @@ class SpeechTest extends munit.FunSuite:
   test("strips inline markdown"):
     assertEquals(Speech.stripMarkdown("Use `foo` with **bold** and _italic_ text"), "Use foo with bold and italic text")
 
+  test("keeps the asterisks around a word marked to be stressed, and drops those of bold"):
+    val chunks = Speech.splitSpeechChunks("I didn't say he *stole* it, **I** said he ***borrowed*** it.")
+    assertEquals(chunks.map(_.text), List("I didn't say he *stole* it, I said he borrowed it."))
+    assertEquals(chunks.map(_.withoutStressMarks), List("I didn't say he stole it, I said he borrowed it."))
+
+  test("removes stress marks but not a lone asterisk"):
+    assertEquals(Speech.withoutStressMarks("He *stole* it, *not once* but 2 * 3 times."), "He stole it, not once but 2 * 3 times.")
+
   test("strips headings, links, and html"):
     assertEquals(Speech.stripMarkdown("## Title\nSee [docs](https://x.dev) <br>"), "Title\nSee docs")
 
