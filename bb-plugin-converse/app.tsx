@@ -222,12 +222,15 @@ type VoiceSettingsState = {
 const TTS_PROVIDERS = [
   { id: "browser", label: "Browser speech" },
   { id: "pocket-tts", label: "Pocket TTS" },
+  { id: "qwen3-tts", label: "Qwen3-TTS" },
   { id: "kokoro", label: "Kokoro" },
   { id: "openai-compatible", label: "OpenAI-compatible TTS" },
 ] as const;
 
 async function playVoicePreview(provider: string, voice: string): Promise<void> {
-  const previewText = `This thread uses the ${voice.replaceAll("_", " ")} voice.`;
+  // A Qwen3-TTS voice is a description, which would read oddly in the sentence.
+  const previewText =
+    provider === "qwen3-tts" ? "This is how this thread sounds." : `This thread uses the ${voice.replaceAll("_", " ")} voice.`;
   if (provider === "browser") {
     const utterance = new SpeechSynthesisUtterance(previewText);
     const selected = speechSynthesis.getVoices().find((item) => item.voiceURI === voice || item.name === voice);
@@ -327,6 +330,13 @@ function TtsProviderCard({
         {provider === "pocket-tts" && (
           <p className="text-xs text-muted-foreground">Converse starts and stops Pocket TTS automatically.</p>
         )}
+        {provider === "qwen3-tts" && (
+          <p className="text-xs text-muted-foreground">
+            Converse starts and stops Qwen3-TTS automatically; it runs on the GPU, so Parakeet moves to the CPU
+            while it is the provider. A voice is a description of how it should sound, and a word the agent
+            writes between *asterisks* is stressed.
+          </p>
+        )}
         {!state ? (
           <div className="text-xs text-muted-foreground">Loading voices…</div>
         ) : (
@@ -351,7 +361,7 @@ function TtsProviderCard({
       )}
       {provider !== "pocket-tts" && provider !== "browser" && (
         <div className="flex gap-2">
-          <input className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-sm" value={newVoice} placeholder="Add a provider voice ID" onChange={(event) => setNewVoice(event.target.value)} />
+          <input className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-sm" value={newVoice} placeholder={provider === "qwen3-tts" ? "Describe a voice to add" : "Add a provider voice ID"} onChange={(event) => setNewVoice(event.target.value)} />
           <button type="button" className="rounded border px-3 text-sm" onClick={() => {
             const id = newVoice.trim();
             if (id && !state.voices.some((voice) => voice.id === id)) setState({ ...state, voices: [...state.voices, { id, enabled: true }] });

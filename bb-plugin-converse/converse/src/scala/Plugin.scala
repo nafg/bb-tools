@@ -133,10 +133,23 @@ private def parakeetService(device: ParakeetDevice) = ManagedService(
   */
 private val QwenTtsProvider = "qwen3-tts"
 
+private val QwenService = ManagedService(
+  key = "qwen",
+  label = "Qwen3-TTS",
+  probeUrl = s"http://127.0.0.1:${QwenServer.Port}/tts",
+  startCommand = QwenServer.startCommand,
+  // The first start downloads the model, about 3.4 GB, and quantizes it.
+  readyWithinSeconds = 1800,
+  // While it runs it holds its GPU memory, so it does not linger long.
+  idleMinutes = 15,
+  files = Map(QwenServer.ScriptRelativePath -> QwenServer.Script),
+  versionCheck = Some(ServiceVersionCheck(s"http://127.0.0.1:${QwenServer.Port}/version", QwenServer.Version))
+)
+
 /** Every managed service, in a form that identifies it, for stopping idle
   * ones.
   */
-private val ManagedServices = List(PocketService, parakeetService(ParakeetDevice.GpuIfFree))
+private val ManagedServices = List(PocketService, QwenService, parakeetService(ParakeetDevice.GpuIfFree))
 
 private def ttsConfigKey(provider: String): String = s"tts.config.$provider"
 
@@ -517,7 +530,7 @@ def plugin(bb: BbApi): Unit =
       "ttsProvider" -> js.Dynamic.literal(
         "type"    -> "select",
         "label"   -> "TEXT-TO-SPEECH PROVIDER",
-        "options" -> js.Array("browser", "pocket-tts", "kokoro", "openai-compatible"),
+        "options" -> js.Array("browser", "pocket-tts", QwenTtsProvider, "kokoro", "openai-compatible"),
         "default" -> "browser"
       ),
       "sttProvider" -> js.Dynamic.literal(
@@ -589,6 +602,8 @@ def plugin(bb: BbApi): Unit =
 
   def defaultTtsConfig(provider: String): js.Dynamic = provider match
     case "pocket-tts" => js.Dynamic.literal("defaultVoice" -> "alba")
+    case QwenTtsProvider =>
+      js.Dynamic.literal("defaultVoice" -> QwenServer.DefaultVoice, "voices" -> js.Array(QwenServer.DefaultVoice))
     case "kokoro" =>
       js.Dynamic.literal(
         "url"          -> "http://127.0.0.1:8880/v1/audio/speech",
@@ -1422,6 +1437,16 @@ def plugin(bb: BbApi): Unit =
           started
     }
 
+  /** Qwen3-TTS's URL once it answers. When Parakeet is the transcriber it is
+    * seen to first, so one still on the GPU moves to the CPU before Qwen3-TTS
+    * needs that memory.
+    */
+  def ensureQwenTts(currentSettings: js.Dynamic): Future[Either[String, String]] =
+    val parakeetSettled =
+      if str(currentSettings.sttProvider) == "parakeet" then ensureService(parakeetFor(currentSettings)).map(_ => ())
+      else Future.unit
+    parakeetSettled.flatMap(_ => ensureService(QwenService))
+
   bb.background.schedule(
     "service-idle",
     "*/5 * * * *",
@@ -1775,11 +1800,14 @@ def plugin(bb: BbApi): Unit =
         // Warm the managed services while the user starts talking so the first
         // transcription and spoken reply are not delayed by service startup.
         settings.get().toFuture.foreach { s =>
-          if str(s.ttsProvider) == "pocket-tts" then
-            ensureService(PocketService).foreach {
-              case Left(message) => bb.log.warn(s"TTS warm-up: $message")
-              case Right(_)      => ()
-            }
+          val speechService = str(s.ttsProvider) match
+            case "pocket-tts"      => Some(ensureService(PocketService))
+            case QwenTtsProvider   => Some(ensureQwenTts(s))
+            case _                 => None
+          speechService.foreach(_.foreach {
+            case Left(message) => bb.log.warn(s"TTS warm-up: $message")
+            case Right(_)      => ()
+          })
           if str(s.sttProvider) == "parakeet" then
             ensureService(parakeetFor(s)).foreach {
               case Left(message) => bb.log.warn(s"transcriber warm-up: $message")
@@ -2075,7 +2103,7 @@ def plugin(bb: BbApi): Unit =
       },
       "updateVoiceSettings" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val provider = str(input.provider)
-        if !Set("browser", "pocket-tts", "kokoro", "openai-compatible").contains(provider) then
+        if !Set("browser", "pocket-tts", QwenTtsProvider, "kokoro", "openai-compatible").contains(provider) then
           rejected("unknown TTS provider")
         else
           (for
@@ -2309,6 +2337,22 @@ def plugin(bb: BbApi): Unit =
                     val _    = form.set("text", text)
                     if voice.nonEmpty then { val _ = form.set("voice_url", voice) }
                     (url, js.Dynamic.literal("method" -> "POST", "body" -> form))
+                  })
+                case QwenTtsProvider =>
+                  // The one provider that stresses a marked word, so it gets the marks.
+                  ensureQwenTts(s).map(_.map { url =>
+                    val payload = js.Dynamic.literal(
+                      "text"  -> markedText,
+                      "voice" -> (if voice.nonEmpty then voice else QwenServer.DefaultVoice)
+                    )
+                    (
+                      url,
+                      js.Dynamic.literal(
+                        "method"  -> "POST",
+                        "headers" -> js.Dynamic.literal("content-type" -> "application/json"),
+                        "body"    -> js.JSON.stringify(payload)
+                      )
+                    )
                   })
                 case "kokoro" =>
                   Future.successful {

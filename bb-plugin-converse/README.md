@@ -36,10 +36,15 @@ bb plugin install .    # from this directory
 
 ## Settings
 
-- **Speech synthesis** — `browser` (speechSynthesis, zero config, default) or
-  `server` (the backend proxies an OpenAI-compatible `/v1/audio/speech`
-  endpoint — e.g. a local Kokoro at `http://127.0.0.1:8880/v1/audio/speech`
-  with model `kokoro`, or OpenAI with an API key).
+- **Speech synthesis** — `browser` (speechSynthesis, zero config, default);
+  `pocket-tts` (a local Pocket TTS the plugin starts and stops); `qwen3-tts`
+  (a local Qwen3-TTS 1.7B VoiceDesign the plugin starts and stops: voices are
+  written descriptions, and a word the agent puts between *asterisks* is
+  stressed; it takes about 2.3 GB of the GPU, so Parakeet runs on the CPU
+  while it is the provider); or an OpenAI-compatible `/v1/audio/speech`
+  endpoint (`kokoro`, e.g. a local Kokoro at
+  `http://127.0.0.1:8880/v1/audio/speech`, or `openai-compatible` with an API
+  key).
 - **TTS endpoint / model / voice / API key** — used in `server` mode.
 - **Minimum speech probability** — Silero probability from 0 to 1 (default
   `0.3`); raise it if background noise triggers recording.
