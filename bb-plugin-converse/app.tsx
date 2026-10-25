@@ -229,10 +229,9 @@ const TTS_PROVIDERS = [
 ] as const;
 
 async function playVoicePreview(provider: string, voice: string): Promise<void> {
-  // A Qwen3-TTS voice is a description and a Chatterbox voice a clip's path,
-  // which would read oddly in the sentence.
+  // A Chatterbox voice is a clip's path, which would read oddly in the sentence.
   const previewText =
-    provider === "qwen3-tts" || provider === "chatterbox-nano"
+    provider === "chatterbox-nano"
       ? "This is how this thread sounds."
       : `This thread uses the ${voice.replaceAll("_", " ")} voice.`;
   if (provider === "browser") {
@@ -337,7 +336,7 @@ function TtsProviderCard({
         {provider === "qwen3-tts" && (
           <p className="text-xs text-muted-foreground">
             Converse starts and stops Qwen3-TTS automatically; it runs on the GPU, so Parakeet moves to the CPU
-            while it is the provider. A voice is a description of how it should sound, and a word the agent
+            while it is the provider. The voices are the model's built-in speakers, and a word the agent
             writes between *asterisks* is stressed.
           </p>
         )}
@@ -370,9 +369,9 @@ function TtsProviderCard({
           </label>
         </>
       )}
-      {provider !== "pocket-tts" && provider !== "browser" && (
+      {provider !== "pocket-tts" && provider !== "qwen3-tts" && provider !== "browser" && (
         <div className="flex gap-2">
-          <input className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-sm" value={newVoice} placeholder={provider === "qwen3-tts" ? "Describe a voice to add" : provider === "chatterbox-nano" ? "Path of a voice clip to add" : "Add a provider voice ID"} onChange={(event) => setNewVoice(event.target.value)} />
+          <input className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-sm" value={newVoice} placeholder={provider === "chatterbox-nano" ? "Path of a voice clip to add" : "Add a provider voice ID"} onChange={(event) => setNewVoice(event.target.value)} />
           <button type="button" className="rounded border px-3 text-sm" onClick={() => {
             const id = newVoice.trim();
             if (id && !state.voices.some((voice) => voice.id === id)) setState({ ...state, voices: [...state.voices, { id, enabled: true }] });

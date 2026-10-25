@@ -1,10 +1,13 @@
 package converse
 
 /** The local Qwen3-TTS speech service the plugin starts on demand: Qwen3-TTS
-  * 1.7B VoiceDesign, run by `uv` with its dependencies declared inline (PEP
+  * 1.7B CustomVoice, run by `uv` with its dependencies declared inline (PEP
   * 723). It speaks a word between *asterisks* with stress, which is why it is
   * offered: Pocket TTS and the others have no way to stress a word. A voice is
-  * a written description, built anew for every request.
+  * one of the model's built-in speakers, so it holds from sentence to
+  * sentence and from reply to reply. (The VoiceDesign model, which builds a
+  * voice from a description, gave every sentence a different voice; the Base
+  * model's voice cloning held a voice but ignored the stress marks.)
   *
   * The model's weights are quantized to nf4 once, on the first start, and
   * saved under `~/.cache/bb-converse/models`; generation is a handwritten
@@ -13,7 +16,7 @@ package converse
   * second. It streams 24 kHz 16-bit WAV, half a second at a time, and stops
   * generating when the client goes away.
   *
-  * It needs about 2.3 GB of the GPU, which the 8 GB card shares with the
+  * It needs about 2.1 GB of the GPU, which the 8 GB card shares with the
   * desktop (about 3.1 GB) and which has frozen with about 1.45 GB free; so
   * it loads only when enough is free to keep 2 GB free, exits if free memory
   * falls below that later, and Parakeet runs on the CPU beside it.
@@ -21,8 +24,15 @@ package converse
 private object QwenServer:
   val Port = 8791
 
-  /** The voice the provider's settings start with. */
-  val DefaultVoice = "A clear, warm adult male voice, speaking at a natural conversational pace."
+  /** The model's built-in speakers that are not Chinese dialect speakers
+    * (which Eric and Dylan are), as the server names them.
+    */
+  val Speakers = Vector("aiden", "ryan", "serena", "vivian", "uncle_fu", "ono_anna", "sohee")
+
+  /** The voice the provider's settings start with: of the two English
+    * speakers, the one whose stress on a marked word measured strongest.
+    */
+  val DefaultVoice = "aiden"
 
   /** Where the script is written on the host before it is started. */
   val ScriptRelativePath = ".cache/bb-converse/qwen_tts_server.py"
@@ -44,15 +54,22 @@ private object QwenServer:
       |# [tool.uv]
       |# exclude-newer = "2026-10-25T00:00:00Z"
       |# ///
-      |# A local speech synthesis service around Qwen3-TTS 1.7B VoiceDesign, built
+      |# A local speech synthesis service around Qwen3-TTS 1.7B CustomVoice, built
       |# for an 8 GB GPU shared with the desktop: the talker is quantized to nf4 and
       |# generated with a handwritten decode loop (static KV caches, one CUDA graph
       |# per codec frame), about 2.2x real time on an RTX 3070, streaming 24 kHz PCM
-      |# as it goes. A word between *asterisks* in the text is stressed.
+      |# as it goes. A voice is one of the model's built-in speakers, so it holds
+      |# from sentence to sentence; a word between *asterisks* in the text is
+      |# stressed. (VoiceDesign, which builds a voice from a description, gave a
+      |# different voice to every sentence; the Base model's voice cloning held the
+      |# voice but ignored the stress marks.)
       |import argparse
       |import asyncio
       |import json
       |import os
+      |# Lets the allocator grow segments instead of reserving whole new blocks, which
+      |# keeps reserved-but-unused GPU memory down on this tight card.
+      |os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
       |import queue
       |import shutil
       |import struct
@@ -71,20 +88,20 @@ private object QwenServer:
       |parser = argparse.ArgumentParser()
       |parser.add_argument("--port", type=int, required=True)
       |parser.add_argument("--version", required=True)
-      |parser.add_argument("--checkpoint", default=os.path.expanduser("~/.cache/bb-converse/models/qwen3-tts-1.7b-voicedesign-nf4"))
+      |parser.add_argument("--checkpoint", default=os.path.expanduser("~/.cache/bb-converse/models/qwen3-tts-1.7b-customvoice-nf4"))
       |args = parser.parse_args()
       |
-      |MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-VoiceDesign"
+      |MODEL = "Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"
       |LANGUAGE = "English"
       |dev = torch.device("cuda:0")
       |
       |# The desktop has frozen with about 1.45 GB of GPU memory free, so this
       |# process never lets free memory fall below the floor: it refuses to load
-      |# unless what it still has to take (about 2.3 GB beyond the CUDA context it
+      |# unless what it still has to take (about 2.1 GB beyond the CUDA context it
       |# holds by the time it measures) leaves the floor, and exits if free memory
       |# drops below the floor later.
       |FLOOR_MIB = 2000
-      |NEEDED_TO_LOAD_MIB = 4300
+      |NEEDED_TO_LOAD_MIB = 4100
       |
       |
       |def gpu_free_mib():
@@ -124,7 +141,7 @@ private object QwenServer:
       |    from safetensors.torch import save_file
       |    print(f"preparing the nf4 checkpoint in {out} (first start only)", flush=True)
       |    quantization = BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4", bnb_4bit_compute_dtype=torch.bfloat16,
-      |                                      llm_int8_skip_modules=["lm_head", "codec_head", "text_projection"],
+      |                                      llm_int8_skip_modules=["lm_head", "codec_head", "text_projection", "speaker_encoder"],
       |                                      llm_int8_enable_fp32_cpu_offload=True)
       |    m = Qwen3TTSModel.from_pretrained(MODEL, device_map="cuda:0", dtype=torch.bfloat16, quantization_config=quantization)
       |    torch.cuda.synchronize()
@@ -174,8 +191,12 @@ private object QwenServer:
       |
       |
       |talker.model.text_embedding = CpuEmbedding(talker.model.text_embedding)
+      |# The speech tokenizer's encoder only turns audio into codes, which this
+      |# service never does; its decoder is the vocoder.
+      |core.speech_tokenizer.model.encoder.cpu()
       |torch.cuda.empty_cache()
-      |print(f"loaded in {time.time() - t0:.1f} s, free GPU memory {gpu_free_mib()} MiB", flush=True)
+      |SPEAKERS = sorted(talker.config.spk_id)
+      |print(f"loaded in {time.time() - t0:.1f} s, free GPU memory {gpu_free_mib()} MiB, speakers {SPEAKERS}", flush=True)
       |
       |tcfg = talker.config
       |cp = talker.code_predictor
@@ -189,9 +210,10 @@ private object QwenServer:
       |VOCAB = tcfg.vocab_size
       |HEAD_DIM = tcfg.head_dim
       |# The talker's KV cache holds the prompt and up to this many frames (12 per
-      |# second of speech).
-      |MAX_LEN = 1536
-      |MAX_FRAMES = 1024
+      |# second of speech); a minute of speech from one request is plenty, since the
+      |# player sends a sentence at a time.
+      |MAX_LEN = 1024
+      |MAX_FRAMES = 720
       |# Frames decoded to audio at a time (half a second), and the frames of left
       |# context given to the vocoder, as the package's own chunked decode does.
       |CHUNK_FRAMES = 6
@@ -204,11 +226,11 @@ private object QwenServer:
       |
       |
       |@torch.inference_mode()
-      |def build_prefill(text, voice):
+      |def build_prefill(text, speaker):
       |    # The package's own prompt assembly, stopped where it would hand the prompt
-      |    # to the talker's generate.
+      |    # to the talker's generate. No instruction: with one, the model fell into
+      |    # stuttering on a short sentence in testing.
       |    input_ids = m._tokenize_texts([m._build_assistant_text(text)])
-      |    instruct_ids = [m._tokenize_texts([m._build_instruct_text(voice)])[0]]
       |    captured = {}
       |    original = talker.generate
       |
@@ -218,7 +240,7 @@ private object QwenServer:
       |
       |    talker.generate = capture
       |    try:
-      |        core.generate(input_ids=input_ids, instruct_ids=instruct_ids, languages=[LANGUAGE], non_streaming_mode=True)
+      |        core.generate(input_ids=input_ids, instruct_ids=[None], languages=[LANGUAGE], speakers=[speaker], non_streaming_mode=True)
       |    except _Captured:
       |        pass
       |    finally:
@@ -411,7 +433,7 @@ private object QwenServer:
       |
       |step = capture_graph().replay
       |# A first run warms the vocoder, whose cold first chunk takes ten times as long.
-      |embeds, pad = build_prefill("Ready.", "A calm adult voice.")
+      |embeds, pad = build_prefill("Ready.", SPEAKERS[0])
       |report = generate(embeds, pad, 60, lambda pcm: None, threading.Event())
       |print(f"warmed up: {report}", flush=True)
       |
@@ -428,17 +450,17 @@ private object QwenServer:
       |app = FastAPI()
       |
       |
-      |# Speaks `text` (a word between *asterisks* stressed) with the voice `voice`
-      |# describes, streaming 16-bit 24 kHz WAV from the first half second on.
+      |# Speaks `text` (a word between *asterisks* stressed) as the built-in speaker
+      |# `voice`, streaming 16-bit 24 kHz WAV from the first half second on.
       |@app.post("/tts")
       |async def tts(request: Request):
       |    body = await request.json()
       |    text = (body.get("text") or "").strip()
-      |    voice = (body.get("voice") or "").strip()
+      |    voice = (body.get("voice") or "").strip().lower()
       |    if not text:
       |        raise HTTPException(400, "text is required")
-      |    if not voice:
-      |        raise HTTPException(400, "voice, a description of the voice to speak with, is required")
+      |    if voice not in SPEAKERS:
+      |        raise HTTPException(400, f"voice must be one of the model's speakers {SPEAKERS}")
       |    embeds, pad = await run_in_threadpool(lambda: build_prefill(text, voice))
       |    max_frames = min(MAX_FRAMES, MAX_LEN - embeds.shape[1])
       |    if max_frames < 5 * 12:

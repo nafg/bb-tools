@@ -621,8 +621,7 @@ def plugin(bb: BbApi): Unit =
 
   def defaultTtsConfig(provider: String): js.Dynamic = provider match
     case "pocket-tts" => js.Dynamic.literal("defaultVoice" -> "alba")
-    case QwenTtsProvider =>
-      js.Dynamic.literal("defaultVoice" -> QwenServer.DefaultVoice, "voices" -> js.Array(QwenServer.DefaultVoice))
+    case QwenTtsProvider => js.Dynamic.literal("defaultVoice" -> QwenServer.DefaultVoice)
     case ChatterboxNanoProvider =>
       js.Dynamic.literal(
         "defaultVoice" -> ChatterboxServer.BuiltInVoice,
@@ -645,8 +644,13 @@ def plugin(bb: BbApi): Unit =
       _.asInstanceOf[js.UndefOr[js.Dynamic]].getOrElse(defaultTtsConfig(provider))
     )
 
-  def availableVoices(provider: String, config: js.Dynamic): Vector[String] =
-    if provider == "pocket-tts" then PocketEnglishVoices else stringArray(config.voices)
+  /** The voices a provider has: fixed for the local models, configured for
+    * the rest.
+    */
+  def availableVoices(provider: String, config: js.Dynamic): Vector[String] = provider match
+    case "pocket-tts"      => PocketEnglishVoices
+    case QwenTtsProvider   => QwenServer.Speakers
+    case _                 => stringArray(config.voices)
 
   def enabledVoicesKey(provider: String): String =
     if provider == "pocket-tts" then EnabledPocketVoicesKey else s"voices.$provider.enabled"
@@ -2138,8 +2142,7 @@ def plugin(bb: BbApi): Unit =
           (for
             previous <- ttsConfig(provider)
             enabledUpdate = input.enabled.asInstanceOf[js.UndefOr[Boolean]]
-            requestedCatalog =
-              if provider == "pocket-tts" then PocketEnglishVoices else stringArray(input.catalog)
+            requestedCatalog = availableVoices(provider, js.Dynamic.literal("voices" -> input.catalog))
             requestedEnabled = stringArray(input.voices).filter(requestedCatalog.contains)
             apiKey =
               if js.typeOf(input.apiKey) == "string" then str(input.apiKey) else str(previous.apiKey)
