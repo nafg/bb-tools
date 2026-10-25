@@ -64,8 +64,7 @@ subscribed branch is deleted, the thread is told that checking failed.
 ## Limits
 
 - Checks run every minute, so a message can arrive up to about a minute after the event.
-- Archived threads are skipped until they are unarchived; they then hear what changed. Deleting a thread ends its
-  subscriptions.
+- Archiving or deleting a thread ends its subscriptions. Unarchiving doesn't restore them; subscribe again.
 - It reads through the `gh` and `glab` logins of the user running bb, so it sees what they can see.
 - Reviews and comments are read when the PR or MR's updated time changes, and every 15 minutes regardless, so one
   can occasionally arrive up to 15 minutes late.

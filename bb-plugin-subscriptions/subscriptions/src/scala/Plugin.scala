@@ -54,11 +54,13 @@ final class Poller(bb: BbApi, store: Store):
       !js.isUndefined(archivedAt) && archivedAt != null
     }
 
-  /** An archived thread's subscriptions are skipped, so what happened meanwhile reaches it once it is unarchived. */
+  /** An archived thread's subscriptions end. The archive event normally ends them; this catches a thread archived
+    * while the plugin wasn't running.
+    */
   private def pollOne(s: Subscription, force: Boolean): Future[Unit] =
     isArchived(s.threadId)
       .flatMap { archived =>
-        if archived then Future.unit
+        if archived then Future.successful(store.endAllFor(s.threadId))
         else
           Forges.observe(s.target, Some(s.lastSeen), force).transformWith {
             case scala.util.Success(now) => report(s, now)
@@ -370,5 +372,6 @@ def plugin(bb: BbApi): Unit =
   )
 
   bb.events.on("thread.deleted", (payload: js.Dynamic) => store.endAllFor(payload.thread.id.asInstanceOf[String]))
+  bb.events.on("thread.archived", (payload: js.Dynamic) => store.endAllFor(payload.thread.id.asInstanceOf[String]))
 
   bb.background.schedule("poll", "* * * * *", () => poller.pollAll().toJSPromise)
