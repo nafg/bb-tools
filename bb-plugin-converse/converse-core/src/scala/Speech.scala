@@ -37,6 +37,7 @@ object Speech:
   // A word, with what follows an apostrophe (I'll, PR's) kept in it.
   private val Word           = "\\b[A-Za-z0-9]+(?:['’][A-Za-z]+)*".r
   private val Digits         = "\\d+".r
+  private val Ordinal        = "\\d+(?:st|nd|rd|th)".r
   // A bb thread: a mention (with or without a message) or a bare id.
   private val ThreadReference = "@thread:(thr_[a-z0-9]+)(?:#msg=\\d+)?|\\b(thr_[a-z0-9]+)\\b".r
   // Words between single asterisks, which mark them to be stressed.
@@ -102,6 +103,7 @@ object Speech:
   private def spoken(token: String): String =
     val apostrophe = token.indexWhere(c => c == '\'' || c == '’')
     if apostrophe >= 0 then spoken(token.take(apostrophe)) + token.drop(apostrophe)
+    else if Ordinal.matches(token) then NumberWords.ordinal(token.takeWhile(_.isDigit))
     else if isId(token) then spelled(token)
     else words(token).split(" ").map(spokenWord).mkString(" ")
 

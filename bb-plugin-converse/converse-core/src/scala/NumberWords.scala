@@ -25,6 +25,19 @@ object NumberWords:
           .flatten
           .mkString(" ")
 
+  /** The ordinal of a string of digits: "21" as "twenty first". */
+  def ordinal(digits: String): String =
+    val words = apply(digits).split(" ")
+    (words.init :+ OrdinalOf.getOrElse(words.last, ordinalSuffixed(words.last))).mkString(" ")
+
+  private val OrdinalOf = Map(
+    "one" -> "first", "two" -> "second", "three" -> "third", "five" -> "fifth", "eight" -> "eighth",
+    "nine" -> "ninth", "twelve" -> "twelfth"
+  )
+
+  private def ordinalSuffixed(word: String): String =
+    if word.endsWith("y") then word.dropRight(1) + "ieth" else word + "th"
+
   private def belowThousand(n: Int): Vector[String] =
     val hundreds = if n >= 100 then Vector(Ones(n / 100), "hundred") else Vector.empty
     val rest     = n % 100

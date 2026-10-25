@@ -63,6 +63,10 @@ class SpeechTest extends munit.FunSuite:
       List("Set S M S Chat and Entrance Group V two S M S Config dot S R C Number on the H T T P Server.")
     )
 
+  test("speaks ordinals as words"):
+    val chunks = Speech.splitSpeechChunks("It changed on the 21st, the 2nd and the 3rd.")
+    assertEquals(chunks.map(_.text), List("It changed on the twenty first, the second and the third."))
+
   test("keeps contractions and possessives whole"):
     val chunks = Speech.splitSpeechChunks("I'll check, we'll see, you'd agree it's the PR's and sbt's fault.")
     assertEquals(chunks.map(_.text), List("I'll check, we'll see, you'd agree it's the P R's and S B T's fault."))

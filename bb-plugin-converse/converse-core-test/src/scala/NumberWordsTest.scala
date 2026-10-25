@@ -12,3 +12,10 @@ class NumberWordsTest extends munit.FunSuite:
 
   test("digits with a leading zero are read one by one"):
     assertEquals(NumberWords("007"), "zero zero seven")
+
+  test("ordinals are read as words"):
+    assertEquals(NumberWords.ordinal("1"), "first")
+    assertEquals(NumberWords.ordinal("2"), "second")
+    assertEquals(NumberWords.ordinal("21"), "twenty first")
+    assertEquals(NumberWords.ordinal("30"), "thirtieth")
+    assertEquals(NumberWords.ordinal("112"), "one hundred twelfth")
