@@ -110,22 +110,33 @@ private val PocketService = ManagedService(
   idleMinutes = 15
 )
 
-private val ParakeetService = ManagedService(
+/** Parakeet on `device`. The device is part of the version, so an instance
+  * running on the other one is replaced when next needed.
+  */
+private def parakeetService(device: ParakeetDevice) = ManagedService(
   key = "parakeet",
   label = "Parakeet",
   probeUrl = s"http://127.0.0.1:${ParakeetServer.Port}/v1/audio/transcriptions",
-  startCommand = ParakeetServer.startCommand,
+  startCommand = ParakeetServer.startCommand(device),
   // The first start downloads the CUDA libraries and the model, about 3 GB.
   readyWithinSeconds = 900,
   // Starting again loads the model, which delays the next transcription.
   idleMinutes = 60,
   files = Map(ParakeetServer.ScriptRelativePath -> ParakeetServer.Script),
   versionCheck = Some(
-    ServiceVersionCheck(s"http://127.0.0.1:${ParakeetServer.Port}/version", ParakeetServer.Version)
+    ServiceVersionCheck(s"http://127.0.0.1:${ParakeetServer.Port}/version", ParakeetServer.version(device))
   )
 )
 
-private val ManagedServices = List(PocketService, ParakeetService)
+/** The speech synthesis provider that runs on the GPU, beside which Parakeet
+  * has to run on the CPU: the two do not fit on the card with the desktop.
+  */
+private val QwenTtsProvider = "qwen3-tts"
+
+/** Every managed service, in a form that identifies it, for stopping idle
+  * ones.
+  */
+private val ManagedServices = List(PocketService, parakeetService(ParakeetDevice.GpuIfFree))
 
 private def ttsConfigKey(provider: String): String = s"tts.config.$provider"
 
@@ -563,6 +574,12 @@ def plugin(bb: BbApi): Unit =
     )
   )
 
+
+  /** The Parakeet to use under `currentSettings`. */
+  def parakeetFor(currentSettings: js.Dynamic): ManagedService =
+    parakeetService(
+      if str(currentSettings.ttsProvider) == QwenTtsProvider then ParakeetDevice.Cpu else ParakeetDevice.GpuIfFree
+    )
 
   def stringArray(value: js.Dynamic): Vector[String] =
     value.asInstanceOf[js.UndefOr[js.Array[String]]].fold(Vector.empty)(_.toVector)
@@ -1164,7 +1181,7 @@ def plugin(bb: BbApi): Unit =
                   signal
                 )
               )
-          ensureService(ParakeetService).flatMap {
+          ensureService(parakeetFor(s)).flatMap {
             case Left(message) =>
               bb.log.warn(s"Parakeet unavailable ($diagnosticContext): $message")
               viaWhisper
@@ -1764,7 +1781,7 @@ def plugin(bb: BbApi): Unit =
               case Right(_)      => ()
             }
           if str(s.sttProvider) == "parakeet" then
-            ensureService(ParakeetService).foreach {
+            ensureService(parakeetFor(s)).foreach {
               case Left(message) => bb.log.warn(s"transcriber warm-up: $message")
               case Right(_)      => ()
             }

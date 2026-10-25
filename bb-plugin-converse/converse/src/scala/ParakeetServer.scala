@@ -4,10 +4,11 @@ package converse
   * small OpenAI-compatible HTTP wrapper around onnx-asr, run by `uv` with its
   * dependencies declared inline (PEP 723). It transcribes each upload whole,
   * never split into chunks: splitting made Parakeet invent words in testing.
-  * It uses the GPU when the CUDA runtime loads and loading the model would
-  * still leave a safe margin of free GPU memory (this machine's desktop has
-  * frozen with about 1.45 GB free), otherwise the CPU, on four threads so
-  * bb's window stays responsive.
+  * Started for [[ParakeetDevice.GpuIfFree]], it uses the GPU when the CUDA
+  * runtime loads and loading the model would still leave a safe margin of
+  * free GPU memory (this machine's desktop has frozen with about 1.45 GB
+  * free), otherwise the CPU; for [[ParakeetDevice.Cpu]], always the CPU. On
+  * the CPU it runs on four threads so bb's window stays responsive.
   *
   * Transcribed whole, Parakeet now and then skips a stretch of speech
   * without any sign but the gap in its words' timestamps: in 198 stored
@@ -40,8 +41,9 @@ private object ParakeetServer:
   /** Where the script is written on the host before it is started. */
   val ScriptRelativePath = ".cache/bb-converse/parakeet_server.py"
 
-  def startCommand(home: String): String =
-    s"uv run --script $home/$ScriptRelativePath --port $Port --model $Model --max-seconds $MaxSeconds --version $Version"
+  def startCommand(device: ParakeetDevice)(home: String): String =
+    s"uv run --script $home/$ScriptRelativePath --port $Port --model $Model --max-seconds $MaxSeconds " +
+      s"--device ${device.flag} --version ${version(device)}"
 
   val Script: String =
     """# /// script
@@ -72,6 +74,7 @@ private object ParakeetServer:
       |parser.add_argument("--port", type=int, required=True)
       |parser.add_argument("--model", required=True)
       |parser.add_argument("--max-seconds", type=float, required=True)
+      |parser.add_argument("--device", choices=["gpu-if-free", "cpu"], required=True)
       |parser.add_argument("--version", required=True)
       |args = parser.parse_args()
       |
@@ -97,10 +100,14 @@ private object ParakeetServer:
       |        return None
       |
       |
-      |free = gpu_free_mib()
-      |use_gpu = "CUDAExecutionProvider" in ort.get_available_providers() and free is not None and free >= GPU_FREE_NEEDED_MIB
-      |if not use_gpu:
-      |    print(f"using the CPU (free GPU memory: {free} MiB, need {GPU_FREE_NEEDED_MIB})", flush=True)
+      |if args.device == "cpu":
+      |    use_gpu = False
+      |    print("using the CPU, as started", flush=True)
+      |else:
+      |    free = gpu_free_mib()
+      |    use_gpu = "CUDAExecutionProvider" in ort.get_available_providers() and free is not None and free >= GPU_FREE_NEEDED_MIB
+      |    if not use_gpu:
+      |        print(f"using the CPU (free GPU memory: {free} MiB, need {GPU_FREE_NEEDED_MIB})", flush=True)
       |providers = (
       |    [("CUDAExecutionProvider", {"gpu_mem_limit": GPU_MEMORY_LIMIT, "arena_extend_strategy": "kSameAsRequested"}),
       |     "CPUExecutionProvider"]
@@ -219,6 +226,17 @@ private object ParakeetServer:
       |""".stripMargin
 
   /** Identifies this script and its start command, so a running server
-    * started from an earlier one can be recognized and replaced.
+    * started from an earlier one, or for the other device, can be recognized
+    * and replaced.
     */
-  lazy val Version: String = (Script, Model, MaxSeconds).hashCode.toHexString
+  def version(device: ParakeetDevice): String = (Script, Model, MaxSeconds, device.flag).hashCode.toHexString
+
+/** Where Parakeet runs its model. */
+enum ParakeetDevice(val flag: String):
+  /** The GPU when loading the model leaves it enough free memory, otherwise
+    * the CPU.
+    */
+  case GpuIfFree extends ParakeetDevice("gpu-if-free")
+
+  /** The CPU, leaving the GPU to speech synthesis. */
+  case Cpu extends ParakeetDevice("cpu")
