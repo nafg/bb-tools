@@ -158,7 +158,7 @@ function PendingVoiceTranscript() {
   const state = useSyncExternalStore(ctl.subscribe, ctl.getSnapshot);
 
   if (view.scope.kind !== "thread" || state.threadId !== view.scope.threadId) return null;
-  const text = state.notice ?? state.interim;
+  const text = state.notice ?? state.interim ?? state.progress;
   if (!text) return null;
 
   return (
@@ -196,7 +196,7 @@ function NewThreadVoiceBanner() {
       : !state.on
         ? `Voice: turn on the microphone and speak to start a new thread in ${projectName}.`
         : `Voice: speaking starts a new thread in ${projectName}.`;
-  const live = state.notice ?? state.interim;
+  const live = state.notice ?? state.interim ?? state.progress;
   return (
     <div className="w-full min-w-0 space-y-1 px-2 py-1 text-xs">
       <p className="text-muted-foreground">{guidance}</p>

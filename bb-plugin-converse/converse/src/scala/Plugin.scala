@@ -1472,6 +1472,9 @@ def plugin(bb: BbApi): Unit =
                     }
               }
               .recover { case e => Left(s"could not start ${service.label}: ${e.getMessage}") }
+          started.foreach { _ =>
+            state.active.foreach(a => publishSignal("status", a.sessionId, a.threadId))
+          }
           started
     }
 

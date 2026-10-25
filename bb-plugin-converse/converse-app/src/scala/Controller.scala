@@ -112,6 +112,8 @@ final class Controller(
   private var captureStartedAt: Double = 0.0
   private var lastVoicedAt: Double     = 0.0
   private var interimText: String                 = null
+  // What the backend is doing for this session, such as starting a service.
+  private var progressText: String                = null
   private var interimSegments: List[String]       = Nil
 
   // The thread the app route currently shows (reported by mounted converse
@@ -233,6 +235,7 @@ final class Controller(
       "activity"                  -> activity.map(_.signalName).orNull,
       "heard"                     -> heardText,
       "interim"                   -> interimText,
+      "progress"                  -> progressText,
       "speechProbability"         -> currentSpeechProbability,
       "speechProbabilityThreshold" -> speechProbabilityThreshold
     )
@@ -466,6 +469,7 @@ final class Controller(
     notice = null
     heardText = null
     interimText = null
+    progressText = null
     utteranceRoute = null
     lastEventId = null
     rememberForRestore(VoiceSessionRestore.Intent(sess, Option(newThreadId), js.JSON.stringify(opts)))
@@ -641,6 +645,7 @@ final class Controller(
     closeAudioContext()
     heardText = null
     interimText = null
+    progressText = null
     utteranceRoute = null
     currentSpeechProbability = 0.0
     endSession(end, detail)
@@ -1126,9 +1131,9 @@ final class Controller(
           case "utterance-processed" =>
             applyOutcome(p)
           case "status" =>
-            // Transient backend progress (e.g. managed service startup);
-            // shown as interim text and naturally replaced by later updates.
-            interimText = p.text.asInstanceOf[js.UndefOr[String]].getOrElse("")
+            // Backend progress, such as a managed service starting; a status
+            // without text means that work has finished.
+            progressText = p.text.asInstanceOf[js.UndefOr[String]].filter(_.nonEmpty).orNull
             refreshSnapshot()
           case "turn-ended" =>
             // The agent ended its turn without a reply to read aloud, which

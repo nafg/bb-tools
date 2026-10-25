@@ -33,6 +33,8 @@ export interface ConverseSnapshot {
   heard: string | null;
   /** Preview transcription of the utterance still being spoken. */
   interim: string | null;
+  /** What the backend is doing for the session, such as starting a service; null when nothing. */
+  progress: string | null;
   /** Silero V5 speech probability for the latest microphone frame. */
   speechProbability: number;
   /** The probability at which Silero considers a frame speech. */
