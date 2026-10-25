@@ -3,21 +3,34 @@ package converseapp
 import scala.concurrent.Future
 import scala.scalajs.js
 
-/** An AudioContext's sound played the way a web call plays the other side:
-  * sent through a WebRTC connection within the page, and the received track
-  * played by an audio element. On Android, a page using a Bluetooth headset's
-  * microphone puts the headset in call mode, and the AudioContext's own
-  * output then went to the phone's speaker instead of the headset; call audio
-  * goes to the headset.
-  *
-  * The sound goes through a WebRTC connection rather than straight from a
-  * media stream into the audio element because Chromium plays a local media
-  * stream at a varying rate, which shifted replies' pitch by up to nearly a
-  * semitone; a test tone played through the connection held its pitch.
+/** How call-style output gets an AudioContext's sound to its audio element. */
+enum CallTransport:
+  /** The context's media stream played straight by the element. Chromium
+    * plays a local media stream at a varying rate, which shifted replies'
+    * pitch by up to nearly a semitone.
+    */
+  case Direct
+
+  /** Sent through a WebRTC connection within the page and the received track
+    * played, as a web call plays the other side; a test tone played this way
+    * held its pitch. On one Android phone it played nothing until the browser
+    * was restarted.
+    */
+  case WebRtc
+
+object CallTransport:
+  /** The transport a setting value names; direct for anything else. */
+  def fromSetting(value: String): CallTransport = if value == "webrtc" then WebRtc else Direct
+
+/** An AudioContext's sound played by an audio element, the way a web page
+  * plays the other side of a call. On Android, a page using a Bluetooth
+  * headset's microphone puts the headset in call mode, and the AudioContext's
+  * own output then went to the phone's speaker instead of the headset; call
+  * audio goes to the headset.
   *
   * Create it inside a user gesture, since the element must be allowed to play.
   */
-final class CallAudioOutput(ctx: AudioContext, onError: String => Unit) extends AudioOutput:
+final class CallAudioOutput(ctx: AudioContext, transport: CallTransport, onError: String => Unit) extends AudioOutput:
   private val stream    = ctx.createMediaStreamDestination()
   private val element   = js.Dynamic.newInstance(js.Dynamic.global.Audio)()
   private val sending   = js.Dynamic.newInstance(js.Dynamic.global.RTCPeerConnection)()
@@ -25,10 +38,11 @@ final class CallAudioOutput(ctx: AudioContext, onError: String => Unit) extends 
   private var startFailure: Option[String] = None
 
   // Started now, inside the gesture, on the stream itself (which is silent
-  // until something plays); the connection's track replaces it when it comes.
+  // until something plays); through WebRTC, the connection's track replaces
+  // it when it comes.
   element.srcObject = stream.stream
   play()
-  connect().failed.foreach(e => failed(s"could not connect: ${e.getMessage}"))
+  if transport == CallTransport.WebRtc then connect().failed.foreach(e => failed(s"could not connect: ${e.getMessage}"))
 
   private def play(): Unit =
     element.play().asInstanceOf[js.Promise[Unit]].toFuture.failed.foreach(e => failed(s"could not play: ${e.getMessage}"))
@@ -68,8 +82,14 @@ final class CallAudioOutput(ctx: AudioContext, onError: String => Unit) extends 
   def input: AudioNode = stream
 
   def report: String =
-    "call-style (sent through a WebRTC connection, played by an audio element)" +
-      startFailure.fold("")(e => s"; $e")
+    val element = s"element ${if this.element.paused.asInstanceOf[Boolean] then "paused" else "playing"}"
+    val how = transport match
+      case CallTransport.Direct => s"call-style (a media stream played by an audio element); $element"
+      case CallTransport.WebRtc =>
+        "call-style (sent through a WebRTC connection, played by an audio element)" +
+          s"; connection ${receiving.connectionState}, $element" +
+          s", ${if this.element.srcObject eq stream.stream then "on the local stream" else "on the received track"}"
+    how + startFailure.fold("")(e => s"; $e")
 
   def close(): Unit =
     val _ = element.pause()

@@ -552,6 +552,14 @@ def plugin(bb: BbApi): Unit =
         "options" -> js.Array("browser", "pocket-tts", QwenTtsProvider, ChatterboxNanoProvider, "kokoro", "openai-compatible"),
         "default" -> "browser"
       ),
+      "callAudioOutput" -> js.Dynamic.literal(
+        "type"  -> "select",
+        "label" -> ("ANDROID: how replies reach the headset. direct: a media stream into an audio element, whose " +
+          "pitch can drift; webrtc: through a WebRTC connection, which holds pitch but has played nothing until the " +
+          "browser was restarted. Takes effect when the app is next started."),
+        "options" -> js.Array("direct", "webrtc"),
+        "default" -> "direct"
+      ),
       "sttProvider" -> js.Dynamic.literal(
         "type"    -> "select",
         "label"   -> "SPEECH-TO-TEXT PROVIDER",

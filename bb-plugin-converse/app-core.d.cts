@@ -78,6 +78,8 @@ export interface ConverseStartOptions {
   speechProbabilityThreshold: number;
   endOfSpeechSilenceMs: number;
   soundCues?: SoundCueSettings;
+  /** On Android, how call-style output reaches its audio element. */
+  callAudioOutput?: "direct" | "webrtc";
 }
 
 export interface ConverseController {

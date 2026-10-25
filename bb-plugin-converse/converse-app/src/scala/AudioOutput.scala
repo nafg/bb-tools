@@ -15,9 +15,8 @@ object AudioOutput:
     * headset (see [[CallAudioOutput]]); the context's own output elsewhere,
     * since call-style output passes the sound through lossy compression.
     */
-  def forThisDevice(ctx: AudioContext, onError: String => Unit): AudioOutput =
-    if Platform.isAndroid then
-      CallAudioOutput(ctx, onError)
+  def forThisDevice(ctx: AudioContext, callTransport: CallTransport, onError: String => Unit): AudioOutput =
+    if Platform.isAndroid then CallAudioOutput(ctx, callTransport, onError)
     else ContextOutput(ctx)
 
 /** The AudioContext's own output. */

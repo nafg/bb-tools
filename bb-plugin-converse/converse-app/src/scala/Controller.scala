@@ -264,6 +264,7 @@ final class Controller(
         "audioOutput"         -> player.outputReport,
         "microphone"          -> Option(micStream).flatMap(_.getTracks().headOption).map(_.label).orNull,
         "playbackContext"     -> Option(playbackContext).map(_.state).orNull,
+        "playerFailure"       -> player.lastFailure,
         "audioDevices"        -> audioDevices
       )
       val json = js.JSON.stringify(report)
@@ -372,6 +373,9 @@ final class Controller(
   def configure(opts: js.Dynamic): Unit =
     startOptions = opts
     player.setTtsMode(opts.ttsMode.asInstanceOf[js.UndefOr[String]].getOrElse("browser"))
+    val transport = CallTransport.fromSetting(opts.callAudioOutput.asInstanceOf[js.UndefOr[String]].getOrElse(""))
+    player.callTransport = transport
+    cues.callTransport = transport
     opts.soundCues.asInstanceOf[js.UndefOr[js.Dynamic]].foreach { soundCues =>
       SoundCueSettings.fromUnchecked(SoundCueSettingsJson.read(soundCues)) match
         case Right(settings) => cues.configure(settings)

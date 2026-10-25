@@ -131,6 +131,7 @@ function VoiceBridge() {
     );
     ctl.configure({
       ttsMode: values.ttsProvider === "browser" || values.ttsProvider === undefined ? "browser" : "server",
+      callAudioOutput: values.callAudioOutput === "webrtc" ? "webrtc" : "direct",
       soundCues: soundCues.state ?? undefined,
       speechProbabilityThreshold:
         Number.isFinite(speechProbabilityThreshold) &&

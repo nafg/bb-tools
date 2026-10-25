@@ -60,6 +60,11 @@ final class Player(
 
   private var output: AudioOutput = null
 
+  /** How call-style output reaches its audio element; used for outputs
+    * opened from now on.
+    */
+  var callTransport: CallTransport = CallTransport.Direct
+
   /** Must be called inside a user gesture, so playback is allowed to start.
     * The context must be the player's alone: pausing suspends it.
     */
@@ -67,7 +72,10 @@ final class Player(
     if output != null then output.close()
     audioContext = ctx
     paused = false
-    output = if ctx == null then null else AudioOutput.forThisDevice(ctx, debug)
+    output = if ctx == null then null else AudioOutput.forThisDevice(ctx, callTransport, debug)
+
+  /** The last way speech or playback failed, for diagnostics; null if none. */
+  var lastFailure: String = null
 
   /** Which audio output replies play through, for diagnostics. */
   def outputReport: String = if output == null then null else output.report
@@ -181,6 +189,7 @@ final class Player(
           val _ = item.settled.trySuccess(true)
         case Failure(e) if generation == gen =>
           debug(s"speech failed: ${e.getMessage}")
+          lastFailure = s"speech failed: ${e.getMessage}"
           finishPlayback()
           speakingActive = false
           currentThread = null
@@ -347,7 +356,10 @@ final class Player(
             val _ = source.start()
             p.future
         }
-        .recover { case e => debug(s"playback failed: ${e.getMessage}") }
+        .recover { case e =>
+          debug(s"playback failed: ${e.getMessage}")
+          lastFailure = s"playback failed: ${e.getMessage}"
+        }
 
   private def playStreamed(gen: Int, speech: StreamedSpeech): Future[Unit] =
     if generation != gen then
@@ -358,7 +370,10 @@ final class Player(
       speech
         .play(at => markPlaying(gen, at))
         .andThen { case _ => if currentStream eq speech then currentStream = null }
-        .recover { case e => debug(s"playback failed: ${e.getMessage}") }
+        .recover { case e =>
+          debug(s"playback failed: ${e.getMessage}")
+          lastFailure = s"playback failed: ${e.getMessage}"
+        }
 
   /** Plays the chunks in order. Each chunk's synthesis is requested as soon
     * as the previous chunk's audio has all arrived, so it is generated while

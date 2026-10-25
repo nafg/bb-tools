@@ -56,6 +56,11 @@ final class SoundCuePlayer:
   private var auditionLoop: Loop     = null
   private var pinkNoiseBuffer: AudioBuffer = null
 
+  /** How call-style output reaches its audio element; used for outputs
+    * opened from now on.
+    */
+  var callTransport: CallTransport = CallTransport.Direct
+
   def configure(next: SoundCueSettings): Unit =
     settings = next
     if master != null then master.gain.value = settings.volume
@@ -70,7 +75,7 @@ final class SoundCuePlayer:
       audioContext = new AudioContext
       master = audioContext.createGain()
       master.gain.value = settings.volume
-      val _ = master.connect(AudioOutput.forThisDevice(audioContext, message => { val _ = js.Dynamic.global.console.debug(s"[converse] $message") }).input)
+      val _ = master.connect(AudioOutput.forThisDevice(audioContext, callTransport, message => { val _ = js.Dynamic.global.console.debug(s"[converse] $message") }).input)
     val _ = audioContext.resume()
 
   def onStateChange(from: VoiceState, to: VoiceState, activity: Option[AgentActivity]): Unit =
