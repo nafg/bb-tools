@@ -16,9 +16,14 @@ package converse
   * fillers like "um" in many more. So a gap of over `HOLE_SECONDS` between
   * words where the audio is loud is transcribed again with the audio around
   * it, keeping the words that fall inside the gap; when that too comes back
-  * empty, the gap is transcribed on its own. Gaps transcribed on their own
-  * first invented words twice in those recordings, which the surrounding
-  * audio prevented.
+  * empty and the gap holds at least `ALONE_LOUD_SECONDS` of loud audio, the
+  * gap is transcribed on its own. Transcribed on its own, a gap with under a
+  * second of sound made Parakeet invent words: in 1115 stored recordings, a
+  * throat clear became "Okay." and short bursts became "Thank you." or
+  * "There's a", while the one stretch of real speech only this pass
+  * recovered held 3.4 s of loud audio. The surrounding audio also stops
+  * inventions: gaps transcribed on their own first invented words twice in
+  * recordings that the audio around them transcribed correctly.
   *
   * It answers 413 for audio it cannot take whole: longer than `MaxSeconds`,
   * or more than its GPU memory cap allows at the moment. The cap keeps a long
@@ -140,6 +145,10 @@ private object ParakeetServer:
       |# stretch Parakeet may have skipped.
       |HOLE_SECONDS = 2.0
       |CONTEXT_SECONDS = 3.0
+      |# A gap transcribed on its own, without the audio around it, must hold
+      |# at least this much loud audio; with less, Parakeet makes words of a
+      |# throat clear or a cough.
+      |ALONE_LOUD_SECONDS = 1.5
       |
       |
       |def loud_seconds(audio, start, end, threshold):
@@ -151,8 +160,9 @@ private object ParakeetServer:
       |    return float((rms > threshold).sum()) * 0.1
       |
       |
-      |# The words in a skipped stretch, with a leading space; empty if none.
-      |def recover(audio, start, end):
+      |# The words in a skipped stretch holding `loud` seconds of loud audio, with
+      |# a leading space; empty if none.
+      |def recover(audio, start, end, loud):
       |    duration = len(audio) / SAMPLE_RATE
       |    lo, hi = max(start - CONTEXT_SECONDS, 0.0), min(end + CONTEXT_SECONDS, duration)
       |    around = timed.recognize(audio[int(lo * SAMPLE_RATE):int(hi * SAMPLE_RATE)], sample_rate=SAMPLE_RATE)
@@ -160,7 +170,7 @@ private object ParakeetServer:
       |    while inside and not inside[0].startswith(" "):  # the rest of the word before the gap
       |        inside.pop(0)
       |    text = "".join(inside)
-      |    if text.strip():
+      |    if text.strip() or loud < ALONE_LOUD_SECONDS:
       |        return text
       |    alone = timed.recognize(audio[int((start + 0.2) * SAMPLE_RATE):int(end * SAMPLE_RATE)], sample_rate=SAMPLE_RATE).text.strip()
       |    return " " + alone if alone else ""
@@ -179,11 +189,13 @@ private object ParakeetServer:
       |    for i, (start, end) in enumerate(zip(bounds, bounds[1:])):
       |        if i > 0:
       |            parts.append(result.tokens[i - 1])
-      |        if end - start > HOLE_SECONDS and loud_seconds(audio, start + 0.2, end, threshold) >= 0.5:
-      |            words = recover(audio, start, end)
-      |            if words:
-      |                print(f"recovered {start:.1f}-{end:.1f} s:{words}", flush=True)
-      |                parts.append(words)
+      |        if end - start > HOLE_SECONDS:
+      |            loud = loud_seconds(audio, start + 0.2, end, threshold)
+      |            if loud >= 0.5:
+      |                words = recover(audio, start, end, loud)
+      |                if words:
+      |                    print(f"recovered {start:.1f}-{end:.1f} s:{words}", flush=True)
+      |                    parts.append(words)
       |    return "".join(parts).strip()
       |
       |
