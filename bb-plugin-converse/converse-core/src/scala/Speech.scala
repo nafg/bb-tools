@@ -48,6 +48,19 @@ object Speech:
     */
   def withoutStressMarks(text: String): String = StressMark.replaceAllIn(text, "$1")
 
+  /** `text` in runs: each word between single asterisks as stressed, the
+    * rest as written, for a voice that stresses a word in its own notation.
+    */
+  def stressMarkedSpans(text: String): List[StressSpan] =
+    val spans = List.newBuilder[StressSpan]
+    var last  = 0
+    for m <- StressMark.findAllMatchIn(text) do
+      if m.start > last then spans += StressSpan.Plain(text.substring(last, m.start))
+      spans += StressSpan.Stressed(m.group(1))
+      last = m.end
+    if last < text.length then spans += StressSpan.Plain(text.substring(last))
+    spans.result()
+
   /** The ids of the bb threads `text` refers to, whose titles
     * [[splitSpeechChunks]] speaks in their place.
     */

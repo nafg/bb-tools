@@ -218,6 +218,8 @@ type VoiceSettingsState = {
   defaultVoice: string;
   apiKeyConfigured: boolean;
   voices: VoiceChoice[];
+  /** For a metered provider: the characters sent this month against its free allowance. */
+  usage: { month: string; characters: number; freeCharacters: number } | null;
 };
 
 const TTS_PROVIDERS = [
@@ -225,19 +227,20 @@ const TTS_PROVIDERS = [
   { id: "pocket-tts", label: "Pocket TTS" },
   { id: "qwen3-tts", label: "Qwen3-TTS" },
   { id: "chatterbox-nano", label: "Chatterbox Nano" },
+  { id: "google-cloud-tts", label: "Google Cloud Text-to-Speech" },
   { id: "kokoro", label: "Kokoro" },
   { id: "openai-compatible", label: "OpenAI-compatible TTS" },
 ] as const;
 
-async function playVoicePreview(provider: string, voice: string): Promise<void> {
+async function playVoicePreview(provider: string, voice: VoiceChoice): Promise<void> {
   // A Chatterbox voice is a clip's path, which would read oddly in the sentence.
   const previewText =
     provider === "chatterbox-nano"
       ? "This is how this thread sounds."
-      : `This thread uses the ${voice.replaceAll("_", " ")} voice.`;
+      : `This thread uses the ${voice.label ?? voice.id.replaceAll("_", " ")} voice.`;
   if (provider === "browser") {
     const utterance = new SpeechSynthesisUtterance(previewText);
-    const selected = speechSynthesis.getVoices().find((item) => item.voiceURI === voice || item.name === voice);
+    const selected = speechSynthesis.getVoices().find((item) => item.voiceURI === voice.id || item.name === voice.id);
     if (selected) utterance.voice = selected;
     speechSynthesis.speak(utterance);
     return;
@@ -248,7 +251,7 @@ async function playVoicePreview(provider: string, voice: string): Promise<void> 
   const response = await fetch("/api/v1/plugins/converse/http/tts", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ provider, text: previewText, voice }),
+    body: JSON.stringify({ provider, text: previewText, voice: voice.id }),
   });
   if (!response.ok) throw new Error(`Voice preview failed (${response.status})`);
   const decoded = await context.decodeAudioData(await response.arrayBuffer());
@@ -348,6 +351,20 @@ function TtsProviderCard({
             of the voice to clone.
           </p>
         )}
+        {provider === "google-cloud-tts" && (
+          <p className="text-xs text-muted-foreground">
+            Google's hosted WaveNet voices, called with gcloud's application default credentials (run{" "}
+            <code>gcloud auth application-default login</code> once) or with the API key in the plugin settings, and
+            the Text-to-Speech API enabled on the project. A word the agent writes between *asterisks* is stressed.
+            The first 4 million characters a month are free; the count below is what this plugin has sent.
+          </p>
+        )}
+        {state?.usage && (
+          <p className="text-xs text-muted-foreground">
+            {state.usage.characters.toLocaleString()} of {state.usage.freeCharacters.toLocaleString()} free characters
+            used in {state.usage.month}.
+          </p>
+        )}
         {!state ? (
           <div className="text-xs text-muted-foreground">Loading voices…</div>
         ) : (
@@ -370,7 +387,7 @@ function TtsProviderCard({
           </label>
         </>
       )}
-      {provider !== "pocket-tts" && provider !== "qwen3-tts" && provider !== "browser" && (
+      {provider !== "pocket-tts" && provider !== "qwen3-tts" && provider !== "google-cloud-tts" && provider !== "browser" && (
         <div className="flex gap-2">
           <input className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-sm" value={newVoice} placeholder={provider === "chatterbox-nano" ? "Path of a voice clip to add" : "Add a provider voice ID"} onChange={(event) => setNewVoice(event.target.value)} />
           <button type="button" className="rounded border px-3 text-sm" onClick={() => {
@@ -411,7 +428,7 @@ function TtsProviderCard({
             <button
               type="button"
               className="rounded px-2 py-1 text-xs hover:bg-muted disabled:opacity-50"
-              onClick={() => void playVoicePreview(provider, voice.id).catch((cause) => setError(String(cause)))}
+              onClick={() => void playVoicePreview(provider, voice).catch((cause) => setError(String(cause)))}
             >
               Preview
             </button>

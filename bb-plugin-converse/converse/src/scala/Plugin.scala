@@ -12,6 +12,8 @@ import conversecore.{
   TranscriptSegments,
   AssistantMessage,
   AssistantReply,
+  CharacterTally,
+  GoogleCloudVoices,
   IdleOutcome,
   ContinuationWaiters,
   ReplyInterruption,
@@ -19,6 +21,7 @@ import conversecore.{
   SoundCueSettings,
   SoundCueSettingsJson,
   Speech,
+  Ssml,
   ThreadVoiceAssignments,
   TranscriptionFailure,
   TurnActivityTracker,
@@ -36,6 +39,10 @@ given ExecutionContext = ExecutionContext.parasitic
 
 private def str(value: js.Dynamic): String =
   value.asInstanceOf[js.UndefOr[Any]].fold("")(v => if v == null then "" else v.toString)
+
+private def homeDirectory: String = str(js.Dynamic.global.process.env.HOME) match
+  case "" => "/tmp"
+  case h  => h
 
 /** Longest accepted base64 audio field (~5 MiB decoded): far above a minute of
   * browser-compressed speech, far below transcribeVoice's 25 MiB cap.
@@ -171,6 +178,22 @@ private val ManagedServices =
   List(PocketService, QwenService, ChatterboxService, parakeetService(ParakeetDevice.GpuIfFree))
 
 private def ttsConfigKey(provider: String): String = s"tts.config.$provider"
+
+/** Every speech synthesis provider, as the settings name them. */
+private val TtsProviders = js.Array(
+  "browser",
+  "pocket-tts",
+  QwenTtsProvider,
+  ChatterboxNanoProvider,
+  GoogleCloudTts.Provider,
+  "kokoro",
+  "openai-compatible"
+)
+
+/** Where the characters sent to Google this month are kept, as
+  * `{"month": "2026-10", "characters": 12345}`.
+  */
+private val GoogleCharactersKey = "tts.google.characters"
 
 private final case class ActiveSession(sessionId: String, threadId: String)
 private final case class AwaitingReply(sessionId: String, previousAssistantMessageId: Option[String])
@@ -325,6 +348,14 @@ private object Schema:
 
 private def rejected(message: String): js.Promise[js.Dynamic] =
   js.Promise.reject(new js.Error(message)).asInstanceOf[js.Promise[js.Dynamic]]
+
+/** Why a speech request got no audio: the plugin's side is not set up for the
+  * provider (the browser's request was wrong for it), or the provider refused
+  * or failed (the plugin is a gateway that got a bad answer).
+  */
+private enum SpeechFailure(val message: String, val status: Int):
+  case Unconfigured(reason: String) extends SpeechFailure(reason, 400)
+  case Refused(reason: String)      extends SpeechFailure(reason, 502)
 
 private def jsonResponse(status: Int, message: String): js.Dynamic =
   js.Dynamic.newInstance(js.Dynamic.global.Response)(
@@ -549,8 +580,19 @@ def plugin(bb: BbApi): Unit =
       "ttsProvider" -> js.Dynamic.literal(
         "type"    -> "select",
         "label"   -> "TEXT-TO-SPEECH PROVIDER",
-        "options" -> js.Array("browser", "pocket-tts", QwenTtsProvider, ChatterboxNanoProvider, "kokoro", "openai-compatible"),
+        "options" -> TtsProviders,
         "default" -> "browser"
+      ),
+      "googleCloudProject" -> js.Dynamic.literal(
+        "type"  -> "string",
+        "label" -> ("GOOGLE CLOUD TTS: project whose quota and billing the calls use (empty: the one gcloud recorded " +
+          "with its application default credentials)"),
+        "default" -> ""
+      ),
+      "googleTtsApiKey" -> js.Dynamic.literal(
+        "type"   -> "string",
+        "label"  -> "GOOGLE CLOUD TTS: API key restricted to the Text-to-Speech API (empty: use gcloud's credentials)",
+        "secret" -> true
       ),
       "callAudioOutput" -> js.Dynamic.literal(
         "type"  -> "select",
@@ -630,6 +672,7 @@ def plugin(bb: BbApi): Unit =
   def defaultTtsConfig(provider: String): js.Dynamic = provider match
     case "pocket-tts" => js.Dynamic.literal("defaultVoice" -> "alba")
     case QwenTtsProvider => js.Dynamic.literal("defaultVoice" -> QwenServer.DefaultVoice)
+    case GoogleCloudTts.Provider => js.Dynamic.literal("defaultVoice" -> GoogleCloudVoices.Default.name)
     case ChatterboxNanoProvider =>
       js.Dynamic.literal(
         "defaultVoice" -> ChatterboxServer.BuiltInVoice,
@@ -656,9 +699,15 @@ def plugin(bb: BbApi): Unit =
     * the rest.
     */
   def availableVoices(provider: String, config: js.Dynamic): Vector[String] = provider match
-    case "pocket-tts"      => PocketEnglishVoices
-    case QwenTtsProvider   => QwenServer.Speakers
-    case _                 => stringArray(config.voices)
+    case "pocket-tts"             => PocketEnglishVoices
+    case QwenTtsProvider          => QwenServer.Speakers
+    case GoogleCloudTts.Provider  => GoogleCloudVoices.English.map(_.name)
+    case _                        => stringArray(config.voices)
+
+  /** How the voice picker names a voice, when its id would not do. */
+  def voiceLabel(provider: String, voice: String): Option[String] = provider match
+    case GoogleCloudTts.Provider => GoogleCloudVoices.byName(voice).map(_.label)
+    case _                       => None
 
   def enabledVoicesKey(provider: String): String =
     if provider == "pocket-tts" then EnabledPocketVoicesKey else s"voices.$provider.enabled"
@@ -682,6 +731,16 @@ def plugin(bb: BbApi): Unit =
       .map(row => str(row.voice))
       .filter(_.nonEmpty)
 
+  // The characters sent to Google this month, read once and then kept here;
+  // every request adds to it and writes it back.
+  var googleCharacters: Option[CharacterTally] = None
+  bb.storage.kv.get(GoogleCharactersKey).toFuture.foreach { stored =>
+    val tally = stored.asInstanceOf[js.UndefOr[js.Dynamic]].toOption
+      .map(t => CharacterTally(str(t.month), str(t.characters).toLongOption.getOrElse(0L)))
+      .getOrElse(CharacterTally(CharacterTally.monthOf(js.Date.now()), 0))
+    googleCharacters = Some(googleCharacters.fold(tally)(added => tally.add(added.month, added.characters)))
+  }
+
   def voiceSettingsResponse(provider: String): Future[js.Dynamic] =
     for
       config         <- ttsConfig(provider)
@@ -696,9 +755,96 @@ def plugin(bb: BbApi): Unit =
       "defaultVoice"     -> str(config.defaultVoice),
       "apiKeyConfigured" -> str(config.apiKey).nonEmpty,
       "voices" -> catalog.map { voice =>
-        js.Dynamic.literal("id" -> voice, "enabled" -> enabledCatalog.contains(voice))
-      }.toJSArray
+        val choice = js.Dynamic.literal("id" -> voice, "enabled" -> enabledCatalog.contains(voice))
+        voiceLabel(provider, voice).foreach(label => choice.updateDynamic("label")(label))
+        choice
+      }.toJSArray,
+      "usage" -> (if provider == GoogleCloudTts.Provider then googleUsageReport() else null)
     )
+
+  def recordGoogleCharacters(count: Long): Unit =
+    val month  = CharacterTally.monthOf(js.Date.now())
+    val before = googleCharacters.getOrElse(CharacterTally(month, 0))
+    val after  = before.add(month, count)
+    googleCharacters = Some(after)
+    val free = CharacterTally.GoogleWaveNetFreeCharacters
+    if before.characters < free && after.characters >= free then
+      bb.log.warn(s"Google Cloud TTS: ${after.characters} characters sent in ${after.month}, past the $free free a month")
+    bb.storage.kv
+      .set(GoogleCharactersKey, js.Dynamic.literal("month" -> after.month, "characters" -> after.characters.toDouble))
+      .toFuture
+      .failed
+      .foreach(e => bb.log.warn(s"could not record Google Cloud TTS characters: ${e.getMessage}"))
+
+  def googleUsageReport(): js.Dynamic =
+    val month = CharacterTally.monthOf(js.Date.now())
+    val tally = googleCharacters.getOrElse(CharacterTally(month, 0)).add(month, 0)
+    js.Dynamic.literal(
+      "month"          -> tally.month,
+      "characters"     -> tally.characters.toDouble,
+      "freeCharacters" -> CharacterTally.GoogleWaveNetFreeCharacters.toDouble
+    )
+
+  val googleTokens =
+    GoogleAccessTokens(() => GoogleCloudTts.credentialsPath(js.Dynamic.global.process.env, homeDirectory))
+
+  /** How to call Google under `currentSettings`: a configured API key, else
+    * gcloud's credentials.
+    */
+  def googleAuth(currentSettings: js.Dynamic): Future[Either[String, GoogleCloudTts.Auth]] =
+    val apiKey = str(currentSettings.googleTtsApiKey)
+    if apiKey.nonEmpty then Future.successful(Right(GoogleCloudTts.Auth.ApiKey(apiKey)))
+    else googleTokens.auth(Option(str(currentSettings.googleCloudProject)).filter(_.nonEmpty))
+
+  /** Speaks `ssml` with `voice` through Google: the MP3 as a Response, or why
+    * not. Google's own message is passed on, since it says what to fix (an
+    * API not enabled, a project without billing).
+    */
+  def synthesizeWithGoogle(
+      currentSettings: js.Dynamic,
+      ssml: String,
+      voice: String
+  ): Future[Either[SpeechFailure, js.Dynamic]] =
+    val chosen = GoogleCloudVoices.byName(voice).getOrElse(GoogleCloudVoices.Default)
+    googleAuth(currentSettings).flatMap {
+      case Left(message) => Future.successful(Left(SpeechFailure.Unconfigured(message)))
+      case Right(auth) =>
+        val startedAt = js.Date.now()
+        js.Dynamic.global
+          .fetch(
+            auth.url(GoogleCloudTts.SynthesizeUrl),
+            js.Dynamic.literal(
+              "method"  -> "POST",
+              "headers" -> auth.headers,
+              "body"    -> js.JSON.stringify(GoogleCloudTts.synthesizeRequest(ssml, chosen))
+            )
+          )
+          .asInstanceOf[js.Promise[js.Dynamic]]
+          .toFuture
+          .flatMap { response =>
+            response.json().asInstanceOf[js.Promise[js.Dynamic]].toFuture.map { body =>
+              if !response.ok.asInstanceOf[Boolean] then
+                val detail = body.error
+                  .asInstanceOf[js.UndefOr[js.Dynamic]]
+                  .toOption
+                  .map(e => s"${str(e.status)}: ${str(e.message)}")
+                  .getOrElse(str(response.status))
+                Left(SpeechFailure.Refused(s"Google Cloud TTS refused the request ($detail)"))
+              else
+                recordGoogleCharacters(GoogleCloudTts.billedCharacters(ssml))
+                val audio = js.Dynamic.global.Buffer.from(str(body.audioContent), "base64")
+                bb.log.info(
+                  f"Google Cloud TTS: ${chosen.name} spoke ${ssml.length} characters in ${js.Date.now() - startedAt}%.0f ms"
+                )
+                Right(
+                  js.Dynamic.newInstance(js.Dynamic.global.Response)(
+                    audio,
+                    js.Dynamic.literal("status" -> 200, "headers" -> js.Dynamic.literal("content-type" -> "audio/mpeg"))
+                  )
+                )
+            }
+          }
+    }
 
   def assignThreadVoice(provider: String, threadId: String, enabledCatalog: Vector[String]): Option[String] =
     storedThreadVoice(provider, threadId).filter(enabledCatalog.contains).orElse {
@@ -1298,10 +1444,6 @@ def plugin(bb: BbApi): Unit =
       bb.log.warn(s"could not record when ${service.label} was last used: ${e.getMessage}")
     }
 
-  def homeDirectory: String = str(js.Dynamic.global.process.env.HOME) match
-    case "" => "/tmp"
-    case h  => h
-
   def writeServiceFiles(service: ManagedService): Unit =
     val fs   = js.Dynamic.global.process.getBuiltinModule("node:fs")
     val path = js.Dynamic.global.process.getBuiltinModule("node:path")
@@ -1845,6 +1987,8 @@ def plugin(bb: BbApi): Unit =
             case "pocket-tts"            => Some(ensureService(PocketService))
             case QwenTtsProvider         => Some(ensureQwenTts(s))
             case ChatterboxNanoProvider  => Some(ensureService(ChatterboxService))
+            // The access token, so the first sentence does not wait for it.
+            case GoogleCloudTts.Provider => Some(googleAuth(s).map(_.map(_ => "")))
             case _                       => None
           speechService.foreach(_.foreach {
             case Left(message) => bb.log.warn(s"TTS warm-up: $message")
@@ -2147,9 +2291,7 @@ def plugin(bb: BbApi): Unit =
       },
       "updateVoiceSettings" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val provider = str(input.provider)
-        if !Set("browser", "pocket-tts", QwenTtsProvider, ChatterboxNanoProvider, "kokoro", "openai-compatible")
-            .contains(provider)
-        then
+        if !TtsProviders.contains(provider) then
           rejected("unknown TTS provider")
         else
           (for
@@ -2375,17 +2517,46 @@ def plugin(bb: BbApi): Unit =
               val voice =
                 if requestedVoice.nonEmpty && catalog.contains(requestedVoice) then requestedVoice
                 else str(config.defaultVoice)
-              val requestF: Future[Either[String, (String, js.Dynamic)]] = provider match
+              // A provider that answers with the audio itself has it passed on as
+              // it is; Google answers with JSON holding it, so its case makes
+              // the Response.
+              def passedOn(request: Future[Either[String, (String, js.Dynamic)]]): Future[Either[SpeechFailure, js.Dynamic]] =
+                request.flatMap {
+                  case Left(message) => Future.successful(Left(SpeechFailure.Unconfigured(message)))
+                  case Right((url, init)) =>
+                    js.Dynamic.global
+                      .fetch(url, init)
+                      .asInstanceOf[js.Promise[js.Dynamic]]
+                      .toFuture
+                      .map { upstream =>
+                        if !upstream.ok.asInstanceOf[Boolean] then
+                          Left(SpeechFailure.Refused(s"TTS provider returned ${str(upstream.status)}"))
+                        else
+                          val contentType = upstream.headers.get("content-type")
+                          Right(
+                            js.Dynamic.newInstance(js.Dynamic.global.Response)(
+                              upstream.body,
+                              js.Dynamic.literal(
+                                "status" -> 200,
+                                "headers" -> js.Dynamic.literal(
+                                  "content-type" -> (if contentType == null then "audio/mpeg" else contentType)
+                                )
+                              )
+                            )
+                          )
+                      }
+                }
+              val synthesized: Future[Either[SpeechFailure, js.Dynamic]] = provider match
                 case "pocket-tts" =>
-                  ensureService(PocketService).map(_.map { url =>
+                  passedOn(ensureService(PocketService).map(_.map { url =>
                     val form = js.Dynamic.newInstance(js.Dynamic.global.FormData)()
                     val _    = form.set("text", text)
                     if voice.nonEmpty then { val _ = form.set("voice_url", voice) }
                     (url, js.Dynamic.literal("method" -> "POST", "body" -> form))
-                  })
+                  }))
                 case QwenTtsProvider =>
-                  // The one provider that stresses a marked word, so it gets the marks.
-                  ensureQwenTts(s).map(_.map { url =>
+                  // Stresses a marked word in its own notation, so it gets the marks.
+                  passedOn(ensureQwenTts(s).map(_.map { url =>
                     val payload = js.Dynamic.literal(
                       "text"  -> markedText,
                       "voice" -> (if voice.nonEmpty then voice else QwenServer.DefaultVoice)
@@ -2398,9 +2569,9 @@ def plugin(bb: BbApi): Unit =
                         "body"    -> js.JSON.stringify(payload)
                       )
                     )
-                  })
+                  }))
                 case ChatterboxNanoProvider =>
-                  ensureService(ChatterboxService).map(_.map { url =>
+                  passedOn(ensureService(ChatterboxService).map(_.map { url =>
                     val payload = js.Dynamic.literal(
                       "text"  -> text,
                       "voice" -> (if voice.nonEmpty then voice else ChatterboxServer.BuiltInVoice)
@@ -2413,66 +2584,51 @@ def plugin(bb: BbApi): Unit =
                         "body"    -> js.JSON.stringify(payload)
                       )
                     )
-                  })
+                  }))
+                case GoogleCloudTts.Provider =>
+                  // Stresses a marked word with SSML's emphasis element.
+                  synthesizeWithGoogle(s, Ssml.withEmphasis(markedText), voice)
                 case "kokoro" =>
-                  Future.successful {
-                    val payload = js.Dynamic.literal(
-                      "model"           -> "kokoro",
-                      "input"           -> text,
-                      "response_format" -> "mp3"
-                    )
-                    if voice.nonEmpty then payload.updateDynamic("voice")(voice)
-                    Right(
-                      (
-                        str(config.url),
-                        js.Dynamic.literal(
-                          "method"  -> "POST",
-                          "headers" -> js.Dynamic.literal("content-type" -> "application/json"),
-                          "body"    -> js.JSON.stringify(payload)
-                        )
+                  val payload = js.Dynamic.literal(
+                    "model"           -> "kokoro",
+                    "input"           -> text,
+                    "response_format" -> "mp3"
+                  )
+                  if voice.nonEmpty then payload.updateDynamic("voice")(voice)
+                  passedOn(Future.successful(Right(
+                    (
+                      str(config.url),
+                      js.Dynamic.literal(
+                        "method"  -> "POST",
+                        "headers" -> js.Dynamic.literal("content-type" -> "application/json"),
+                        "body"    -> js.JSON.stringify(payload)
                       )
                     )
-                  }
+                  )))
                 case "openai-compatible" =>
-                  Future.successful {
-                    val url = str(config.url)
-                    if url.isEmpty then Left("the OpenAI-compatible TTS endpoint is not configured")
-                    else
-                      val headers = js.Dynamic.literal("content-type" -> "application/json")
-                      val apiKey  = str(config.apiKey)
-                      if apiKey.nonEmpty then headers.updateDynamic("Authorization")(s"Bearer $apiKey")
-                      val payload = js.Dynamic.literal("input" -> text, "response_format" -> "mp3")
-                      val model   = str(config.model)
-                      if model.nonEmpty then payload.updateDynamic("model")(model)
-                      if voice.nonEmpty then payload.updateDynamic("voice")(voice)
-                      Right(
-                        (url, js.Dynamic.literal("method" -> "POST", "headers" -> headers, "body" -> js.JSON.stringify(payload)))
-                      )
-                  }
+                  val url = str(config.url)
+                  if url.isEmpty then
+                    Future.successful(Left(SpeechFailure.Unconfigured("the OpenAI-compatible TTS endpoint is not configured")))
+                  else
+                    val headers = js.Dynamic.literal("content-type" -> "application/json")
+                    val apiKey  = str(config.apiKey)
+                    if apiKey.nonEmpty then headers.updateDynamic("Authorization")(s"Bearer $apiKey")
+                    val payload = js.Dynamic.literal("input" -> text, "response_format" -> "mp3")
+                    val model   = str(config.model)
+                    if model.nonEmpty then payload.updateDynamic("model")(model)
+                    if voice.nonEmpty then payload.updateDynamic("voice")(voice)
+                    passedOn(Future.successful(Right(
+                      (url, js.Dynamic.literal("method" -> "POST", "headers" -> headers, "body" -> js.JSON.stringify(payload)))
+                    )))
                 case other =>
-                  Future.successful(Left(s"ttsProvider is '$other'; the /tts route serves only server-side providers"))
-              requestF.flatMap {
-                case Left(message) => Future.successful(jsonResponse(400, message))
-                case Right((url, init)) =>
-                  js.Dynamic.global
-                    .fetch(url, init)
-                    .asInstanceOf[js.Promise[js.Dynamic]]
-                    .toFuture
-                    .map { upstream =>
-                      if !upstream.ok.asInstanceOf[Boolean] then
-                        jsonResponse(502, s"TTS provider returned ${str(upstream.status)}")
-                      else
-                        val contentType = upstream.headers.get("content-type")
-                        js.Dynamic.newInstance(js.Dynamic.global.Response)(
-                          upstream.body,
-                          js.Dynamic.literal(
-                            "status" -> 200,
-                            "headers" -> js.Dynamic.literal(
-                              "content-type" -> (if contentType == null then "audio/mpeg" else contentType)
-                            )
-                          )
-                        )
-                    }
+                  Future.successful(
+                    Left(SpeechFailure.Unconfigured(s"ttsProvider is '$other'; the /tts route serves only server-side providers"))
+                  )
+              synthesized.map {
+                case Right(response) => response
+                case Left(failure) =>
+                  bb.log.warn(s"speech for $provider failed: ${failure.message}")
+                  jsonResponse(failure.status, failure.message)
               }
           }
         yield response

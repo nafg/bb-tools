@@ -44,7 +44,12 @@ bb plugin install .    # from this directory
   of the GPU, so Parakeet runs on the CPU while it is the provider);
   `chatterbox-nano` (a local Chatterbox Nano the plugin starts and stops, on
   the CPU: besides its built-in voice, a voice is the path of a WAV clip of a
-  voice to clone); or an OpenAI-compatible `/v1/audio/speech`
+  voice to clone); `google-cloud-tts` (Google's hosted WaveNet voices: a word
+  between *asterisks* is stressed through SSML, the first 4 million characters
+  a month are free and the plugin counts what it sends; it calls the API with
+  gcloud's application default credentials, or with an API key from the
+  settings, against the configured project or the one gcloud recorded); or an
+  OpenAI-compatible `/v1/audio/speech`
   endpoint (`kokoro`, e.g. a local Kokoro at
   `http://127.0.0.1:8880/v1/audio/speech`, or `openai-compatible` with an API
   key).
