@@ -54,6 +54,23 @@ final class Poller(bb: BbApi, store: Store):
       !js.isUndefined(archivedAt) && archivedAt != null
     }
 
+  private val RetryDelayMs = 5000
+
+  private def delay(ms: Int): Future[Unit] =
+    val p = scala.concurrent.Promise[Unit]()
+    val _ = js.timers.setTimeout(ms.toDouble)(p.success(()))
+    p.future
+
+  /** Checks the target, trying once more a few seconds later if the first attempt fails. Forge CLIs fail now and
+    * then for a moment (a timeout, a token refresh), and a thread shouldn't hear about a failure the next attempt
+    * doesn't repeat.
+    */
+  private def observeWithRetry(s: Subscription, force: Boolean): Future[Observed] =
+    Forges.observe(s.target, Some(s.lastSeen), force).recoverWith { case first =>
+      bb.log.warn(s"subscription #${s.id}: check failed, retrying once: ${first.getMessage}")
+      delay(RetryDelayMs).flatMap(_ => Forges.observe(s.target, Some(s.lastSeen), force))
+    }
+
   /** An archived thread's subscriptions end. The archive event normally ends them; this catches a thread archived
     * while the plugin wasn't running.
     */
@@ -62,7 +79,7 @@ final class Poller(bb: BbApi, store: Store):
       .flatMap { archived =>
         if archived then Future.successful(store.endAllFor(s.threadId))
         else
-          Forges.observe(s.target, Some(s.lastSeen), force).transformWith {
+          observeWithRetry(s, force).transformWith {
             case scala.util.Success(now) => report(s, now)
             case scala.util.Failure(e)   => reportCheckError(s, e.getMessage)
           }

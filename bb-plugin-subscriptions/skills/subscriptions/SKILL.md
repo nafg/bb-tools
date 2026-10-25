@@ -54,7 +54,8 @@ Messages start with `[bb subscription #<id>]` and end with the URL.
   removed reactions are not reported.
 - A branch moved: the old and new commit, how many commits are new, and the subjects of up to ten.
 - New tags appeared. Deleted tags are not reported. Only the newest 100 tags are compared.
-- Checking failed, with the error, and later that checking works again. A failed check is never treated as "nothing
+- Checking failed twice in a row (a failed check is retried once, a few seconds later), with the error, and later
+  that checking works again. A failed check is never treated as "nothing
   changed".
 
 A PR or MR subscription ends by itself when it is merged or closed. If it is already merged or closed when you
