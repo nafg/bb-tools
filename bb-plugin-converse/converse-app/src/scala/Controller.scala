@@ -263,6 +263,7 @@ final class Controller(
         "userAgent"           -> js.Dynamic.global.navigator.userAgent,
         "audioOutput"         -> player.outputReport,
         "microphone"          -> Option(micStream).flatMap(_.getTracks().headOption).map(_.label).orNull,
+        "playbackContext"     -> Option(playbackContext).map(_.state).orNull,
         "audioDevices"        -> audioDevices
       )
       val json = js.JSON.stringify(report)
@@ -547,6 +548,9 @@ final class Controller(
         val state = if audioContext == null then "closed" else audioContext.state
         debug(s"audio context state after resume: $state ($result)")
       }
+      // Replies' context starts suspended too when the session was restored
+      // without a user gesture; the microphone being open lets it resume.
+      if !player.isPaused then { val _ = playbackContext.resume() }
       // Checked on a timer: a browser that wants a user gesture first leaves
       // resume() pending rather than rejecting it.
       val _ = setTimeout(AudioStartGraceMs) {
