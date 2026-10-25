@@ -18,6 +18,7 @@ import conversecore.{
   SoundCue,
   SoundCueSettings,
   SoundCueSettingsJson,
+  Speech,
   ThreadVoiceAssignments,
   TranscriptionFailure,
   TurnActivityTracker,
@@ -2271,7 +2272,10 @@ def plugin(bb: BbApi): Unit =
           provider = if requestedProvider.nonEmpty then requestedProvider else str(s.ttsProvider)
           config <- ttsConfig(provider)
           response <- {
-            val text = str(body.text)
+            // The text comes with the agent's stress marks (*word*); a
+            // provider that cannot stress a word gets it without them.
+            val markedText = str(body.text)
+            val text       = Speech.withoutStressMarks(markedText)
             if text.isEmpty then Future.successful(jsonResponse(400, "text is required"))
             else
               // Each provider owns its settings block; unused blocks persist

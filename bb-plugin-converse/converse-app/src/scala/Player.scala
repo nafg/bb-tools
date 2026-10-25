@@ -108,7 +108,9 @@ final class Player(
   /** The thread whose text is playing, or null when nothing is. */
   def speakingThread: String = currentThread
 
-  /** The chunk of the reply being spoken right now, or null when nothing is. */
+  /** The chunk of the reply being spoken right now, without stress marks, or
+    * null when nothing is.
+    */
   def speakingSentence: String = currentSentence
 
   /** The concrete persisted voice used by the current response, or null when
@@ -232,12 +234,12 @@ final class Player(
         if generation != gen then Future.unit
         else
           val p         = Promise[Unit]()
-          val utterance = js.Dynamic.newInstance(js.Dynamic.global.SpeechSynthesisUtterance)(chunk.text)
+          val utterance = js.Dynamic.newInstance(js.Dynamic.global.SpeechSynthesisUtterance)(chunk.withoutStressMarks)
           if voice != null then
             val voices = js.Dynamic.global.speechSynthesis.getVoices().asInstanceOf[js.Array[js.Dynamic]]
             voices.find(v => v.voiceURI.asInstanceOf[String] == voice || v.name.asInstanceOf[String] == voice)
               .foreach(v => utterance.voice = v)
-          currentSentence = chunk.text
+          currentSentence = chunk.withoutStressMarks
           utterance.onstart = js.Any.fromFunction1((_: js.Any) => markPlaying(gen))
           utterance.onend = js.Any.fromFunction1((_: js.Any) => { val _ = p.success(()) })
           utterance.onerror = js.Any.fromFunction1((_: js.Any) => { val _ = p.success(()) })
@@ -360,7 +362,8 @@ final class Player(
 
   /** Plays the chunks in order. Each chunk's synthesis is requested as soon
     * as the previous chunk's audio has all arrived, so it is generated while
-    * that one plays.
+    * that one plays. A chunk goes with its stress marks; the route drops them
+    * for a voice that cannot stress a word.
     */
   private def speakServer(gen: Int, chunks: List[SpeechChunk], voice: String): Future[Unit] =
     val ctl = js.Dynamic.newInstance(js.Dynamic.global.AbortController)()
@@ -379,7 +382,7 @@ final class Player(
             if i + 1 < all.length then
               audio.arrived.transformWith(_ => if generation == gen then request(i + 1) else Future.never)
             else null
-          currentSentence = all(i).text
+          currentSentence = all(i).withoutStressMarks
           val played = audio match
             case ChunkAudio.Streamed(speech) => playStreamed(gen, speech)
             case ChunkAudio.Whole(blob)      => playBlob(gen, blob)
