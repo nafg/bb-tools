@@ -223,14 +223,18 @@ const TTS_PROVIDERS = [
   { id: "browser", label: "Browser speech" },
   { id: "pocket-tts", label: "Pocket TTS" },
   { id: "qwen3-tts", label: "Qwen3-TTS" },
+  { id: "chatterbox-nano", label: "Chatterbox Nano" },
   { id: "kokoro", label: "Kokoro" },
   { id: "openai-compatible", label: "OpenAI-compatible TTS" },
 ] as const;
 
 async function playVoicePreview(provider: string, voice: string): Promise<void> {
-  // A Qwen3-TTS voice is a description, which would read oddly in the sentence.
+  // A Qwen3-TTS voice is a description and a Chatterbox voice a clip's path,
+  // which would read oddly in the sentence.
   const previewText =
-    provider === "qwen3-tts" ? "This is how this thread sounds." : `This thread uses the ${voice.replaceAll("_", " ")} voice.`;
+    provider === "qwen3-tts" || provider === "chatterbox-nano"
+      ? "This is how this thread sounds."
+      : `This thread uses the ${voice.replaceAll("_", " ")} voice.`;
   if (provider === "browser") {
     const utterance = new SpeechSynthesisUtterance(previewText);
     const selected = speechSynthesis.getVoices().find((item) => item.voiceURI === voice || item.name === voice);
@@ -337,6 +341,13 @@ function TtsProviderCard({
             writes between *asterisks* is stressed.
           </p>
         )}
+        {provider === "chatterbox-nano" && (
+          <p className="text-xs text-muted-foreground">
+            Converse starts and stops Chatterbox Nano automatically; it runs on the CPU and leaves the GPU alone.
+            Besides its built-in voice, a voice is the path on this host of a WAV clip, over five seconds long,
+            of the voice to clone.
+          </p>
+        )}
         {!state ? (
           <div className="text-xs text-muted-foreground">Loading voices…</div>
         ) : (
@@ -361,7 +372,7 @@ function TtsProviderCard({
       )}
       {provider !== "pocket-tts" && provider !== "browser" && (
         <div className="flex gap-2">
-          <input className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-sm" value={newVoice} placeholder={provider === "qwen3-tts" ? "Describe a voice to add" : "Add a provider voice ID"} onChange={(event) => setNewVoice(event.target.value)} />
+          <input className="min-w-0 flex-1 rounded border bg-background px-2 py-1 text-sm" value={newVoice} placeholder={provider === "qwen3-tts" ? "Describe a voice to add" : provider === "chatterbox-nano" ? "Path of a voice clip to add" : "Add a provider voice ID"} onChange={(event) => setNewVoice(event.target.value)} />
           <button type="button" className="rounded border px-3 text-sm" onClick={() => {
             const id = newVoice.trim();
             if (id && !state.voices.some((voice) => voice.id === id)) setState({ ...state, voices: [...state.voices, { id, enabled: true }] });

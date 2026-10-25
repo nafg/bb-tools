@@ -146,10 +146,29 @@ private val QwenService = ManagedService(
   versionCheck = Some(ServiceVersionCheck(s"http://127.0.0.1:${QwenServer.Port}/version", QwenServer.Version))
 )
 
+/** The speech synthesis provider that runs on the CPU, for when the GPU is
+  * better left alone.
+  */
+private val ChatterboxNanoProvider = "chatterbox-nano"
+
+private val ChatterboxService = ManagedService(
+  key = "chatterbox",
+  label = "Chatterbox Nano",
+  probeUrl = s"http://127.0.0.1:${ChatterboxServer.Port}/tts",
+  startCommand = ChatterboxServer.startCommand,
+  // The first start installs PyTorch and downloads the model, about 1.5 GB.
+  readyWithinSeconds = 900,
+  idleMinutes = 15,
+  files = Map(ChatterboxServer.ScriptRelativePath -> ChatterboxServer.Script),
+  versionCheck =
+    Some(ServiceVersionCheck(s"http://127.0.0.1:${ChatterboxServer.Port}/version", ChatterboxServer.Version))
+)
+
 /** Every managed service, in a form that identifies it, for stopping idle
   * ones.
   */
-private val ManagedServices = List(PocketService, QwenService, parakeetService(ParakeetDevice.GpuIfFree))
+private val ManagedServices =
+  List(PocketService, QwenService, ChatterboxService, parakeetService(ParakeetDevice.GpuIfFree))
 
 private def ttsConfigKey(provider: String): String = s"tts.config.$provider"
 
@@ -530,7 +549,7 @@ def plugin(bb: BbApi): Unit =
       "ttsProvider" -> js.Dynamic.literal(
         "type"    -> "select",
         "label"   -> "TEXT-TO-SPEECH PROVIDER",
-        "options" -> js.Array("browser", "pocket-tts", QwenTtsProvider, "kokoro", "openai-compatible"),
+        "options" -> js.Array("browser", "pocket-tts", QwenTtsProvider, ChatterboxNanoProvider, "kokoro", "openai-compatible"),
         "default" -> "browser"
       ),
       "sttProvider" -> js.Dynamic.literal(
@@ -604,6 +623,11 @@ def plugin(bb: BbApi): Unit =
     case "pocket-tts" => js.Dynamic.literal("defaultVoice" -> "alba")
     case QwenTtsProvider =>
       js.Dynamic.literal("defaultVoice" -> QwenServer.DefaultVoice, "voices" -> js.Array(QwenServer.DefaultVoice))
+    case ChatterboxNanoProvider =>
+      js.Dynamic.literal(
+        "defaultVoice" -> ChatterboxServer.BuiltInVoice,
+        "voices"       -> js.Array(ChatterboxServer.BuiltInVoice)
+      )
     case "kokoro" =>
       js.Dynamic.literal(
         "url"          -> "http://127.0.0.1:8880/v1/audio/speech",
@@ -1803,9 +1827,10 @@ def plugin(bb: BbApi): Unit =
         // transcription and spoken reply are not delayed by service startup.
         settings.get().toFuture.foreach { s =>
           val speechService = str(s.ttsProvider) match
-            case "pocket-tts"      => Some(ensureService(PocketService))
-            case QwenTtsProvider   => Some(ensureQwenTts(s))
-            case _                 => None
+            case "pocket-tts"            => Some(ensureService(PocketService))
+            case QwenTtsProvider         => Some(ensureQwenTts(s))
+            case ChatterboxNanoProvider  => Some(ensureService(ChatterboxService))
+            case _                       => None
           speechService.foreach(_.foreach {
             case Left(message) => bb.log.warn(s"TTS warm-up: $message")
             case Right(_)      => ()
@@ -2105,7 +2130,9 @@ def plugin(bb: BbApi): Unit =
       },
       "updateVoiceSettings" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         val provider = str(input.provider)
-        if !Set("browser", "pocket-tts", QwenTtsProvider, "kokoro", "openai-compatible").contains(provider) then
+        if !Set("browser", "pocket-tts", QwenTtsProvider, ChatterboxNanoProvider, "kokoro", "openai-compatible")
+            .contains(provider)
+        then
           rejected("unknown TTS provider")
         else
           (for
@@ -2346,6 +2373,21 @@ def plugin(bb: BbApi): Unit =
                     val payload = js.Dynamic.literal(
                       "text"  -> markedText,
                       "voice" -> (if voice.nonEmpty then voice else QwenServer.DefaultVoice)
+                    )
+                    (
+                      url,
+                      js.Dynamic.literal(
+                        "method"  -> "POST",
+                        "headers" -> js.Dynamic.literal("content-type" -> "application/json"),
+                        "body"    -> js.JSON.stringify(payload)
+                      )
+                    )
+                  })
+                case ChatterboxNanoProvider =>
+                  ensureService(ChatterboxService).map(_.map { url =>
+                    val payload = js.Dynamic.literal(
+                      "text"  -> text,
+                      "voice" -> (if voice.nonEmpty then voice else ChatterboxServer.BuiltInVoice)
                     )
                     (
                       url,

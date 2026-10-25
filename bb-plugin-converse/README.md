@@ -41,7 +41,9 @@ bb plugin install .    # from this directory
   (a local Qwen3-TTS 1.7B VoiceDesign the plugin starts and stops: voices are
   written descriptions, and a word the agent puts between *asterisks* is
   stressed; it takes about 2.3 GB of the GPU, so Parakeet runs on the CPU
-  while it is the provider); or an OpenAI-compatible `/v1/audio/speech`
+  while it is the provider); `chatterbox-nano` (a local Chatterbox Nano the
+  plugin starts and stops, on the CPU: besides its built-in voice, a voice is
+  the path of a WAV clip of a voice to clone); or an OpenAI-compatible `/v1/audio/speech`
   endpoint (`kokoro`, e.g. a local Kokoro at
   `http://127.0.0.1:8880/v1/audio/speech`, or `openai-compatible` with an API
   key).
