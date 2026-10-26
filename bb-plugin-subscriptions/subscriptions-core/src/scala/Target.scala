@@ -32,8 +32,8 @@ enum Target:
   case Tags(repo: Repo)
   /** A Maven Central artifact: one version becoming resolvable, or with no version, each new version. */
   case MavenArtifact(group: String, artifact: String, version: Option[String])
-  /** Another bb thread being archived or deleted. Written `@thread:<id>/archived`: the event is named, since other
-    * things about a thread (its messages, say) could be watched too.
+  /** Another bb thread being archived or deleted. Written `bb:thread/<id>/archived`: bb object type, then id, then
+    * the event, since other bb objects, and other things about a thread, could be watched too.
     */
   case ThreadArchived(threadId: String)
 
@@ -42,7 +42,7 @@ enum Target:
     case Branch(repo, name) => s"${repo.url}${repo.pagePrefix}/tree/$name"
     case Tags(repo)         => s"${repo.url}${repo.pagePrefix}/tags"
     case MavenArtifact(g, a, v) => s"https://central.sonatype.com/artifact/$g/$a" + v.fold("")("/" + _)
-    case ThreadArchived(id)     => s"@thread:$id/archived"
+    case ThreadArchived(id)     => s"bb:thread/$id/archived"
 
   def label: String = this match
     case Change(cr)         => cr.label
@@ -60,7 +60,7 @@ object Target:
   private val GitHubTags = """^/([^/]+/[^/]+)/tags$""".r
   private val GitLabTags = """^/(.+?)/-/tags$""".r
 
-  private val ThreadRef   = """^(?:@thread:)?(thr_[a-z0-9]+)(?:/([a-z]+))?$""".r
+  private val BbThread    = """^bb:thread/(thr_[a-z0-9]+)(?:/([a-z]+))?$""".r
   /** `maven:group:artifact[:version]`. The scheme keeps coordinates from being read as some other URL. */
   private val Coordinates = """^maven:([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)(?::([A-Za-z0-9_.+-]+))?$""".r
   private val BareCoords  = """^([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)(?::([A-Za-z0-9_.+-]+))?$""".r
@@ -72,7 +72,7 @@ object Target:
   val supported =
     "a pull request or merge request URL, a branch URL (…/tree/<branch>), a repository's tags URL (…/tags), or a " +
       "Maven Central artifact as maven:group:artifact[:version] or its central.sonatype.com, repo1.maven.org or " +
-      "mvnrepository.com URL, or another bb thread being archived as @thread:thr_…/archived"
+      "mvnrepository.com URL, or another bb thread being archived as bb:thread/thr_…/archived"
 
   private def maven(group: String, artifact: String, version: String | Null): Target =
     MavenArtifact(group, artifact, Option(version).map(_.nn))
@@ -96,10 +96,8 @@ object Target:
     */
   def parse(url: String): Either[String, Target] =
     url.trim match
-      case ThreadRef(id, "archived") => Right(ThreadArchived(id))
-      case ThreadRef(id, null) =>
-        Left(s"say what to wait for in @thread:$id: @thread:$id/archived waits for it to be archived or deleted")
-      case ThreadRef(id, other) => Left(s"can't watch '$other' of @thread:$id; @thread:$id/archived is supported")
+      case BbThread(id, "archived") => Right(ThreadArchived(id))
+      case BbThread(id, _) => Left(s"bb:thread/$id/archived is the only supported thread event")
       case Coordinates(g, a, v) => Right(maven(g, a, v))
       case BareCoords(g, a, v) =>
         val coords = s"$g:$a" + Option(v).fold("")(":" + _)

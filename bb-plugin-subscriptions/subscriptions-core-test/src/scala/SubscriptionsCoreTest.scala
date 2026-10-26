@@ -53,12 +53,12 @@ class SubscriptionsCoreTest extends munit.FunSuite:
       .foreach(st => assertEquals(WatchState.decode(st.encode), Right(st)))
 
   test("another thread can be watched until it is archived or deleted"):
-    assertEquals(Target.parse("@thread:thr_abc123/archived"), Right(Target.ThreadArchived("thr_abc123")))
-    assertEquals(Target.parse("thr_abc123/archived"), Right(Target.ThreadArchived("thr_abc123")))
+    assertEquals(Target.parse("bb:thread/thr_abc123/archived"), Right(Target.ThreadArchived("thr_abc123")))
     assertEquals(Target.parse(Target.ThreadArchived("thr_x1").url), Right(Target.ThreadArchived("thr_x1")))
-    // A bare thread doesn't say what to wait for, so it's refused rather than guessed.
-    assert(Target.parse("@thread:thr_abc123").left.exists(_.contains("/archived")))
-    assert(Target.parse("@thread:thr_abc123/messages").isLeft)
+    // A thread without an event doesn't say what to wait for, so it's refused rather than guessed.
+    assert(Target.parse("bb:thread/thr_abc123").isLeft)
+    assert(Target.parse("bb:thread/thr_abc123/messages").isLeft)
+    assert(Target.parse("@thread:thr_abc123/archived").isLeft)
     val open = WatchState.ThreadStatus(ThreadLife.Open)
     assertEquals(WatchState.decode(open.encode), Right(open))
     assertEquals(Watch.between(open, Observed.ThreadStatus(ThreadLife.Open, "T", None)), Nil)

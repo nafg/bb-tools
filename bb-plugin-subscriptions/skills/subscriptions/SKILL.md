@@ -16,7 +16,7 @@ this.
 | A repository's tags | `…/tags` (GitLab `…/-/tags`) | each new tag |
 | A Maven Central version | `maven:group:artifact:version`, or its central.sonatype.com, repo1.maven.org or mvnrepository.com URL | when that version can be resolved; then the subscription ends |
 | A Maven Central artifact | `maven:group:artifact`, or its URL without a version | each new version |
-| Another bb thread being archived | `@thread:thr_…/archived` | when it is archived or deleted, with its title and last reply; then the subscription ends |
+| Another bb thread being archived | `bb:thread/thr_…/archived` | when it is archived or deleted, with its title and last reply; then the subscription ends |
 
 To wait on work another thread is doing, subscribe to that thread, or, if the wait is for one piece of its work,
 to a sub-thread doing that piece. Combined with parking the waiting thread in the sidebar, the message brings it
