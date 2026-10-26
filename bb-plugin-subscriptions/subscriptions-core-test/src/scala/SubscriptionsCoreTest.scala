@@ -50,9 +50,12 @@ class SubscriptionsCoreTest extends munit.FunSuite:
       .foreach(st => assertEquals(WatchState.decode(st.encode), Right(st)))
 
   test("another thread can be watched until it is archived or deleted"):
-    assertEquals(Target.parse("thr_abc123"), Right(Target.Thread("thr_abc123")))
-    assertEquals(Target.parse("@thread:thr_abc123"), Right(Target.Thread("thr_abc123")))
-    assertEquals(Target.parse(Target.Thread("thr_x1").url), Right(Target.Thread("thr_x1")))
+    assertEquals(Target.parse("@thread:thr_abc123/archived"), Right(Target.ThreadArchived("thr_abc123")))
+    assertEquals(Target.parse("thr_abc123/archived"), Right(Target.ThreadArchived("thr_abc123")))
+    assertEquals(Target.parse(Target.ThreadArchived("thr_x1").url), Right(Target.ThreadArchived("thr_x1")))
+    // A bare thread doesn't say what to wait for, so it's refused rather than guessed.
+    assert(Target.parse("@thread:thr_abc123").left.exists(_.contains("/archived")))
+    assert(Target.parse("@thread:thr_abc123/messages").isLeft)
     val open = WatchState.ThreadStatus(ThreadLife.Open)
     assertEquals(WatchState.decode(open.encode), Right(open))
     assertEquals(Watch.between(open, Observed.ThreadStatus(ThreadLife.Open, "T", None)), Nil)
@@ -60,7 +63,7 @@ class SubscriptionsCoreTest extends munit.FunSuite:
     assertEquals(Watch.between(open, archived), List(Event.ThreadFinished(ThreadLife.Archived, "Port to Slick 4", Some("Done; MR !44 merged."))))
     assert(Watch.isFinished(archived))
     assertEquals(
-      Watch.describe(Target.Thread("thr_x1"), Watch.between(open, archived).head),
+      Watch.describe(Target.ThreadArchived("thr_x1"), Watch.between(open, archived).head),
       "Thread \"Port to Slick 4\" (@thread:thr_x1) was archived.\nIts last reply:\n  Done; MR !44 merged."
     )
 

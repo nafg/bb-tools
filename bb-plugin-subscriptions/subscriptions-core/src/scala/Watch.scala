@@ -275,7 +275,7 @@ object Watch:
             s"$moved $count new $noun: ${shown.mkString("; ")}$more."
       case (_, Event.MavenPublished) =>
         s"${target.label} is now on Maven Central and can be resolved."
-      case (Target.Thread(id), Event.ThreadFinished(life, title, reply)) =>
+      case (Target.ThreadArchived(id), Event.ThreadFinished(life, title, reply)) =>
         val how   = if life == ThreadLife.Deleted then "was deleted" else "was archived"
         val last  = reply.map(excerpt).filter(_.nonEmpty)
         val quote = last.fold("")(r => "\nIts last reply:\n" + r.linesIterator.map("  " + _).mkString("\n"))
@@ -320,7 +320,7 @@ object Watch:
     case Target.Tags(_)      => "This thread will get a message each time a new tag appears."
     case Target.MavenArtifact(_, _, Some(_)) =>
       "This thread will get a message when the version can be resolved from Maven Central; then the subscription ends."
-    case Target.Thread(_) =>
+    case Target.ThreadArchived(_) =>
       "This thread will get a message, with that thread's last reply, when it is archived or deleted; then the " +
         "subscription ends."
     case Target.MavenArtifact(_, _, None) =>

@@ -17,7 +17,7 @@ final class Sources(bb: BbApi):
   private def present(v: js.Dynamic): Option[js.Dynamic] = if js.isUndefined(v) || v == null then None else Some(v)
 
   def observe(target: Target, before: Option[WatchState], force: Boolean): Future[Observed] = target match
-    case Target.Thread(id) =>
+    case Target.ThreadArchived(id) =>
       bb.sdk.threads.get(js.Dynamic.literal("threadId" -> id)).toFuture.flatMap { t =>
         val life =
           if present(t.deletedAt).isDefined then ThreadLife.Deleted
@@ -179,7 +179,7 @@ final class Actions(bb: BbApi, store: Store, sources: Sources):
   def add(threadId: String, url: String): Future[Either[String, String]] =
     Target.parse(url) match
       case Left(e) => Future.successful(Left(e))
-      case Right(Target.Thread(id)) if id == threadId => Future.successful(Left("A thread can't wait for itself."))
+      case Right(Target.ThreadArchived(id)) if id == threadId => Future.successful(Left("A thread can't wait for itself."))
       case Right(target) =>
         store.find(threadId, target) match
           case Some(existing) =>
@@ -235,8 +235,8 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
           "review or comment, with its text; the subscription ends when it is merged or closed. A branch (…/tree/<branch>): " +
           "a message with the new commits each time it moves. A repository's tags (…/tags): a message for each " +
           "new tag. A Maven Central artifact (group:artifact:version or its URL): a message when that version can be " +
-          "resolved; without a version, each new version. Another bb thread (thr_… or @thread:thr_…): a message " +
-          "with its last reply when it is archived or deleted. bb checks every minute. If checking fails, this thread is told instead of hearing nothing."),
+          "resolved; without a version, each new version. Another bb thread being archived (@thread:thr_…/archived): " +
+          "a message with its last reply when it is archived or deleted. bb checks every minute. If checking fails, this thread is told instead of hearing nothing."),
       "instructions" ->
         ("To wait for a pull or merge request to merge, close, finish CI or get reviews and comments, for new " +
           "commits on a branch, for a Maven Central release, for another thread to finish, or for " +
@@ -326,7 +326,8 @@ private val Usage =
   """Usage:
     |  bb subscriptions add <url> [--thread <thread-id>]
     |    <url>: a PR or MR, a branch (…/tree/<branch>), a repository's tags (…/tags), or a Maven Central
-    |           artifact as group:artifact[:version] or its URL, or another thread (thr_… or @thread:thr_…)
+    |           artifact as group:artifact[:version] or its URL, or another thread being archived
+    |           (@thread:thr_…/archived)
     |  bb subscriptions list [--thread <thread-id> | --all]
     |  bb subscriptions who <url>
     |  bb subscriptions cancel <id>""".stripMargin

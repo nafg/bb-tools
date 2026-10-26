@@ -104,5 +104,7 @@ object Store:
     "UPDATE subscriptions SET state = 'change ' || lifecycle || ' ' || ci || ' ' || head_sha",
     "ALTER TABLE subscriptions DROP COLUMN lifecycle",
     "ALTER TABLE subscriptions DROP COLUMN ci",
-    "ALTER TABLE subscriptions DROP COLUMN head_sha"
+    "ALTER TABLE subscriptions DROP COLUMN head_sha",
+    // Thread targets name their event, so watching other things about a thread stays possible.
+    "UPDATE subscriptions SET url = url || '/archived' WHERE url LIKE '@thread:%' AND url NOT LIKE '%/%'"
   )
