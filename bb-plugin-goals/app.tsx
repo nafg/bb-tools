@@ -109,6 +109,9 @@ interface GoalInfo {
   light: string;
   dark: string;
 }
+// Hues are categorical slots 1 to 5 and 7 of the dataviz skill's palette, stepped separately for light and dark surfaces, and passed its
+// validator in both modes. In light mode aqua, yellow, and magenta fall under 3:1 contrast, which the visible text labels and the table cover.
+// Rerun the validator before changing any hue.
 const GOALS: readonly GoalInfo[] = [
   { letter: "B", title: "Billable client work", icon: "Briefcase", light: "#2a78d6", dark: "#3987e5" },
   { letter: "C", title: "Client work, not billable", icon: "Handshake", light: "#eb6834", dark: "#d95926" },
@@ -727,7 +730,8 @@ function LiveMarker({ state, x, y }: { state: LiveState; x: number; y: number })
 }
 
 /** The Goals page: bars and the map on the left, and, once a thread is picked, that thread's chat on the right. The picked thread lives
- * in the route's subPath, so a reload keeps it. */
+ * in the route's subPath, so a reload keeps it. The page hosts its own `ThreadChat` because bb gives plugins no way to replace or focus a
+ * given pane: `toThread` with `split` keeps adding panes and only replaces at the pane cap, and plugins cannot run the pane commands. */
 function GoalsPage({ subPath }: PluginNavPanelProps) {
   const rpc = useRpc<GoalsRpc>();
   const navigate = useBbNavigate();

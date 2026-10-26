@@ -23,6 +23,8 @@ Five optional keys in the plugin's thread metadata namespace (`goals`):
 - `myMove` is what the user owes the thread, independent of unread. It clears
   by itself when the user next writes to the thread, unless it was set after
   that message.
+  The user sets it; nothing suggests it, because plugin SDK 0.6.49 lets a
+  plugin register an AI service but gives it no way to call a model.
 
 ## Surfaces
 
@@ -62,7 +64,8 @@ page says so and draws the tree unsized.
 - `goals-core-test/`: munit tests for the above (JVM; `scripts/test-js.sh`
   at the repo root also runs them under Scala.js).
 - `goals/`: plugin backend (Scala.js): rpc, the agent tool, the CLI, and
-  the activity-recorder calls.
+  the activity-recorder calls. It depends on the recorder's `activity-core`
+  project for parsing `intervals`, so the recorder's branch must land first.
 - `goals-app/`: frontend core (Scala.js): `layoutOverview`, the treemap
   layout consumed by `app.tsx`.
 - `app.tsx`: the React surfaces.

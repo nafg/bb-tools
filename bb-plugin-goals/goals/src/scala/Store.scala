@@ -155,6 +155,10 @@ final class Store(bb: BbApi)(using ExecutionContext):
           .nextOption()
       }
 
+  /** The same rule as the activity recorder's `isUserMessage` (initiated by the user, no sender thread, no "[bb " prefix); keep the two in
+    * step, since a message one counts as the user's and the other does not would clear a my-move mark the recorder still shows as
+    * attention.
+    */
   private def isUserMessage(data: js.Dynamic): Boolean =
     Js.optStr(data.initiator).contains("user") && Js.optStr(data.senderThreadId).forall(_.isEmpty) && !messageText(data).startsWith("[bb ")
 
