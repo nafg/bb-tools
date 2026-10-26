@@ -13,6 +13,12 @@ enum Observed:
   case MavenVersion(available: Boolean)
   /** Every version Maven Central lists for an artifact. */
   case MavenVersions(versions: List[String])
+  /** Another thread's state, with its title and last reply for the message that reports it finishing. */
+  case ThreadStatus(life: ThreadLife, title: String, lastReply: Option[String])
+
+/** Whether a bb thread is still open. */
+enum ThreadLife:
+  case Open, Archived, Deleted
 
 /** What the plugin remembers of a subscription's target between checks. */
 enum WatchState:
@@ -22,6 +28,7 @@ enum WatchState:
   case Tags(names: List[String])
   case MavenVersion(available: Boolean)
   case MavenVersions(versions: List[String])
+  case ThreadStatus(life: ThreadLife)
 
   /** A one-line form for storage. Shas, timestamps, enum names, item keys and git ref names contain no spaces. */
   def encode: String = this match
@@ -32,6 +39,7 @@ enum WatchState:
     case Tags(names) => ("tags" :: names).mkString(" ")
     case MavenVersion(available) => s"maven-version ${if available then "available" else "pending"}"
     case MavenVersions(versions) => ("maven-versions" :: versions).mkString(" ")
+    case ThreadStatus(life)      => s"thread $life"
 
 object WatchState:
   def decode(s: String): Either[String, WatchState] =
@@ -53,6 +61,8 @@ object WatchState:
       case "maven-version" :: "available" :: Nil => Right(MavenVersion(true))
       case "maven-version" :: "pending" :: Nil   => Right(MavenVersion(false))
       case "maven-versions" :: versions          => Right(MavenVersions(versions))
+      case "thread" :: life :: Nil =>
+        scala.util.Try(ThreadStatus(ThreadLife.valueOf(life))).toEither.left.map(_.getMessage)
       case _                      => Left(s"unreadable stored state: $s")
 
 /** Something about a subscribed target that its thread should hear about. */
@@ -72,6 +82,8 @@ enum Event:
   /** A watched Maven Central version became resolvable. */
   case MavenPublished
   case NewMavenVersions(versions: List[String])
+  /** A watched thread was archived or deleted. */
+  case ThreadFinished(life: ThreadLife, title: String, lastReply: Option[String])
 
 /** The commits a branch gained, as far as the forge could say: how many, and the subjects of the first few. */
 final case class CommitsSummary(count: Int, subjects: List[String])
@@ -107,6 +119,8 @@ object Watch:
       val added = a.filterNot(b.toSet)
       if added.nonEmpty then List(Event.NewTags(added)) else Nil
     case (WatchState.MavenVersion(false), Observed.MavenVersion(true)) => List(Event.MavenPublished)
+    case (WatchState.ThreadStatus(ThreadLife.Open), Observed.ThreadStatus(life, title, reply)) if life != ThreadLife.Open =>
+      List(Event.ThreadFinished(life, title, reply))
     case (WatchState.MavenVersions(b), Observed.MavenVersions(a)) =>
       val added = a.filterNot(b.toSet)
       if added.nonEmpty then List(Event.NewMavenVersions(added)) else Nil
@@ -134,6 +148,7 @@ object Watch:
     case Observed.Tags(names)            => WatchState.Tags(names)
     case Observed.MavenVersion(a)        => WatchState.MavenVersion(a)
     case Observed.MavenVersions(versions) => WatchState.MavenVersions(versions)
+    case Observed.ThreadStatus(life, _, _) => WatchState.ThreadStatus(life)
 
   private def changeEvents(before: Snapshot, after: Snapshot, ciBasis: String): List[Event] =
     val lifecycle = (before.lifecycle, after.lifecycle) match
@@ -158,6 +173,7 @@ object Watch:
   def isFinished(o: Observed): Boolean = o match
     case Observed.Change(snapshot, _, _, _) => snapshot.lifecycle != Lifecycle.Open
     case Observed.MavenVersion(available) => available
+    case Observed.ThreadStatus(life, _, _) => life != ThreadLife.Open
     case _                               => false
 
   private val MaxSubjects    = 10
@@ -259,6 +275,11 @@ object Watch:
             s"$moved $count new $noun: ${shown.mkString("; ")}$more."
       case (_, Event.MavenPublished) =>
         s"${target.label} is now on Maven Central and can be resolved."
+      case (Target.Thread(id), Event.ThreadFinished(life, title, reply)) =>
+        val how   = if life == ThreadLife.Deleted then "was deleted" else "was archived"
+        val last  = reply.map(excerpt).filter(_.nonEmpty)
+        val quote = last.fold("")(r => "\nIts last reply:\n" + r.linesIterator.map("  " + _).mkString("\n"))
+        s"Thread \"$title\" (@thread:$id) $how.$quote"
       case (Target.MavenArtifact(g, a, _), Event.NewMavenVersions(versions)) =>
         val noun = if versions.size == 1 then "version" else "versions"
         s"New $noun of $g:$a on Maven Central: ${versions.mkString(", ")}."
@@ -286,6 +307,7 @@ object Watch:
       if names.isEmpty then "no tags" else s"newest tags ${names.take(3).mkString(", ")}"
     case WatchState.MavenVersion(available) =>
       if available then "available on Maven Central" else "not on Maven Central yet"
+    case WatchState.ThreadStatus(life) => life.toString.toLowerCase
     case WatchState.MavenVersions(versions) =>
       if versions.isEmpty then "no versions on Maven Central" else s"latest versions ${versions.takeRight(3).reverse.mkString(", ")}"
 
@@ -298,5 +320,8 @@ object Watch:
     case Target.Tags(_)      => "This thread will get a message each time a new tag appears."
     case Target.MavenArtifact(_, _, Some(_)) =>
       "This thread will get a message when the version can be resolved from Maven Central; then the subscription ends."
+    case Target.Thread(_) =>
+      "This thread will get a message, with that thread's last reply, when it is archived or deleted; then the " +
+        "subscription ends."
     case Target.MavenArtifact(_, _, None) =>
       "This thread will get a message each time Maven Central lists a new version."

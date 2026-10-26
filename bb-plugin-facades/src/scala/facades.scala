@@ -143,6 +143,8 @@ trait BbThreadsArea extends js.Object:
   def send(args: js.Any): js.Promise[js.Dynamic]      = js.native
   def spawn(args: js.Any): js.Promise[js.Dynamic]     = js.native
   def timeline(args: js.Any): js.Promise[js.Dynamic]  = js.native
+  /** args: { threadId }; resolves { output }: the thread's last assistant text, or null. */
+  def output(args: js.Any): js.Promise[js.Dynamic]    = js.native
   def storageLocation(args: js.Any): js.Promise[js.Dynamic] = js.native
   def unarchive(args: js.Any): js.Promise[js.Dynamic] = js.native
 

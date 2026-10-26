@@ -1,6 +1,6 @@
 ---
 name: subscriptions
-description: Wait for a GitHub or GitLab pull/merge request to merge, close or finish CI, for new commits on a branch, for a new tag, or for a version to become resolvable on Maven Central, without polling. Use whenever a thread needs to know when one of those happens.
+description: Wait for a GitHub or GitLab pull/merge request to merge, close or finish CI, for new commits on a branch, for a new tag, for a version to become resolvable on Maven Central, or for another bb thread to be archived, without polling. Use whenever a thread needs to know when one of those happens.
 ---
 
 # Subscriptions
@@ -16,6 +16,11 @@ this.
 | A repository's tags | `…/tags` (GitLab `…/-/tags`) | each new tag |
 | A Maven Central version | `group:artifact:version`, or its central.sonatype.com, repo1.maven.org or mvnrepository.com URL | when that version can be resolved; then the subscription ends |
 | A Maven Central artifact | `group:artifact`, or its URL without a version | each new version |
+| Another bb thread | `thr_…` or `@thread:thr_…` | when it is archived or deleted, with its title and last reply; then the subscription ends |
+
+To wait on work another thread is doing, subscribe to that thread, or, if the wait is for one piece of its work,
+to a sub-thread doing that piece. Combined with parking the waiting thread in the sidebar, the message brings it
+back when the other thread finishes.
 
 For Maven Central, a published version can take a while to become resolvable after the publish job finishes. bb
 checks the repository itself (the POM file, or `maven-metadata.xml`), bypassing its cache, rather than the search

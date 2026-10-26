@@ -12,8 +12,31 @@ given ExecutionContext = ExecutionContext.parasitic
 
 private def messagePrefix(s: Subscription): String = s"[bb subscription #${s.id}]"
 
+/** Reads any target: bb threads through bb itself, everything else through [[Forges]]. */
+final class Sources(bb: BbApi):
+  private def present(v: js.Dynamic): Option[js.Dynamic] = if js.isUndefined(v) || v == null then None else Some(v)
+
+  def observe(target: Target, before: Option[WatchState], force: Boolean): Future[Observed] = target match
+    case Target.Thread(id) =>
+      bb.sdk.threads.get(js.Dynamic.literal("threadId" -> id)).toFuture.flatMap { t =>
+        val life =
+          if present(t.deletedAt).isDefined then ThreadLife.Deleted
+          else if present(t.archivedAt).isDefined then ThreadLife.Archived
+          else ThreadLife.Open
+        val title = Seq(t.title, t.titleFallback).flatMap(present).map(_.asInstanceOf[String]).find(_.nonEmpty)
+          .getOrElse("(untitled)")
+        // The last reply is read only once the thread has finished, since only that message quotes it.
+        val reply =
+          if life == ThreadLife.Open then Future.successful(None)
+          else
+            bb.sdk.threads.output(js.Dynamic.literal("threadId" -> id)).toFuture
+              .map(o => present(o.output).map(_.asInstanceOf[String]))
+        reply.map(Observed.ThreadStatus(life, title, _))
+      }
+    case _ => Forges.observe(target, before, force)
+
 /** Checks every active subscription and tells each thread what changed since it last heard. */
-final class Poller(bb: BbApi, store: Store):
+final class Poller(bb: BbApi, store: Store, sources: Sources):
   private var running = false
   private var runs    = 0
 
@@ -66,9 +89,9 @@ final class Poller(bb: BbApi, store: Store):
     * doesn't repeat.
     */
   private def observeWithRetry(s: Subscription, force: Boolean): Future[Observed] =
-    Forges.observe(s.target, Some(s.lastSeen), force).recoverWith { case first =>
+    sources.observe(s.target, Some(s.lastSeen), force).recoverWith { case first =>
       bb.log.warn(s"subscription #${s.id}: check failed, retrying once: ${first.getMessage}")
-      delay(RetryDelayMs).flatMap(_ => Forges.observe(s.target, Some(s.lastSeen), force))
+      delay(RetryDelayMs).flatMap(_ => sources.observe(s.target, Some(s.lastSeen), force))
     }
 
   /** An archived thread's subscriptions end. The archive event normally ends them; this catches a thread archived
@@ -125,7 +148,7 @@ final class Poller(bb: BbApi, store: Store):
     announce.map(_ => store.recordCheckError(s.id, error))
 
 /** The actions the agent tools and the CLI share. Each returns the text to show the caller. */
-final class Actions(bb: BbApi, store: Store):
+final class Actions(bb: BbApi, store: Store, sources: Sources):
   private def threadTitle(threadId: String): Future[String] =
     bb.sdk.threads.get(js.Dynamic.literal("threadId" -> threadId)).toFuture
       .map { t =>
@@ -156,6 +179,7 @@ final class Actions(bb: BbApi, store: Store):
   def add(threadId: String, url: String): Future[Either[String, String]] =
     Target.parse(url) match
       case Left(e) => Future.successful(Left(e))
+      case Right(Target.Thread(id)) if id == threadId => Future.successful(Left("A thread can't wait for itself."))
       case Right(target) =>
         store.find(threadId, target) match
           case Some(existing) =>
@@ -163,7 +187,7 @@ final class Actions(bb: BbApi, store: Store):
               Right(s"Already subscribed as #${existing.id}. Last known: ${Watch.describe(existing.lastSeen)}.")
             )
           case None =>
-            Forges.observe(target, None, force = true).map { observed =>
+            sources.observe(target, None, force = true).map { observed =>
               val now = Watch.remember(None, observed)
               if Watch.isFinished(observed) then
                 Right(s"${target.label} is already ${Watch.describe(now)}. Nothing to wait for, so no subscription was made.")
@@ -211,10 +235,11 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
           "review or comment, with its text; the subscription ends when it is merged or closed. A branch (…/tree/<branch>): " +
           "a message with the new commits each time it moves. A repository's tags (…/tags): a message for each " +
           "new tag. A Maven Central artifact (group:artifact:version or its URL): a message when that version can be " +
-          "resolved; without a version, each new version. bb checks every minute. If checking fails, this thread is told instead of hearing nothing."),
+          "resolved; without a version, each new version. Another bb thread (thr_… or @thread:thr_…): a message " +
+          "with its last reply when it is archived or deleted. bb checks every minute. If checking fails, this thread is told instead of hearing nothing."),
       "instructions" ->
         ("To wait for a pull or merge request to merge, close, finish CI or get reviews and comments, for new " +
-          "commits on a branch, for a Maven Central release, or for " +
+          "commits on a branch, for a Maven Central release, for another thread to finish, or for " +
           "a new tag, call subscriptions_add instead of polling gh or glab in a loop, a background command or a " +
           "gitlab-watch. Then end your turn: a message arrives when something happens."),
       "presentation" -> js.Dynamic.literal(
@@ -301,7 +326,7 @@ private val Usage =
   """Usage:
     |  bb subscriptions add <url> [--thread <thread-id>]
     |    <url>: a PR or MR, a branch (…/tree/<branch>), a repository's tags (…/tags), or a Maven Central
-    |           artifact as group:artifact[:version] or its URL
+    |           artifact as group:artifact[:version] or its URL, or another thread (thr_… or @thread:thr_…)
     |  bb subscriptions list [--thread <thread-id> | --all]
     |  bb subscriptions who <url>
     |  bb subscriptions cancel <id>""".stripMargin
@@ -351,15 +376,16 @@ def plugin(bb: BbApi): Unit =
   val db = bb.storage.database()
   bb.storage.migrate(db, Store.migrations)
   val store   = Store(db)
-  val actions = Actions(bb, store)
-  val poller  = Poller(bb, store)
+  val sources = Sources(bb)
+  val actions = Actions(bb, store, sources)
+  val poller  = Poller(bb, store, sources)
 
   registerTools(bb, store, actions)
 
   bb.cli.register(
     js.Dynamic.literal(
       "name"    -> "subscriptions",
-      "summary" -> "Subscribe a thread to a PR, MR, branch, tags or Maven Central artifact; it is messaged when something changes",
+      "summary" -> "Subscribe a thread to a PR, MR, branch, tags, Maven Central artifact or another thread; it is messaged when something changes",
       "commands" -> js.Array(
         js.Dynamic.literal(
           "name"    -> "add",

@@ -49,6 +49,21 @@ class SubscriptionsCoreTest extends munit.FunSuite:
     List(WatchState.MavenVersion(true), WatchState.MavenVersion(false), WatchState.MavenVersions(List("1.0", "1.1")))
       .foreach(st => assertEquals(WatchState.decode(st.encode), Right(st)))
 
+  test("another thread can be watched until it is archived or deleted"):
+    assertEquals(Target.parse("thr_abc123"), Right(Target.Thread("thr_abc123")))
+    assertEquals(Target.parse("@thread:thr_abc123"), Right(Target.Thread("thr_abc123")))
+    assertEquals(Target.parse(Target.Thread("thr_x1").url), Right(Target.Thread("thr_x1")))
+    val open = WatchState.ThreadStatus(ThreadLife.Open)
+    assertEquals(WatchState.decode(open.encode), Right(open))
+    assertEquals(Watch.between(open, Observed.ThreadStatus(ThreadLife.Open, "T", None)), Nil)
+    val archived = Observed.ThreadStatus(ThreadLife.Archived, "Port to Slick 4", Some("Done; MR !44 merged."))
+    assertEquals(Watch.between(open, archived), List(Event.ThreadFinished(ThreadLife.Archived, "Port to Slick 4", Some("Done; MR !44 merged."))))
+    assert(Watch.isFinished(archived))
+    assertEquals(
+      Watch.describe(Target.Thread("thr_x1"), Watch.between(open, archived).head),
+      "Thread \"Port to Slick 4\" (@thread:thr_x1) was archived.\nIts last reply:\n  Done; MR !44 merged."
+    )
+
   test("rejects URLs it can't watch"):
     assert(Target.parse("https://github.com/slick/slick/issues/1").isLeft)
     assert(Target.parse("https://github.com/slick/slick").isLeft)

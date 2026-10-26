@@ -32,18 +32,22 @@ enum Target:
   case Tags(repo: Repo)
   /** A Maven Central artifact: one version becoming resolvable, or with no version, each new version. */
   case MavenArtifact(group: String, artifact: String, version: Option[String])
+  /** Another bb thread, finishing by being archived or deleted. */
+  case Thread(threadId: String)
 
   def url: String = this match
     case Change(cr)         => cr.url
     case Branch(repo, name) => s"${repo.url}${repo.pagePrefix}/tree/$name"
     case Tags(repo)         => s"${repo.url}${repo.pagePrefix}/tags"
     case MavenArtifact(g, a, v) => s"https://central.sonatype.com/artifact/$g/$a" + v.fold("")("/" + _)
+    case Thread(id)             => s"@thread:$id"
 
   def label: String = this match
     case Change(cr)         => cr.label
     case Branch(repo, name) => s"$name on ${repo.project}"
     case Tags(repo)         => s"tags of ${repo.project}"
     case MavenArtifact(g, a, v) => s"$g:$a" + v.fold("")(":" + _)
+    case Thread(id)             => s"thread @thread:$id"
 
 object Target:
   private val Url        = """^https?://([^/?#]+)(/[^?#]*)?(?:[?#].*)?$""".r
@@ -54,6 +58,7 @@ object Target:
   private val GitHubTags = """^/([^/]+/[^/]+)/tags$""".r
   private val GitLabTags = """^/(.+?)/-/tags$""".r
 
+  private val ThreadRef   = """^(?:@thread:)?(thr_[a-z0-9]+)$""".r
   private val Coordinates = """^([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)(?::([A-Za-z0-9_.+-]+))?$""".r
   private val Segment     = """[A-Za-z0-9_.+-]+"""
   /** central.sonatype.com and mvnrepository.com share this path shape. */
@@ -63,7 +68,7 @@ object Target:
   val supported =
     "a pull request or merge request URL, a branch URL (…/tree/<branch>), a repository's tags URL (…/tags), or a " +
       "Maven Central artifact as group:artifact[:version] or its central.sonatype.com, repo1.maven.org or " +
-      "mvnrepository.com URL"
+      "mvnrepository.com URL, or another bb thread as thr_… or @thread:thr_…"
 
   private def maven(group: String, artifact: String, version: String | Null): Target =
     MavenArtifact(group, artifact, Option(version).map(_.nn))
@@ -87,6 +92,7 @@ object Target:
     */
   def parse(url: String): Either[String, Target] =
     url.trim match
+      case ThreadRef(id)        => Right(Thread(id))
       case Coordinates(g, a, v) => Right(maven(g, a, v))
       case Url(host, rawPath) if host == "central.sonatype.com" || host == "mvnrepository.com" =>
         Option(rawPath).getOrElse("").stripSuffix("/") match

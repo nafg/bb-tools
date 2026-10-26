@@ -74,6 +74,8 @@ object Forges:
       case Target.Tags(repo)         => newestTags(repo).map(Observed.Tags(_))
       case Target.MavenArtifact(g, a, Some(v)) => MavenCentral.isAvailable(g, a, v).map(Observed.MavenVersion(_))
       case Target.MavenArtifact(g, a, None)    => MavenCentral.versions(g, a).map(Observed.MavenVersions(_))
+      case Target.Thread(_) =>
+        Future.failed(IllegalArgumentException("bb threads are read through bb, not a forge; see Sources"))
 
   /** Runs a paginated `gh api` call whose jq filter emits one JSON object per line. */
   private def ghLines(repo: Repo, path: String, jq: String)(using ExecutionContext): Future[List[js.Dynamic]] =
