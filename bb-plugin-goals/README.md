@@ -3,48 +3,69 @@
 See bb threads through the goals they serve. Each thread can carry a goal
 (B billable client work, C client work not billable, P product or future
 income, S sanity, M maintainer obligations, F fun), a value within that goal
-(1 biggest lever to 3), and the threads it waits on. The Goals page draws
-every open thread as nested boxes, grouped by goal and sized by attention time
-from the activity-recorder plugin.
+(1 biggest lever to 3), the threads it waits on, and what the user still owes
+it. The Goals page draws the threads active in a window, archived ones
+included, as nested boxes grouped by goal and sized by attention time from the
+activity-recorder plugin.
 
 ## What it stores
 
-The plugin keeps three optional keys in its thread plugin-metadata namespace
-(`goals`): `goal` (a letter), `value` (1 to 3), and `blockedBy` (thread ids).
-A thread without its own `goal` is read as having the nearest labeled
-ancestor's goal and value, the value always coming from the same thread as the
-goal. `blockedBy` never inherits; instead each open, labeled thread lends its
-goal and value to every thread it is waiting on, transitively, which raises
-the blocker's importance without changing what it stores.
+Five optional keys in the plugin's thread metadata namespace (`goals`):
+`goal` (a letter), `value` (1 to 3), `blockedBy` (thread ids), `myMove`
+(`quick`, `focus`, or `later`), and `myMoveAt` (when it was set).
+
+- A thread without its own `goal` is read as having the nearest labeled
+  ancestor's goal and value, the value always coming from the same thread as
+  the goal.
+- `blockedBy` never inherits. Each open, labeled thread lends its goal and
+  value to every thread it waits on, transitively and through closed threads,
+  which raises the blocker's importance without changing what it stores.
+- `myMove` is what the user owes the thread, independent of unread. It clears
+  by itself when the user next writes to the thread, unless it was set after
+  that message.
 
 ## Surfaces
 
-- A **Goal** control in the thread header: the current label, and a popover to
-  set goal, value, and the threads this one waits on.
-- **Goal** and **Goal value** entries in thread menus (bb's own thread list
-  and thread header menus).
-- A glyph on sidebar rows of labeled threads, in lists that draw plugin row
-  statuses.
-- The `goals_set_label` agent tool, so a label can be set by telling the agent.
-- `bb goals show | set | list | import` (see `skills/goals/SKILL.md`).
-- The **Goals** page: attention per goal as bars, then the nested-box map.
-  Box area is attention time in the chosen window plus a floor, so every
-  thread shows; parallel threads are each counted in full, so the sum is not
-  hours of the day. Dashed borders mark inherited labels; an arrow runs from a
-  waiting thread to the one it waits on. Without the activity recorder the
-  page says so and draws the tree unsized.
+- A **Goal** pill in the thread header; its popover is the same editor as the
+  Goals page's pane header (goal, value, my move, waiting on).
+- **Goal** and **Goal value** entries in thread menus, and a glyph on sidebar
+  rows of labeled threads. Both appear only in lists that render plugin menu
+  actions and row statuses; bb-sidebar 0.2.34 renders neither, so there only
+  the header pill and the Goals page show labels.
+- The `goals_set_label` agent tool and `bb goals show | set | list | import`
+  (see `skills/goals/SKILL.md`).
+- The **Goals** page, with two views:
+  - **Map**: containment and area say goal and attention (parallel threads each
+    counted in full, so the sum is not hours of the day). Fill hue is the
+    thread's goal; fill strength is its importance, lending included; the
+    outline marks only the open thread; the corner marker means "your turn"
+    (bb's attention states, or a quick or focus mark) or, as a pulsing ring,
+    that the agent is working. Where a label came from and whether it has a
+    value are in the tooltip, the table, and the pane header.
+  - **Last 24 hours**: a donut of attention by goal with its legend, and the
+    threads that received it.
+  - A **Waiting on you** list above the map: the user's marks and bb's
+    attention states, grouped quick, focus, unread, later, each most important
+    first; Next and the `n` key walk it. A pane beside the map shows the
+    picked thread's chat and label editor; its width is draggable and kept in
+    the browser.
+
+A thread appears for a window when it was last attended since the window began
+(bb's latest attention time, which archiving does not move), or has attention
+recorded in it, or carries a my-move mark. Without the activity recorder the
+page says so and draws the tree unsized.
 
 ## Layout
 
-- `goals-core/` — pure logic, cross-built JVM/JS: label parsing, inheritance,
+- `goals-core/`: pure logic, cross-built JVM/JS: label parsing, inheritance,
   lending, the squarified treemap, the overview model, and CSV import.
-- `goals-core-test/` — munit tests for the above (JVM; `scripts/test-js.sh`
+- `goals-core-test/`: munit tests for the above (JVM; `scripts/test-js.sh`
   at the repo root also runs them under Scala.js).
-- `goals/` — plugin backend (Scala.js): rpc, the agent tool, the CLI, and
+- `goals/`: plugin backend (Scala.js): rpc, the agent tool, the CLI, and
   the activity-recorder calls.
-- `goals-app/` — frontend core (Scala.js): `layoutOverview`, the treemap
+- `goals-app/`: frontend core (Scala.js): `layoutOverview`, the treemap
   layout consumed by `app.tsx`.
-- `app.tsx` — the React surfaces.
+- `app.tsx`: the React surfaces.
 
 ## Build and install
 
@@ -54,4 +75,5 @@ npm run build          # bleep-links server.js and app-core.cjs
 bb plugin install .    # from this directory
 ```
 
-`npm run reload` rebuilds and reloads an installed copy.
+`npm run reload` rebuilds and reloads an installed copy. The plugin builds
+against plugin SDK 0.6.49, newer than the converse and wbs plugins' pin.

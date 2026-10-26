@@ -166,7 +166,8 @@ final class Store(bb: BbApi)(using ExecutionContext):
   private val RecorderId = "activity-recorder"
 
   /** Attention seconds per thread in [from, to), each interval counted in full: `Right(None)` when the recorder plugin is not installed,
-    * `Left(message)` when it is but could not be read or answered in a shape the shared parser rejects.
+    * `Left(message)` when it is but could not be read or answered in a shape the shared parser rejects. Discovery decides "not installed"
+    * because `callRpc`'s error codes have no unknown-plugin case, so a failed call alone cannot tell missing from broken.
     */
   def attentionSeconds(from: Double, to: Double): Future[Either[String, Option[Map[String, Double]]]] =
     bb.sdk.plugins
