@@ -61,7 +61,9 @@ object Target:
   private val GitLabTags = """^/(.+?)/-/tags$""".r
 
   private val ThreadRef   = """^(?:@thread:)?(thr_[a-z0-9]+)(?:/([a-z]+))?$""".r
-  private val Coordinates = """^([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)(?::([A-Za-z0-9_.+-]+))?$""".r
+  /** `maven:group:artifact[:version]`. The scheme keeps coordinates from being read as some other URL. */
+  private val Coordinates = """^maven:([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)(?::([A-Za-z0-9_.+-]+))?$""".r
+  private val BareCoords  = """^([A-Za-z0-9_.-]+):([A-Za-z0-9_.-]+)(?::([A-Za-z0-9_.+-]+))?$""".r
   private val Segment     = """[A-Za-z0-9_.+-]+"""
   /** central.sonatype.com and mvnrepository.com share this path shape. */
   private val ArtifactPage = s"""^/artifact/($Segment)/($Segment)(?:/($Segment))?$$""".r
@@ -69,7 +71,7 @@ object Target:
 
   val supported =
     "a pull request or merge request URL, a branch URL (…/tree/<branch>), a repository's tags URL (…/tags), or a " +
-      "Maven Central artifact as group:artifact[:version] or its central.sonatype.com, repo1.maven.org or " +
+      "Maven Central artifact as maven:group:artifact[:version] or its central.sonatype.com, repo1.maven.org or " +
       "mvnrepository.com URL, or another bb thread being archived as @thread:thr_…/archived"
 
   private def maven(group: String, artifact: String, version: String | Null): Target =
@@ -99,6 +101,9 @@ object Target:
         Left(s"say what to wait for in @thread:$id: @thread:$id/archived waits for it to be archived or deleted")
       case ThreadRef(id, other) => Left(s"can't watch '$other' of @thread:$id; @thread:$id/archived is supported")
       case Coordinates(g, a, v) => Right(maven(g, a, v))
+      case BareCoords(g, a, v) =>
+        val coords = s"$g:$a" + Option(v).fold("")(":" + _)
+        Left(s"not $supported: $url (for a Maven artifact, write maven:$coords)")
       case Url(host, rawPath) if host == "central.sonatype.com" || host == "mvnrepository.com" =>
         Option(rawPath).getOrElse("").stripSuffix("/") match
           case ArtifactPage(g, a, v) => Right(maven(g, a, v))

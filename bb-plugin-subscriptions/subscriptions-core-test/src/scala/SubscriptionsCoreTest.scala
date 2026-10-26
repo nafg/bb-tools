@@ -28,8 +28,11 @@ class SubscriptionsCoreTest extends munit.FunSuite:
   test("parses Maven Central artifacts from coordinates and URLs"):
     val versioned = Right(Target.MavenArtifact("io.github.nafg", "slick-additions_3", Some("0.18.0")))
     val any       = Right(Target.MavenArtifact("io.github.nafg", "slick-additions_3", None))
-    assertEquals(Target.parse("io.github.nafg:slick-additions_3:0.18.0"), versioned)
-    assertEquals(Target.parse("io.github.nafg:slick-additions_3"), any)
+    assertEquals(Target.parse("maven:io.github.nafg:slick-additions_3:0.18.0"), versioned)
+    assertEquals(Target.parse("maven:io.github.nafg:slick-additions_3"), any)
+    // Without the scheme, coordinates could be mistaken for another URL scheme, so they're refused with a hint.
+    assert(Target.parse("io.github.nafg:slick-additions_3").left.exists(_.contains("maven:io.github.nafg:slick-additions_3")))
+    assert(Target.parse("http:foo").isLeft)
     assertEquals(Target.parse("https://central.sonatype.com/artifact/io.github.nafg/slick-additions_3/0.18.0"), versioned)
     assertEquals(Target.parse("https://mvnrepository.com/artifact/io.github.nafg/slick-additions_3"), any)
     assertEquals(Target.parse("https://repo1.maven.org/maven2/io/github/nafg/slick-additions_3/0.18.0/"), versioned)

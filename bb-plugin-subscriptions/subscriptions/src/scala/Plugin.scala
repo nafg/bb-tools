@@ -234,7 +234,7 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
           "a new result or commit, when its latest commit changes (push, rebase, force-push), and for each new " +
           "review or comment, with its text; the subscription ends when it is merged or closed. A branch (…/tree/<branch>): " +
           "a message with the new commits each time it moves. A repository's tags (…/tags): a message for each " +
-          "new tag. A Maven Central artifact (group:artifact:version or its URL): a message when that version can be " +
+          "new tag. A Maven Central artifact (maven:group:artifact:version or its URL): a message when that version can be " +
           "resolved; without a version, each new version. Another bb thread being archived (@thread:thr_…/archived): " +
           "a message with its last reply when it is archived or deleted. bb checks every minute. If checking fails, this thread is told instead of hearing nothing."),
       "instructions" ->
@@ -326,7 +326,7 @@ private val Usage =
   """Usage:
     |  bb subscriptions add <url> [--thread <thread-id>]
     |    <url>: a PR or MR, a branch (…/tree/<branch>), a repository's tags (…/tags), or a Maven Central
-    |           artifact as group:artifact[:version] or its URL, or another thread being archived
+    |           artifact as maven:group:artifact[:version] or its URL, or another thread being archived
     |           (@thread:thr_…/archived)
     |  bb subscriptions list [--thread <thread-id> | --all]
     |  bb subscriptions who <url>
