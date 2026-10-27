@@ -82,6 +82,11 @@ object SubmissionPanel:
     /** The days whose stretches the user has expanded. */
     stretchesOpen: Set[String])
 
+  /** The ticks of each thread's open screen, kept outside the component: if the screen is mounted afresh (the host
+    * redrawing it after a change), its ticks come back instead of resetting to everything unbilled.
+    */
+  private val savedDrafts = scala.collection.mutable.Map.empty[String, Set[String]]
+
   private def draftableKind(kind: String): Boolean = kind == "unbilled" || kind == "inZohoByHand"
 
   /** Stretches of one thread in one state with no more than this between them read as one piece of work. */
@@ -172,9 +177,15 @@ object SubmissionPanel:
                 val draftable = l.stretches.toVector.filter(st => draftableKind(st.state.kind)).map(_.key).toSet
                 val allUnbilled = l.stretches.toVector.filter(_.state.kind == "unbilled").map(_.key).toSet
                 // The ticks as they are when the reply arrives, not as they were when the fetch began.
-                val keep = keepDraft && s.phase.shownLedger.isDefined
+                val restored = savedDrafts.get(p.threadId)
+                val keep     = keepDraft && (s.phase.shownLedger.isDefined || restored.isDefined)
                 arrive(id)(LedgerPhase.Reviewing(l)) >>
-                  $.modState(st => st.copy(draft = if keep then st.draft.intersect(draftable) else allUnbilled), price)
+                  $.modState(
+                    st =>
+                      val base = if s.phase.shownLedger.isDefined then st.draft else restored.getOrElse(st.draft)
+                      st.copy(draft = if keep then base.intersect(draftable) else allUnbilled),
+                    price
+                  )
               }
               .recover { case e => arrive(id)(LedgerPhase.Failed(s.phase.shownLedger, errorMessage(e))) }
           )
@@ -184,6 +195,7 @@ object SubmissionPanel:
     def price: Callback =
       $.props.zip($.state).flatMap { (p, s) =>
         val id = s.pricing + 1
+        if s.draft.isEmpty then savedDrafts.remove(p.threadId) else savedDrafts(p.threadId) = s.draft
         $.modState(_.copy(pricing = id, priced = None)) >>
           Callback.future(
             rpc(p.call, BillingRpc.Draft(p.threadId, s.subthreads, DraftPick.Keys(s.draft)))
