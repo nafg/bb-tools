@@ -78,9 +78,38 @@ object SubmissionPanel:
     pricing: Int,
     nextRequest: Int,
     /** Entry notes as edited, by day. */
-    notes: Map[String, String])
+    notes: Map[String, String],
+    /** The days whose stretches the user has expanded. */
+    stretchesOpen: Set[String])
 
   private def draftableKind(kind: String): Boolean = kind == "unbilled" || kind == "inZohoByHand"
+
+  /** Stretches of one thread in one state with no more than this between them read as one piece of work. */
+  private val MergeGapMs: Double = 45 * 60_000.0
+
+  /** A stretch this short, or one with nothing said or done in it, is shown as a one-line row. */
+  private val TrivialMs: Double = 2 * 60_000.0
+
+  /** Neighbouring stretches shown as one card: same thread, same state, a short gap between. Ticking and leaving out
+    * act on every member; the members keep their own keys.
+    */
+  private final case class StretchGroup(members: Vector[LedgerStretchJs]):
+    def first: LedgerStretchJs    = members.head
+    def last: LedgerStretchJs     = members.last
+    def keys: Vector[String]      = members.map(_.key)
+    def durationMs: Double        = members.map(_.durationMs).sum
+    def kind: String              = first.state.kind
+    def messages: Vector[UserMessageJs] = members.flatMap(_.messages.toVector)
+    def trivial: Boolean          = messages.isEmpty || durationMs < TrivialMs
+
+  private def groupStretches(sorted: Vector[LedgerStretchJs]): Vector[StretchGroup] =
+    sorted.foldLeft(Vector.empty[StretchGroup]) { (acc, st) =>
+      acc.lastOption match
+        case Some(g)
+            if g.last.threadId == st.threadId && g.kind == st.state.kind && st.start - g.last.end <= MergeGapMs =>
+          acc.init :+ StretchGroup(g.members :+ st)
+        case _ => acc :+ StretchGroup(Vector(st))
+    }
 
   /** The draft's total per day, computed here from the ledger so ticking is instant; the server prices the entries. */
   private def localTotals(l: LedgerJs, draft: Set[String]): Map[String, Long] =
@@ -127,8 +156,8 @@ object SubmissionPanel:
       )
 
     /** Fetch the ledger (after `before`, a change to it, has been applied), then price the draft. The draft keeps its
-      * ticks across reloads; keys that are gone or no longer draftable fall away. With no draft, everything unbilled is
-      * ticked.
+      * ticks across reloads, even when none are ticked; keys that are gone or no longer draftable fall away. The first
+      * load, or one with `keepDraft` off, ticks everything unbilled.
       */
     def reload(before: Props => Future[Unit] = _ => Future.unit, keepDraft: Boolean = true): Callback =
       $.props.zip($.state).flatMap { (p, s) =>
@@ -141,10 +170,11 @@ object SubmissionPanel:
               )
               .map { l =>
                 val draftable = l.stretches.toVector.filter(st => draftableKind(st.state.kind)).map(_.key).toSet
-                val draft     =
-                  if keepDraft && s.draft.nonEmpty then s.draft.intersect(draftable)
-                  else l.stretches.toVector.filter(_.state.kind == "unbilled").map(_.key).toSet
-                arrive(id)(LedgerPhase.Reviewing(l)) >> $.modState(_.copy(draft = draft), price)
+                val allUnbilled = l.stretches.toVector.filter(_.state.kind == "unbilled").map(_.key).toSet
+                // The ticks as they are when the reply arrives, not as they were when the fetch began.
+                val keep = keepDraft && s.phase.shownLedger.isDefined
+                arrive(id)(LedgerPhase.Reviewing(l)) >>
+                  $.modState(st => st.copy(draft = if keep then st.draft.intersect(draftable) else allUnbilled), price)
               }
               .recover { case e => arrive(id)(LedgerPhase.Failed(s.phase.shownLedger, errorMessage(e))) }
           )
@@ -176,7 +206,8 @@ object SubmissionPanel:
           case _                        => Callback.empty
       )
 
-    def tick(st: LedgerStretchJs): Callback = setDraft((_, d) => if d(st.key) then d - st.key else d + st.key)
+    private def tick(g: StretchGroup): Callback =
+      setDraft((_, d) => if g.keys.forall(d) then d -- g.keys else d ++ g.keys)
 
     /** "Up to here": every unbilled stretch that ends at or before this one, and this one. */
     def upToHere(st: LedgerStretchJs): Callback =
@@ -201,10 +232,10 @@ object SubmissionPanel:
     private def change(run: Props => Future[Unit]): Callback =
       $.state.flatMap(s => if s.phase.editable then reload(before = run) else Callback.empty)
 
-    def leaveOut(st: LedgerStretchJs, out: Boolean): Callback =
-      $.modState(s => s.copy(draft = if out then s.draft - st.key else s.draft)) >>
+    private def leaveOut(g: StretchGroup, out: Boolean): Callback =
+      $.modState(s => s.copy(draft = if out then s.draft -- g.keys else s.draft)) >>
         change(p =>
-          rpc(p.call, BillingRpc.SetExcluded(st.key, out)).map(_ => ())
+          g.keys.foldLeft(Future.unit)((done, key) => done.flatMap(_ => rpc(p.call, BillingRpc.SetExcluded(key, out)).map(_ => ())))
         )
 
     def decide(key: BlockKey, allocation: Allocation): Callback =
@@ -213,6 +244,9 @@ object SubmissionPanel:
       )
 
     def undecide(key: BlockKey): Callback = change(p => rpc(p.call, BillingRpc.Undecide(key)).map(_ => ()))
+
+    private def toggleStretches(day: String): Callback =
+      $.modState(s => s.copy(stretchesOpen = if s.stretchesOpen(day) then s.stretchesOpen - day else s.stretchesOpen + day))
 
     def editNotes(day: String, text: String): Callback = $.modState(s => s.copy(notes = s.notes.updated(day, text)))
 
@@ -372,52 +406,82 @@ object SubmissionPanel:
           ))
         case _              => None
 
-    private def stretchCard(l: LedgerJs, s: State, st: LedgerStretchJs, frozen: Boolean): VdomNode =
-      val draftable = draftableKind(st.state.kind)
-      val ticked    = s.draft(st.key)
+    private def tickBox(s: State, g: StretchGroup, frozen: Boolean) =
+      <.input(
+        ^.`type`    := "checkbox",
+        ^.className := "mt-1 h-5 w-5 shrink-0",
+        ^.checked   := g.keys.forall(s.draft),
+        ^.disabled  := (frozen || !draftableKind(g.kind)),
+        ^.onChange --> tick(g)
+      )
+
+    private def range(l: LedgerJs, g: StretchGroup): String =
+      s"${clock(g.first.start, l.timeZone)}–${clock(g.last.end, l.timeZone)}"
+
+    private def leaveOutButton(g: StretchGroup, frozen: Boolean) =
+      <.button(
+        ^.`type`    := "button",
+        ^.className := "underline text-muted-foreground",
+        ^.disabled  := frozen,
+        ^.onClick --> leaveOut(g, out = g.kind != "leftOut"),
+        if g.kind == "leftOut" then "put back" else "leave out for good"
+      ).when(draftableKind(g.kind) || g.kind == "leftOut")
+
+    /** A one-line row for a stretch that needs no reading: the same ticking and leaving out, none of the card. */
+    private def compactRow(l: LedgerJs, s: State, g: StretchGroup, frozen: Boolean): VdomNode =
+      <.div(
+        ^.key       := g.first.key,
+        ^.className := "flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-3 py-1 text-xs " +
+          (if g.keys.forall(s.draft) then "border-primary/60 bg-primary/5" else "border-border"),
+        tickBox(s, g, frozen),
+        <.span(^.className := "font-medium tabular-nums", range(l, g)),
+        <.span(^.className := "text-muted-foreground", s"${hoursMinutes(g.durationMs)} recorded"),
+        <.span(
+          ^.className := "text-muted-foreground",
+          if g.messages.isEmpty then "nothing said or done" else g.members.map(_.summary).mkString(" ").take(80)
+        ),
+        stateChip(l, g.first),
+        leaveOutButton(g, frozen)
+      )
+
+    private def groupCard(l: LedgerJs, s: State, g: StretchGroup, frozen: Boolean): VdomNode =
+      val ticked = g.keys.forall(s.draft)
+      val st     = g.first
       <.div(
         ^.key       := st.key,
         ^.className := "rounded-md border px-3 py-2 text-sm " +
           (if ticked then "border-primary/60 bg-primary/5" else "border-border"),
         <.div(
           ^.className := "flex items-start gap-2",
-          <.input(
-            ^.`type`    := "checkbox",
-            ^.className := "mt-1 h-5 w-5 shrink-0",
-            ^.checked   := ticked,
-            ^.disabled  := (frozen || !draftable),
-            ^.onChange --> tick(st)
-          ),
+          tickBox(s, g, frozen),
           <.div(
             ^.className := "min-w-0 flex-1 space-y-1",
             <.div(
               ^.className := "flex flex-wrap items-center gap-x-2 gap-y-1",
-              <.span(
-                ^.className      := "font-medium tabular-nums",
-                s"${clock(st.start, l.timeZone)}–${clock(st.end, l.timeZone)}"
+              <.span(^.className := "font-medium tabular-nums", range(l, g)),
+              <.span(^.className := "text-muted-foreground", s"${hoursMinutes(g.durationMs)} recorded"),
+              <.span(^.className := "text-xs text-muted-foreground", s"(${g.members.length} stretches)").when(
+                g.members.length > 1
               ),
-              <.span(^.className := "text-muted-foreground", s"${hoursMinutes(st.durationMs)} recorded"),
               <.span(^.className := "text-xs text-muted-foreground", st.title.take(40)).when(l.covered.length > 1),
               stateChip(l, st)
             ),
             <.div(
-              ^.className := (if st.state.kind == "leftOut" then "text-muted-foreground line-through" else ""),
-              st.summary,
+              ^.className := (if g.kind == "leftOut" then "text-muted-foreground line-through" else ""),
+              g.members.map(_.summary).mkString(" "),
               <.span(^.className := "ml-1 text-xs text-muted-foreground", "(first message; no summary yet)").when(
-                !st.fromModel
+                g.members.exists(!_.fromModel)
               )
             ),
             <.details(
               ^.className := "text-xs text-muted-foreground",
               <.summary(
                 ^.className := "cursor-pointer select-none",
-                if st.messages.isEmpty then "nothing said or done in this stretch (reading, or speaking elsewhere)"
-                else
-                  s"${st.messages.count(_.speaker == "User")} from you, ${st.messages.count(
-                      _.speaker == "Agent"
-                    )} replies, ${st.messages.count(_.speaker == "Work")} actions"
+                s"${g.messages.count(_.speaker == "User")} from you, ${g.messages.count(
+                    _.speaker == "Agent"
+                  )} replies, ${g.messages.count(_.speaker == "Work")} actions"
               ),
-              conversationList(st.messages, l.timeZone),
+              conversationList(js.Array(g.messages*), l.timeZone),
               <.button(
                 ^.`type`    := "button",
                 ^.className := "underline",
@@ -431,20 +495,17 @@ object SubmissionPanel:
                 ^.`type`    := "button",
                 ^.className := "underline text-muted-foreground",
                 ^.disabled  := frozen,
-                ^.onClick --> upToHere(st),
+                ^.onClick --> upToHere(g.last),
                 "tick everything up to here"
-              ).when(draftable),
-              <.button(
-                ^.`type`    := "button",
-                ^.className := "underline text-muted-foreground",
-                ^.disabled  := frozen,
-                ^.onClick --> leaveOut(st, out = st.state.kind != "leftOut"),
-                if st.state.kind == "leftOut" then "put back" else "leave out for good"
-              ).when(draftable || st.state.kind == "leftOut")
+              ).when(draftableKind(g.kind)),
+              leaveOutButton(g, frozen)
             )
           )
         )
       )
+
+    private def groupView(l: LedgerJs, s: State, g: StretchGroup, frozen: Boolean): VdomNode =
+      if g.trivial then compactRow(l, s, g, frozen) else groupCard(l, s, g, frozen)
 
     private def entryBox(s: State, e: EntryJs, frozen: Boolean): VdomElement =
       val shown = s.notes.getOrElse(e.day, e.notes)
@@ -517,6 +578,8 @@ object SubmissionPanel:
       val allOn    = unbilled.nonEmpty && unbilled.forall(st => s.draft(st.key))
       val ticked   = localTotals(l, s.draft).get(day)
       val blocks   = l.blocks.toVector.filter(_.day == day)
+      val entry    = s.priced.flatMap(_.entries.find(_.day == day))
+      val (leftOut, live) = groupStretches(stretches).partition(_.kind == "leftOut")
       <.section(
         ^.key       := day,
         ^.className := "space-y-2",
@@ -538,7 +601,7 @@ object SubmissionPanel:
             if allOn then "Untick day" else "Tick day"
           )
         ),
-        stretches.map(st => stretchCard(l, s, st, frozen)).toVdomArray,
+        entry.map(e => entryBox(s, e, frozen)),
         blocks.flatMap(b => BlockKey.parse(b.key).map(b -> _)).map { (b, key) =>
           BlockCard.Component.withKey(b.key)(BlockCard.Props(
             b,
@@ -551,7 +614,25 @@ object SubmissionPanel:
             openThread = id => $.props.flatMap(_.openThread(id))
           )): VdomNode
         }.toVdomArray,
-        s.priced.flatMap(_.entries.find(_.day == day)).map(e => entryBox(s, e, frozen))
+        // The day's entry is the thing sent; its stretches are the evidence, open when there is no entry to read.
+        <.details(
+          ^.className := "space-y-2",
+          ^.open      := s.stretchesOpen(day),
+          <.summary(
+            ^.className := "cursor-pointer select-none text-xs font-medium",
+            ^.onClick ==> (e => e.preventDefaultCB >> toggleStretches(day)),
+            s"Stretches (${live.length})"
+          ),
+          <.div(^.className := "space-y-2 pt-2", live.map(g => groupView(l, s, g, frozen)).toVdomArray)
+        ).when(live.nonEmpty),
+        <.details(
+          ^.className := "space-y-1 text-xs",
+          <.summary(
+            ^.className := "cursor-pointer select-none font-medium",
+            s"${leftOut.length} left out (${hoursMinutes(leftOut.map(_.durationMs).sum)} recorded)"
+          ),
+          <.div(^.className := "space-y-1 pt-1", leftOut.map(g => compactRow(l, s, g, frozen)).toVdomArray)
+        ).when(leftOut.nonEmpty)
       )
 
     private def ledgerScreen(p: Props, s: State, l: LedgerJs): VdomElement =
@@ -748,7 +829,8 @@ object SubmissionPanel:
       priced = None,
       pricing = 0,
       nextRequest = 0,
-      notes = Map.empty
+      notes = Map.empty,
+      stretchesOpen = Set.empty
     ))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))

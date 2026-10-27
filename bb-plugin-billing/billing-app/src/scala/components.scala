@@ -142,23 +142,23 @@ object BlockCard:
           ))
 
     def render(p: Props, s: State): VdomElement =
-      val b = p.block
+      val b      = p.block
+      val header =
       <.div(
-        ^.className := "space-y-2 rounded-md border border-border px-3 py-2",
-        <.div(
-          ^.className := "flex flex-wrap items-center gap-2",
-          <.span(^.className := "font-medium", s"${clock(b.start, p.timeZone)}–${clock(b.end, p.timeZone)}"),
-          <.span(^.className := "text-muted-foreground", hoursMinutes(b.durationMs)),
-          nullable(b.decision).map(d =>
-            <.span(^.className := "rounded bg-green-500/20 px-1.5 text-xs", describe(p, d))
-          ),
-          <.span(^.className := "rounded bg-destructive/20 px-1.5 text-xs", "who gets it?").when(
-            b.decision == null && b.billableThreadIds.nonEmpty
-          ),
-          <.span(^.className := "text-xs text-muted-foreground", "no client thread involved").when(
-            b.billableThreadIds.isEmpty
-          )
+        ^.className := "flex flex-wrap items-center gap-2",
+        <.span(^.className := "font-medium", s"${clock(b.start, p.timeZone)}–${clock(b.end, p.timeZone)}"),
+        <.span(^.className := "text-muted-foreground", hoursMinutes(b.durationMs)),
+        nullable(b.decision).map(d =>
+          <.span(^.className := "rounded bg-green-500/20 px-1.5 text-xs", describe(p, d))
         ),
+        <.span(^.className := "rounded bg-destructive/20 px-1.5 text-xs", "who gets it?").when(
+          b.decision == null && b.billableThreadIds.nonEmpty
+        ),
+        <.span(^.className := "text-xs text-muted-foreground", "no client thread involved").when(
+          b.billableThreadIds.isEmpty
+        )
+      )
+      val body   = TagMod(
         // Each thread of the stretch: its name and project, a way in, and what went on in it during these minutes.
         <.div(
           ^.className := "space-y-1 text-xs",
@@ -256,6 +256,15 @@ object BlockCard:
           s.error.map(m => <.span(^.className := "text-xs text-destructive", m))
         ).when(s.splitting)
       )
+      // A decided stretch folds to its header; opening it brings the controls back, to change the decision.
+      if b.decision != null then
+        <.details(
+          ^.className := "rounded-md border border-border px-3 py-2",
+          <.summary(^.className := "cursor-pointer select-none", header),
+          <.div(^.className := "space-y-2 pt-2", body)
+        )
+      else
+        <.div(^.className := "space-y-2 rounded-md border border-border px-3 py-2", header, body)
 
   val Component = ScalaComponent
     .builder[Props]("BlockCard")
