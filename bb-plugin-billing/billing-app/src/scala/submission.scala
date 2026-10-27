@@ -396,7 +396,7 @@ object SubmissionPanel:
                 ^.className      := "font-medium tabular-nums",
                 s"${clock(st.start, l.timeZone)}–${clock(st.end, l.timeZone)}"
               ),
-              <.span(^.className := "text-muted-foreground", hoursMinutes(st.durationMs)),
+              <.span(^.className := "text-muted-foreground", s"${hoursMinutes(st.durationMs)} recorded"),
               <.span(^.className := "text-xs text-muted-foreground", st.title.take(40)).when(l.covered.length > 1),
               stateChip(l, st)
             ),
@@ -503,7 +503,7 @@ object SubmissionPanel:
         ).toVdomArray,
         <.div(
           ^.className := "font-medium",
-          if s.draft.isEmpty then "Nothing ticked" else s"${hoursMinutes(inDraft.toDouble)} ticked for this send"
+          if s.draft.isEmpty then "Nothing ticked" else s"${hoursMinutes(inDraft.toDouble)} to bill from the ticked stretches"
         )
       )
 
@@ -526,8 +526,8 @@ object SubmissionPanel:
             <.span(^.className := "font-semibold", Words.dayLabel(day)),
             <.span(
               ^.className      := "ml-2 text-xs text-muted-foreground",
-              s"${hoursMinutes(unbilled.map(_.durationMs).sum)} unbilled" +
-                ticked.fold("")(t => s" · ${hoursMinutes(t.toDouble)} ticked")
+              s"${hoursMinutes(unbilled.map(_.durationMs).sum)} recorded, unbilled" +
+                ticked.fold("")(t => s" · ${hoursMinutes(t.toDouble)} to bill from the ticked (time shared with other threads counts only as decided)")
             )
           ),
           <.button(
