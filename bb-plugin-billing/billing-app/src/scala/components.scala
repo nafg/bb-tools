@@ -428,7 +428,8 @@ object ThreadTree:
       t.standing.needsDecision || children.getOrElse(t.threadId, Vector.empty).exists(needsDecision)
     val showOthers                               = p.showOthers || !anyClient
     def keep(t: ThreadAccount): Boolean          =
-      showOthers || t.billsTo.isDefined || children.getOrElse(t.threadId, Vector.empty).exists(keep)
+      showOthers || (t.billsTo.isDefined && (t.totals.unbilledMs >= 60_000 || t.standing.needsDecision)) ||
+        children.getOrElse(t.threadId, Vector.empty).exists(keep)
 
     def row(t: ThreadAccount, depth: Int): VdomNode =
       <.tr(
@@ -556,7 +557,8 @@ object ThreadTree:
         ^.`type`    := "button",
         ^.className := "text-xs text-muted-foreground hover:underline",
         ^.onClick --> p.toggleOthers,
-        if showOthers then "Hide threads that are not client work" else "Show threads that are not client work"
+        if showOthers then "Hide threads with nothing to bill, and those that are not client work"
+        else "Show threads with nothing to bill, and those that are not client work"
       ).when(anyClient)
     )
 
