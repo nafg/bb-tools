@@ -92,7 +92,7 @@ object SessionsView:
         $.modState(_.copy(loading = true, error = None)) >>
           Callback.future(
             rpc(p.call, BillingRpc.SessionScreen(at))
-              .map(r => arrive(r) >> price)
+              .map(r => arrive(r))
               .recover { case e => $.modState(_.copy(loading = false, error = Some(errorMessage(e)))) }
           )
       }
@@ -107,11 +107,10 @@ object SessionsView:
       val draftable = r.stretches.toVector.filter(l => th.bills(l.threadId) && draftableKind(stateOf(l.state))).map(_.key).toSet
       val fresh     = r.stretches.toVector.filter(l => th.bills(l.threadId) && l.state.kind == "unbilled").map(_.key).toSet
       val saved     = if r.current >= 0 then savedDrafts.get(r.sessions(r.current).start) else None
-      $.modState(_.copy(
-        screen = Some(r),
-        loading = false,
-        draft = saved.fold(fresh)(_.intersect(draftable))
-      ))
+      $.modState(
+        _.copy(screen = Some(r), loading = false, draft = saved.fold(fresh)(_.intersect(draftable))),
+        price
+      )
 
     private def keysByRoot(screen: SessionScreenJs, draft: Set[String]): Map[String, Vector[String]] =
       val th = threadsOf(screen)
@@ -146,11 +145,14 @@ object SessionsView:
         ))
       )
 
+    /** Ticks or unticks, then prices: the price is asked once the new ticks are in the state, never before. */
     private def tick(keys: Vector[String]): Callback =
-      $.modState(s =>
-        val on = keys.forall(s.draft)
-        s.copy(draft = if on then s.draft -- keys else s.draft ++ keys)
-      ) >> price
+      $.modState(
+        s =>
+          val on = keys.forall(s.draft)
+          s.copy(draft = if on then s.draft -- keys else s.draft ++ keys),
+        price
+      )
 
     private def leaveOut(keys: Vector[String], out: Boolean): Callback =
       $.props.flatMap(p =>
