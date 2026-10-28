@@ -392,6 +392,11 @@ object SessionsView:
       val header   = <.div(
         ^.className := "sticky top-0 z-40 border-b border-border bg-background",
         ^.style     := js.Dynamic.literal("height" -> HeaderPx, "width" -> width),
+        // The screen has padding above this row; an opaque strip fills it so nothing scrolls into view above the names.
+        <.div(
+          ^.className := "absolute inset-x-0 bg-background",
+          ^.style     := js.Dynamic.literal("top" -> -40, "height" -> 40)
+        ),
         byColumn.map { (column, boxes) =>
           val names = boxes.sortBy(_.yTop).map(_.box.info)
           <.div(
