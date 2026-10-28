@@ -8,6 +8,8 @@ class BillingRpcTest extends FunSuite:
   /** One request per method: what the page sends. */
   private val samples: Vector[BillingRpc[?]] = Vector(
     BillingRpc.Overview(1_700_000_000_000L),
+    BillingRpc.SessionScreen(None),
+    BillingRpc.SessionScreen(Some(1_700_000_000_000L)),
     BillingRpc.Ledger("thr_1", subthreads = false),
     BillingRpc.Draft("thr_1", subthreads = true, DraftPick.Keys(Set("k1", "k2"))),
     BillingRpc.Draft("thr_1", subthreads = true, DraftPick.Keys(Set.empty)),

@@ -121,6 +121,7 @@ object Json:
   def reply[R](service: Service, rpc: BillingRpc[R], out: Served[R]): js.Any =
     rpc match
       case _: BillingRpc.Overview                       => overview(out)
+      case _: BillingRpc.SessionScreen                  => sessionScreen(out)
       case _: BillingRpc.Ledger                         => ledger(out)
       case _: (BillingRpc.Draft | BillingRpc.Summarize) =>
         out match
@@ -222,6 +223,34 @@ object Json:
       case StretchState.Sent(id)        => js.Dynamic.literal("kind" -> "sent", "submissionId" -> id)
       case StretchState.Settled(id)     => js.Dynamic.literal("kind" -> "settled", "submissionId" -> id)
 
+  def stretchLine(ln: LedgerLine, titles: Map[String, String]): js.Dynamic =
+    val w = ln.stretch.window
+    js.Dynamic.literal(
+      "key"        -> w.key,
+      "threadId"   -> w.threadId,
+      "title"      -> titles.getOrElse(w.threadId, w.threadId),
+      "day"        -> w.day,
+      "start"      -> w.start.toDouble,
+      "end"        -> w.end.toDouble,
+      "durationMs" -> w.durationMs.toDouble,
+      "summary"    -> ln.summary,
+      "fromModel"  -> ln.fromModel,
+      "state"      -> stretchState(ln.stretch.state),
+      "messages"   -> ln.messages.map(message).toJSArray
+    )
+
+  def sessionScreen(r: SessionScreenResult): js.Dynamic =
+    js.Dynamic.literal(
+      "timeZone" -> r.calendar.timeZone,
+      "now"      -> r.now.toDouble,
+      "sessions" -> r.sessions.map(s =>
+        js.Dynamic.literal("start" -> s.start.toDouble, "end" -> s.end.toDouble, "threads" -> s.threadIds.size)
+      ).toJSArray,
+      "current"   -> r.chosen.fold(-1)(c => r.sessions.indexWhere(_.start == c.start)),
+      "threads"   -> r.threads.map(thread).toJSArray,
+      "stretches" -> r.stretches.map(stretchLine(_, r.titles)).toJSArray
+    )
+
   def ledger(l: LedgerResult): js.Dynamic =
     val billable: String => Boolean = t =>
       l.billability(t) match
@@ -233,22 +262,7 @@ object Json:
       "leftOut"     -> l.leftOut.map((t, why) => js.Dynamic.literal("thread" -> thread(t), "why" -> why)).toJSArray,
       "target"      -> l.target.map(targetJs).orNull,
       "timeZone"    -> l.calendar.timeZone,
-      "stretches"   -> l.stretches.map { ln =>
-        val w = ln.stretch.window
-        js.Dynamic.literal(
-          "key"        -> w.key,
-          "threadId"   -> w.threadId,
-          "title"      -> l.titles.getOrElse(w.threadId, w.threadId),
-          "day"        -> w.day,
-          "start"      -> w.start.toDouble,
-          "end"        -> w.end.toDouble,
-          "durationMs" -> w.durationMs.toDouble,
-          "summary"    -> ln.summary,
-          "fromModel"  -> ln.fromModel,
-          "state"      -> stretchState(ln.stretch.state),
-          "messages"   -> ln.messages.map(message).toJSArray
-        )
-      }.toJSArray,
+      "stretches"   -> l.stretches.map(stretchLine(_, l.titles)).toJSArray,
       "blocks"      -> l.blocks.map((b, a) => block(b, a, billable, l.titles, l.blockThreads)).toJSArray,
       "history"     -> l.history.map(submission).toJSArray,
       "handEntered" -> l.handEntered.map { h =>

@@ -14,6 +14,7 @@ object Reply:
   sealed trait ProjectMappings
   sealed trait Report
   sealed trait Audit
+  sealed trait SessionScreen
 
   /** How many shared stretches a one-click settle decided. */
   sealed trait Decided
@@ -24,6 +25,11 @@ object Reply:
 enum BillingRpc[Reply]:
   /** The threads with recorded time since `since`, with where each bills and what is unbilled. */
   case Overview(since: Long) extends BillingRpc[Reply.Overview]
+
+  /** The sessions of the recent past, and the stretches of every thread in one of them: the session starting at `at`,
+    * else the latest.
+    */
+  case SessionScreen(at: Option[Long]) extends BillingRpc[Reply.SessionScreen]
 
   /** The ledger of a thread and, when asked, of its subthreads that bill to the same place. */
   case Ledger(threadId: String, subthreads: Boolean) extends BillingRpc[Reply.Ledger]
@@ -86,6 +92,7 @@ enum BillingRpc[Reply]:
     import Wire.{Bool, Num, Str}
     this match
       case Overview(since)                   => Wire.obj("since" -> Num(since.toDouble))
+      case SessionScreen(at)                 => Wire.obj("at" -> Wire.opt(at.map(a => Num(a.toDouble))))
       case Ledger(threadId, subthreads)      => Wire.obj("threadId" -> Str(threadId), "subthreads" -> Bool(subthreads))
       case Draft(threadId, subthreads, pick) =>
         Wire.obj("threadId" -> Str(threadId), "subthreads" -> Bool(subthreads), "pick" -> pick.encode)
@@ -161,6 +168,7 @@ object BillingRpc:
   /** Every method name, in the order the plugin registers them. */
   val methods: Vector[String] = Vector(
     "overview",
+    "sessionScreen",
     "ledger",
     "draft",
     "summarize",
@@ -199,6 +207,7 @@ object BillingRpc:
     method match
       case "overview"          =>
         input.field("since").flatMap(_.asNum).map(_.toLong).toRight("since is required").map(Overview.apply)
+      case "sessionScreen"     => Right(SessionScreen(input.field("at").flatMap(_.asNum).map(_.toLong)))
       case "ledger"            => required("threadId").map(Ledger(_, subthreads))
       case "draft"             => for threadId <- required("threadId"); p <- pick yield Draft(threadId, subthreads, p)
       case "summarize"         =>

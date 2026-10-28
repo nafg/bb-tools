@@ -31,6 +31,7 @@ final case class ProjectMappingsReply(projects: Vector[(String, String, Vector[P
 type Served[R] = R match
   case Reply.Ok              => Unit
   case Reply.Overview        => OverviewReply
+  case Reply.SessionScreen   => SessionScreenResult
   case Reply.Ledger          => LedgerResult
   case Reply.Plan            => PlanResult
   case Reply.Submission      => SubmissionRecord
@@ -69,6 +70,7 @@ final class Commands(
           available   <- summaries.available()
           result      <- service.overview(since)
         yield OverviewReply(result, since, status, missing, projectZoho, catalog, available)
+      case BillingRpc.SessionScreen(at)                     => service.sessionScreen(at).flatMap(orFail)
       case BillingRpc.Ledger(threadId, subthreads)          => service.ledger(threadId, subthreads).flatMap(orFail)
       case BillingRpc.Draft(threadId, subthreads, pick)     =>
         service.planOf(threadId, subthreads, pick).flatMap(orFail)

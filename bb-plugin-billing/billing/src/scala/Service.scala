@@ -27,6 +27,16 @@ final case class Overview(
   projectDefaults: Map[String, ZohoTarget],
   warnings: Vector[String])
 
+/** The sessions screen: the recent sessions, and for one of them every thread's stretches in their ledger state. */
+final case class SessionScreenResult(
+  now: Long,
+  calendar: IntlCalendar,
+  sessions: Vector[Session],
+  chosen: Option[Session],
+  threads: Vector[ThreadAccount],
+  stretches: Vector[LedgerLine],
+  titles: Map[String, String])
+
 /** A window as the submission panel shows it: with its day, clock times, and one-line summary. */
 final case class WindowLine(
   window: Window,
@@ -316,6 +326,60 @@ final class Service(
               )
             })
           }
+      }
+    }
+
+  private val SessionHistoryMs = 30L * 24 * 3600_000L
+
+  /** The sessions of the last month over all recorded attention, and the session starting at `at` (else the latest)
+    * with every thread's stretches in it. A stretch is a recorded interval cut at local midnight, in the ledger's
+    * state, with the summary the ledger would show.
+    */
+  def sessionScreen(at: Option[Long]): Future[Either[String, SessionScreenResult]] =
+    val now = js.Date.now().toLong
+    calendar().flatMap { (cal, _) =>
+      recorder.intervals(now - SessionHistoryMs, now).flatMap {
+        case Left(error) => Future.successful(Left(error))
+        case Right(all)  =>
+          val split    = Intervals.splitByDay(all, cal)
+          val windows  = split.map(i => Window(i.threadId, i.day, i.start, i.end))
+          val sessions = Sessions.of(windows)
+          sessions.find(s => at.contains(s.start)).orElse(sessions.lastOption) match
+            case None    => Future.successful(Right(SessionScreenResult(now, cal, sessions, None, Vector.empty, Vector.empty, Map.empty)))
+            case Some(s) =>
+              val inSession = windows.filter(w => Sessions.containing(sessions, w).contains(s))
+              val ids       = inSession.map(_.threadId).distinct
+              for
+                ctx  <- resolveWithContext(ids)
+                msgs <- Future.traverse(ids)(t => conversationOf(t).map(t -> _)).map(_.toMap)
+              yield
+                val led       = ledgerOf()
+                val stretches = Ledger.of(inSession, led.covering, led.struck, Map.empty)
+                val titles    = ctx.summaries.map((t, sm) => t -> sm.title)
+                val cached    = summaries.cached(stretches.map(_.window))
+                val lines     = stretches.map { st =>
+                  val w      = st.window
+                  val inside = msgs.getOrElse(w.threadId, Vector.empty).filter(m => m.at >= w.start && m.at < w.end)
+                  LedgerLine(
+                    st,
+                    cached.getOrElse(w.key, summaries.fallbackWindow(titles.getOrElse(w.threadId, w.threadId), inside)),
+                    cached.contains(w.key),
+                    inside
+                  )
+                }
+                Right(
+                  SessionScreenResult(
+                    now,
+                    cal,
+                    sessions,
+                    Some(s),
+                    ctx.summaries.keys.toVector.map(t =>
+                      account(t, ctx, totalsOf(t, led, split), led.submissionsOf(t), all.filter(_.threadId == t))
+                    ),
+                    lines,
+                    titles
+                  )
+                )
       }
     }
 
