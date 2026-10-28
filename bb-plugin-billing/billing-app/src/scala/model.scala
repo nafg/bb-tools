@@ -182,6 +182,9 @@ trait LedgerJs extends js.Object:
   val target: Target | Null
   val timeZone: String
   val stretches: js.Array[LedgerStretchJs]
+
+  /** When each submission was made, by id (epoch milliseconds). */
+  val submissions: js.Dictionary[Double]
   val blocks: js.Array[Block]
 
   /** `billingcore.SubmissionRecord`s in their wire form. */
@@ -342,3 +345,6 @@ trait SessionScreenJs extends js.Object:
   /** `billingcore.ThreadAccount`s in their wire form. */
   val threads: js.Array[js.Any]
   val stretches: js.Array[LedgerStretchJs]
+
+  /** When each submission was made, by id (epoch milliseconds). */
+  val submissions: js.Dictionary[Double]

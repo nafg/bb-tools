@@ -37,7 +37,9 @@ final case class SessionScreenResult(
   chosen: Option[Session],
   threads: Vector[ThreadAccount],
   stretches: Vector[LedgerLine],
-  titles: Map[String, String])
+  titles: Map[String, String],
+  /** When each submission was made, by its id, for "sent on" and "settled on". */
+  submissionStamps: Map[String, Long])
 
 /** A window as the submission panel shows it: with its day, clock times, and one-line summary. */
 final case class WindowLine(
@@ -366,7 +368,7 @@ final class Service(
                            case None    =>
                              Future.successful(
                                SessionScreenResult(
-                                 now, cal, sessions, unbilledMs, None, Vector.empty, Vector.empty, Map.empty
+                                 now, cal, sessions, unbilledMs, None, Vector.empty, Vector.empty, Map.empty, Map.empty
                                )
                              )
                            case Some(s) => sessionDetail(now, cal, all, split, windows, sessions, unbilledMs, s)
@@ -423,7 +425,8 @@ final class Service(
           account(t, ctx, totalsOf(t, led, split), led.submissionsOf(t), all.filter(_.threadId == t))
         ),
         lines,
-        titles
+        titles,
+        store.submissionsOf(None).map(sub => sub.id -> sub.createdAt.toLong).toMap
       )
 
   /** The threads under `root`, every level, archived ones included. */

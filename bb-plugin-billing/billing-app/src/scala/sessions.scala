@@ -24,7 +24,9 @@ object SessionsView:
     draft: Set[String],
     plans: Map[String, PlanJs],
     ledgers: Map[String, LedgerJs],
-    busy: Boolean)
+    busy: Boolean,
+    /** The keys of the mark the pointer is over, whose full detail shows in the card at the corner. */
+    hover: Option[Vector[String]])
 
   /** The ticks of each session, kept outside the component so a reload or a visit elsewhere does not lose them. */
   private val savedDrafts = scala.collection.mutable.Map.empty[Double, Set[String]]
@@ -147,6 +149,9 @@ object SessionsView:
           )
         ))
       )
+
+    private def setHover(keys: Option[Vector[String]]): Callback =
+      $.modState(s => if s.hover == keys then s else s.copy(hover = keys))
 
     /** Ticks or unticks, then prices: the price is asked once the new ticks are in the state, never before. */
     private def tick(keys: Vector[String]): Callback =
@@ -313,7 +318,8 @@ object SessionsView:
           )
       <.div(
         ^.key       := keys.head,
-        ^.title     := (title.fold("")(_ + "\n") + head + (if body.nonEmpty then s"\n$body" else "")),
+        ^.onMouseEnter --> setHover(Some(keys)),
+        ^.onMouseLeave --> setHover(None),
         ^.className := s"absolute overflow-hidden rounded border px-1 text-[10px] leading-tight $cls " +
           (if canTick then "cursor-pointer" else ""),
         ^.style     := js.Dynamic.literal(
@@ -457,6 +463,57 @@ object SessionsView:
       )
 
     /** What is ticked, priced per billing root, with what stops a send, and the buttons to send or settle. */
+    /** Everything the old per-day card said about a stretch, for the mark under the pointer. */
+    private def detailCard(s: State, tz: String, screen: SessionScreenJs, th: Threads, keys: Vector[String]): VdomNode =
+      val lines = screen.stretches.toVector.filter(l => keys.contains(l.key)).sortBy(_.start)
+      lines.headOption.fold(EmptyVdom: VdomNode) { first =>
+        val last     = lines.last
+        val total    = lines.map(_.durationMs).sum
+        val messages = lines.flatMap(_.messages.toVector)
+        val kinds    = lines.map(_.state.kind).distinct
+        def on(id: js.UndefOr[String]): String =
+          id.toOption.flatMap(i => screen.submissions.get(i)).fold("")(at => s" on ${stamp(at, tz)}")
+        val stateLine =
+          if !th.bills(first.threadId) && kinds == Vector("unbilled") then
+            "Not billable: the thread has no client, so this time is shown but never billed."
+          else if kinds.length > 1 then s"Mixed: ${kinds.mkString(", ")}"
+          else
+            first.state.kind match
+              case "sent"         => s"Sent to Zoho${on(first.state.submissionId)}"
+              case "settled"      => s"Settled without billing${on(first.state.submissionId)}"
+              case "leftOut"      => "Left out: in no send until put back"
+              case "inZohoByHand" =>
+                "In Zoho by hand: " + first.state.trace.toOption.fold("")(t => traceText(t, tz)) +
+                  ". Tick it to include it anyway."
+              case _              => "Unbilled"
+        val summary   = lines.map(_.summary).filter(_.nonEmpty).mkString(" ")
+        val shown     = messages.take(12)
+        <.div(
+          ^.className := "pointer-events-none fixed right-4 bottom-4 z-50 max-h-[70vh] w-[30rem] space-y-1 overflow-hidden rounded-md border border-border bg-card p-3 text-xs shadow-lg",
+          <.div(^.className := "font-semibold", first.title),
+          <.div(
+            ^.className := "tabular-nums",
+            s"${clock(first.start, tz)}–${clock(last.end, tz)} · ${hoursMinutes(total)} recorded" +
+              (if lines.length > 1 then s" · ${lines.length} stretches" else "")
+          ),
+          <.div(^.className := "text-muted-foreground", stateLine),
+          <.div(
+            summary,
+            <.span(^.className := "ml-1 text-muted-foreground", "(first message; no summary yet)").when(
+              lines.exists(!_.fromModel)
+            )
+          ).when(summary.nonEmpty),
+          <.div(
+            ^.className := "text-muted-foreground",
+            s"${messages.count(_.speaker == "User")} from you, ${messages.count(_.speaker == "Agent")} replies, ${messages.count(_.speaker == "Work")} actions"
+          ),
+          conversationList(js.Array(shown*), tz),
+          <.div(^.className := "text-muted-foreground", s"+${messages.length - shown.length} more turns").when(
+            messages.length > shown.length
+          )
+        )
+      }
+
     private def sendPanel(p: Props, s: State, tz: String, screen: SessionScreenJs, th: Threads): VdomNode =
       val byRoot = keysByRoot(screen, s.draft)
       val ref    = screen.sessions(screen.current)
@@ -591,6 +648,7 @@ object SessionsView:
                 )
               ),
               legend,
+              s.hover.map(keys => detailCard(s, tz, screen, th, keys)),
               sendPanel(p, s, tz, screen, th),
               <.div(^.className := "rounded-md border border-border p-2", timeline(p, s, tz, screen, th))
             )
@@ -599,7 +657,7 @@ object SessionsView:
 
   val Component = ScalaComponent
     .builder[Props]("SessionsView")
-    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false))
+    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))
     .componentDidMount(_.backend.load(None))
