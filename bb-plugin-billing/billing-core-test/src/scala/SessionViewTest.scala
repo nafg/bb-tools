@@ -58,3 +58,13 @@ class SessionViewTest extends munit.FunSuite:
       Seq(stretch("late", 100, 130), stretch("early", 10, 40))
     )
     assertEquals(forest.map(_.info.id), Vector("early", "late"))
+
+  test("stretches cut at midnight, touching and in the same state, are one mark"):
+    val ms = SessionView.marks(Seq(stretch("a", 0, 120), stretch("a", 120, 300)))
+    assertEquals(ms.length, 1)
+    assertEquals(ms.head.members.length, 2)
+    assertEquals(ms.head.durationMs, min(300))
+
+  test("touching stretches in different states stay separate marks"):
+    val sent = stretch("a", 120, 300).copy(state = StretchState.Sent("s1"))
+    assertEquals(SessionView.marks(Seq(stretch("a", 0, 120), sent)).length, 2)

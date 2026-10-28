@@ -62,12 +62,20 @@ object SessionView:
   /** Tiny stretches of one thread no further apart than this read as one mark. */
   val ClusterGapMs: Long = 10 * 60_000L
 
+  /** Whether `s` belongs in the mark `prev` already is: it begins where that mark ends, in the same state (a stretch the
+    * recorder cut at midnight is one piece of work), or both are tiny and close together.
+    */
+  private def joins(prev: Mark, s: SessionStretch): Boolean =
+    val contiguous = s.window.start == prev.end && prev.members.last.state.getClass == s.state.getClass
+    val tinyNear   = s.durationMs < TinyMs && prev.members.forall(_.durationMs < TinyMs) &&
+      s.window.start - prev.end <= ClusterGapMs
+    contiguous || tinyNear
+
   /** Folds a thread's own stretches, in time order, so that runs of tiny ones close together become clusters. */
   def marks(stretches: Seq[SessionStretch]): Vector[Mark] =
     stretches.sortBy(s => (s.window.start, s.window.end)).foldLeft(Vector.empty[Mark]) { (acc, s) =>
       acc.lastOption match
-        case Some(prev) if s.durationMs < TinyMs && prev.members.forall(_.durationMs < TinyMs) &&
-              s.window.start - prev.end <= ClusterGapMs =>
+        case Some(prev) if joins(prev, s) =>
           acc.init :+ (prev match
             case Mark.One(f)          => Mark.Cluster(f, Vector(s))
             case Mark.Cluster(f, rest) => Mark.Cluster(f, rest :+ s))

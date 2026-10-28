@@ -347,13 +347,22 @@ final class Service(
           sessions.find(s => at.contains(s.start)).orElse(sessions.lastOption) match
             case None    => Future.successful(Right(SessionScreenResult(now, cal, sessions, None, Vector.empty, Vector.empty, Map.empty)))
             case Some(s) =>
-              val inSession = windows.filter(w => Sessions.containing(sessions, w).contains(s))
-              val ids       = inSession.map(_.threadId).distinct
+              val inSplit = windows.filter(w => Sessions.containing(sessions, w).contains(s))
+              val ids     = inSplit.map(_.threadId).distinct
               for
                 ctx  <- resolveWithContext(ids)
                 msgs <- Future.traverse(ids)(t => conversationOf(t).map(t -> _)).map(_.toMap)
               yield
                 val led       = ledgerOf()
+                // Long windows are cut at the user's message times exactly as the thread ledgers cut them, so a
+                // stretch here has the key the same stretch has there.
+                val inSession = inSplit.flatMap(w =>
+                  Windows.subdivide(
+                    w,
+                    msgs.getOrElse(w.threadId, Vector.empty).filter(_.speaker == Speaker.User).map(_.at),
+                    WindowMaxMs
+                  )
+                )
                 val stretches = Ledger.of(inSession, led.covering, led.struck, Map.empty)
                 val titles    = ctx.summaries.map((t, sm) => t -> sm.title)
                 val cached    = summaries.cached(stretches.map(_.window))
