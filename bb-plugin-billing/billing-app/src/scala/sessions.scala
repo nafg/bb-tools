@@ -244,7 +244,16 @@ object SessionsView:
         ^.className := "grid gap-x-6 gap-y-1 text-xs text-muted-foreground sm:grid-cols-2 lg:grid-cols-3",
         sample("☑ 5m 22:28 · unbilled", StretchState.Unbilled, ticked = true, "Click to untick. Goes into the next send."),
         sample("☐ 5m 22:28 · unbilled", StretchState.Unbilled, ticked = false, "Click to tick it."),
-        sample("3 short · 1m · unbilled", StretchState.Unbilled, ticked = true, "A few tiny stretches, ticked together.", dotted = true),
+        sample("3 short · 1m · unbilled", StretchState.Unbilled, ticked = true, "Several tiny stretches of one thread as one mark. One click ticks or unticks all of them.", dotted = true),
+        <.div(
+          ^.key       := "not-billable",
+          ^.className := "flex items-center gap-2",
+          <.div(
+            ^.className := "w-40 shrink-0 rounded border border-border bg-background px-1 py-0.5 text-[10px] font-medium leading-tight text-muted-foreground",
+            "5m 22:28 · not billable"
+          ),
+          <.span("Not billable: a thread with no client. Shown so you can see what you did; nothing to tick.")
+        ),
         sample("5m 22:28 · left out", StretchState.LeftOut, ticked = false, "Out of every send. \"put back\" undoes it."),
         sample("5m 22:28 · sent", StretchState.Sent(""), ticked = false, "Already in Zoho."),
         sample("5m 22:28 · settled", StretchState.Settled(""), ticked = false, "Marked done without billing."),
@@ -279,17 +288,22 @@ object SessionsView:
       val height   = math.max(pm.yBottom - pm.yTop - 2, 14.0)
       val parts    = members.length
       val tiny     = members.forall(_.durationMs < SessionView.TinyMs)
+      // Time on a thread that does not bill is shown, never decided: hollow, and "not billable" in place of "unbilled".
+      val hollow = !th.bills(members.head.window.threadId) && members.forall(_.state == StretchState.Unbilled)
+      def word(st: StretchState): String = if hollow then "not billable" else stateWord(st)
+      def look(st: StretchState): String =
+        if hollow then "border-border bg-background text-muted-foreground" else stateClass(st, ticked)
       val (cls, head, body) = pm.mark match
         case Mark.One(st)  =>
           (
-            stateClass(st.state, ticked),
-            s"${hoursMinutes(st.durationMs.toDouble)} ${clock(st.window.start.toDouble, tz)} · ${stateWord(st.state)}",
+            look(st.state),
+            s"${hoursMinutes(st.durationMs.toDouble)} ${clock(st.window.start.toDouble, tz)} · ${word(st.state)}",
             st.text.getOrElse("")
           )
         case Mark.Cluster(f, _) =>
-          val states = members.map(m => stateWord(m.state)).distinct
+          val states = members.map(m => word(m.state)).distinct
           (
-            stateClass(f.state, ticked) + " border-dotted",
+            look(f.state) + " border-dotted",
             s"$parts ${if tiny then "short" else "parts"} · ${hoursMinutes(pm.mark.durationMs.toDouble)} ${clock(f.window.start.toDouble, tz)}" +
               (if states.length > 1 then " · mixed" else s" · ${states.head}"),
             members.flatMap(_.text).headOption.getOrElse("")
