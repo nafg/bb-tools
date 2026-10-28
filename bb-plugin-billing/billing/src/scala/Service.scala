@@ -376,6 +376,10 @@ final class Service(
       }
     }
 
+  /** Where a thread bills, when it does. */
+  private def billsTo(ctx: Context, threadId: String): Option[ZohoTarget] =
+    ctx.resolution.resolved.get(threadId).map(_.billability).collect { case Billability.Billable(z) => z }
+
   /** One session's threads and stretches, with the lines the ledger would show. */
   private def sessionDetail(
     now: Long,
@@ -388,11 +392,35 @@ final class Service(
     s: Session): Future[SessionScreenResult] =
     val inSplit = windows.filter(w => Sessions.containing(sessions, w).contains(s))
     val ids     = inSplit.map(_.threadId).distinct
+    val days = inSplit.map(_.day).distinct.sorted
     for
-      ctx  <- resolveWithContext(ids)
-      msgs <- Future.traverse(ids)(t => conversationOf(t).map(t -> _)).map(_.toMap)
+      ctx   <- resolveWithContext(ids)
+      msgs  <- Future.traverse(ids)(t => conversationOf(t).map(t -> _)).map(_.toMap)
+      // A timer a thread left running is measured by the time Zoho logged for its entry, and that entry is dated the
+      // day the timer started, which may be before this session. So the Zoho entries are read from each such day on,
+      // for each project the session's threads bill to. Read only; nothing is written to Zoho.
+      rawTraces = ids.map(t => t -> ZohoTrace.of(msgs.getOrElse(t, Vector.empty).flatMap(_.call))).toMap
+      handDays  = (days ++ rawTraces.values.flatten.collect { case ZohoTrace.TimerLeftRunning(s, _) =>
+                    cal.dayOf(s)
+                  }).distinct.sorted
+      hands    <- Future.traverse(ids.flatMap(t => billsTo(ctx, t)).distinct)(z =>
+                    handEntered(Some(z), handDays).map(r => z -> r._1)
+                  ).map(_.toMap)
     yield
       val led       = ledgerOf()
+      // The same traces the thread ledger uses, so a stretch is "in Zoho by hand" here exactly when it is there.
+      val traces    = rawTraces.map { (t, own) =>
+        t -> ZohoTrace.lengthened(
+          own,
+          left =>
+            billsTo(ctx, t).flatMap(hands.get).flatMap(
+              _.map(_.entry).find(e =>
+                e.date == cal.dayOf(left.start) && e.notes.trim.nonEmpty && left.detail.contains(e.notes.trim)
+              )
+            ).map(_.minutes * 60_000L),
+          all.filter(_.threadId == t).map(i => (i.start, i.end))
+        )
+      }.toMap.withDefaultValue(Vector.empty)
       // Long windows are cut at the user's message times exactly as the thread ledgers cut them, so a stretch here
       // has the key the same stretch has there.
       val inSession = inSplit.flatMap(w =>
@@ -402,7 +430,7 @@ final class Service(
           WindowMaxMs
         )
       )
-      val stretches = Ledger.of(inSession, led.covering, led.struck, Map.empty)
+      val stretches = Ledger.of(inSession, led.covering, led.struck, traces)
       val titles    = ctx.summaries.map((t, sm) => t -> sm.title)
       val cached    = summaries.cached(stretches.map(_.window))
       val lines     = stretches.map { st =>
