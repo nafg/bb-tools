@@ -50,6 +50,7 @@ object ReplyView:
 
   given Aux[Reply.Ok, js.Any]                             = as
   given Aux[Reply.Overview, OverviewResult]               = as
+  given Aux[Reply.SessionScreen, SessionScreenJs]         = as
   given Aux[Reply.Ledger, LedgerJs]                       = as
   given Aux[Reply.Plan, PlanJs]                           = as
   given Aux[Reply.Submission, js.Any]                     = as
@@ -1120,6 +1121,7 @@ object ReviewPage:
       if sub.startsWith("report") then "report"
       else if sub.startsWith("projects") then "projects"
       else if sub.startsWith("submissions") then "submissions"
+      else if sub.startsWith("sessions") then "sessions"
       else "bill"
     def tabButton(id: String, label: String) =
       <.button(
@@ -1132,16 +1134,18 @@ object ReviewPage:
     <.div(
       ^.className := "h-full overflow-auto p-4 md:p-5",
       <.div(
-        ^.className := "mx-auto w-full max-w-5xl space-y-4",
+        ^.className := (if tab == "sessions" then "w-full space-y-4" else "mx-auto w-full max-w-5xl space-y-4"),
         <.div(
           ^.className := "flex gap-1 border-b border-border",
           tabButton("bill", "To bill"),
+          tabButton("sessions", "Sessions"),
           tabButton("projects", "Projects"),
           tabButton("submissions", "Submissions"),
           tabButton("report", "Client report")
         ),
         tab match
           case "report"      => ReportView.Component(ReportView.Props(props.call, openThread))
+          case "sessions"    => SessionsView.Component(SessionsView.Props(props.call, openThread, props.event))
           case "projects"    => ProjectsView.Component(ProjectsView.Props(props.call))
           case "submissions" =>
             SubmissionsView.Component(SubmissionsView.Props(props.call, openThread, props.event))

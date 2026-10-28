@@ -321,3 +321,21 @@ def accountOf(value: js.Any): Option[ThreadAccount]             = ThreadAccount.
 def accounts(values: js.Array[js.Any]): Vector[ThreadAccount]   = values.toVector.flatMap(accountOf)
 def recordOf(value: js.Any): Option[SubmissionRecord]           = SubmissionRecord.decode(WireJs.fromJs(value))
 def records(values: js.Array[js.Any]): Vector[SubmissionRecord] = values.toVector.flatMap(recordOf)
+
+trait SessionRefJs extends js.Object:
+  val start: Double
+  val end: Double
+  val threads: Int
+
+/** The sessions screen's reply: the recent sessions, and the stretches of every thread in the current one. */
+trait SessionScreenJs extends js.Object:
+  val timeZone: String
+  val now: Double
+  val sessions: js.Array[SessionRefJs]
+
+  /** Index into `sessions` of the one whose stretches follow, or -1 when there are none. */
+  val current: Int
+
+  /** `billingcore.ThreadAccount`s in their wire form. */
+  val threads: js.Array[js.Any]
+  val stretches: js.Array[LedgerStretchJs]
