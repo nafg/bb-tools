@@ -420,13 +420,15 @@ object ThreadTree:
     val ids                                      = all.map(_.threadId).toSet
     val children                                 = all.groupBy(t => t.parentThreadId.filter(ids).getOrElse(""))
     val projectsById                             = p.o.projects.map(pr => pr.projectId -> pr).toMap
-    def subtreeMs(t: ThreadAccount): Long        =
-      t.totals.unbilledMs + children.getOrElse(t.threadId, Vector.empty).map(subtreeMs).sum
     val anyClient                                = all.exists(_.billsTo.isDefined)
     val needDecision                             = all.count(_.standing.needsDecision)
     def needsDecision(t: ThreadAccount): Boolean =
       t.standing.needsDecision || children.getOrElse(t.threadId, Vector.empty).exists(needsDecision)
     val showOthers                               = p.showOthers || !anyClient
+    /** The unbilled time of the thread and its descendants, counting only the threads that bill unless others are shown. */
+    def subtreeMs(t: ThreadAccount): Long        =
+      (if showOthers || t.billsTo.isDefined then t.totals.unbilledMs else 0L) +
+        children.getOrElse(t.threadId, Vector.empty).map(subtreeMs).sum
     def keep(t: ThreadAccount): Boolean          =
       showOthers || (t.billsTo.isDefined && (t.totals.unbilledMs >= 60_000 || t.standing.needsDecision)) ||
         children.getOrElse(t.threadId, Vector.empty).exists(keep)
