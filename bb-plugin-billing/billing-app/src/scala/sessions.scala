@@ -26,7 +26,9 @@ object SessionsView:
     ledgers: Map[String, LedgerJs],
     busy: Boolean,
     /** The keys of the mark the pointer is over, whose full detail shows in the card at the corner. */
-    hover: Option[Vector[String]])
+    hover: Option[Vector[String]],
+    /** The billing roots whose summaries are being written. */
+    writing: Set[String])
 
   /** The ticks of each session, kept outside the component so a reload or a visit elsewhere does not lose them. */
   private val savedDrafts = scala.collection.mutable.Map.empty[Double, Set[String]]
@@ -73,10 +75,13 @@ object SessionsView:
         )
       case _              => StretchState.Unbilled
 
-  /** What a stretch shows without a click: the first thing the user said in it, else the summary. */
+  /** What a stretch shows without a click: the model's line when one has been written, else the first thing the user
+    * said in it, else the fallback line.
+    */
   private def textOf(l: LedgerStretchJs): Option[String] =
-    l.messages.find(_.speaker == "User").map(_.text.trim).filter(_.nonEmpty)
-      .orElse(Option(l.summary).map(_.trim).filter(_.nonEmpty))
+    val summary = Option(l.summary).map(_.trim).filter(_.nonEmpty)
+    val first   = l.messages.find(_.speaker == "User").map(_.text.trim).filter(_.nonEmpty)
+    if l.fromModel then summary.orElse(first) else first.orElse(summary)
 
   private def stateWord(st: StretchState): String =
     st match
@@ -149,6 +154,30 @@ object SessionsView:
           )
         ))
       )
+
+    /** Starts the existing summary run for the ticked stretches of a billing root that have no line yet. The run takes a
+      * while; `BillingEvent` says when it ended (see `onEvent`).
+      */
+    private def writeSummaries(root: String): Callback =
+      $.props.zip($.state).flatMap { (p, s) =>
+        s.screen.fold(Callback.empty) { screen =>
+          val keys = keysByRoot(screen, s.draft).getOrElse(root, Vector.empty)
+          $.modState(st => st.copy(writing = st.writing + root, error = None)) >>
+            Callback.future(
+              rpc(p.call, BillingRpc.Summarize(root, subthreads = true, DraftPick.Keys(keys.toSet)))
+                .map(_ => Callback.empty)
+                .recover { case e => $.modState(st => st.copy(writing = st.writing - root, error = Some(errorMessage(e)))) }
+            )
+        }
+      }
+
+    def onEvent(event: BillingEvent): Callback =
+      event match
+        case BillingEvent.SummariesWritten(id)      => $.modState(st => st.copy(writing = st.writing - id)) >> reloadCurrent
+        case BillingEvent.SummariesFailed(id, why)  =>
+          $.modState(st => st.copy(writing = st.writing - id, error = Some(s"Summaries not written: $why")))
+        case BillingEvent.Changed                   => reloadCurrent
+        case _                                      => Callback.empty
 
     private def setHover(keys: Option[Vector[String]]): Callback =
       $.modState(s => if s.hover == keys then s else s.copy(hover = keys))
@@ -525,6 +554,7 @@ object SessionsView:
           byRoot.toVector.sortBy(_._1).map { (root, keys) =>
             val plan     = s.plans.get(root)
             val blockers = plan.fold(Vector.empty[String])(_.blockers.toVector)
+            val missing  = screen.stretches.toVector.count(l => keys.contains(l.key) && !l.fromModel)
             val blocks   = s.ledgers.get(root).fold(Vector.empty[Block])(l =>
               l.blocks.toVector.filter(b => nullable(b.decision).isEmpty && b.end > ref.start && b.start < ref.end)
             )
@@ -570,7 +600,15 @@ object SessionsView:
                   ^.disabled  := (s.busy || plan.isEmpty),
                   ^.onClick --> send(root, billed = false),
                   "Settle without billing"
-                )
+                ),
+                <.button(
+                  ^.`type`    := "button",
+                  ^.className := buttonClass,
+                  ^.title     := "Asks a model to write a one-line summary of each ticked stretch that has none, and the notes for each day's entry.",
+                  ^.disabled  := (s.busy || s.writing(root)),
+                  ^.onClick --> writeSummaries(root),
+                  if s.writing(root) then "Writing summaries…" else s"Write summaries ($missing without one)"
+                ).when(missing > 0 || s.writing(root))
               )
             )
           }.toVdomArray
@@ -657,13 +695,13 @@ object SessionsView:
 
   val Component = ScalaComponent
     .builder[Props]("SessionsView")
-    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None))
+    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, writing = Set.empty))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))
     .componentDidMount(_.backend.load(None))
     .componentDidUpdate(x =>
       arrived(x.prevProps.event, x.currentProps.event) match
-        case Some(BillingEvent.Changed) => x.backend.reloadCurrent
-        case _                          => Callback.empty
+        case Some(event) => x.backend.onEvent(event)
+        case None        => Callback.empty
     )
     .build

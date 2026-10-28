@@ -37,8 +37,15 @@ object SessionGeometry:
   /** A quiet spell at least this long is drawn as a labelled break. */
   val LongQuietMs: Long = 60 * 60_000L
 
-  /** The minimum height a mark must get so its text is readable: what the stretch's duration alone would give. */
-  def minHeight(mark: Mark): Double = StretchHeight.px(mark.durationMs)
+  /** Height added to a mark that has text to show, so two lines of it fit below the heading. */
+  val TextExtraPx: Double = 30.0
+
+  /** The minimum height a mark must get so it is readable: what its duration alone would give, and room for its text
+    * when it has any.
+    */
+  def minHeight(mark: Mark): Double =
+    StretchHeight.px(mark.durationMs) +
+      (if mark.members.exists(_.text.exists(_.trim.nonEmpty)) then TextExtraPx else 0.0)
 
   /** The axis moments, with any closer than `AxisMinGapPx` to the last one kept dropped so labels do not pile up. */
   val AxisMinGapPx: Double = 16.0

@@ -66,3 +66,10 @@ class SessionGeometryTest extends munit.FunSuite:
     val l  = layout(Seq(thread("a")), (0 until 30).map(i => stretch("a", i * 3, i * 3 + 1)))
     val ys = l.axis.map(_._1)
     assert(ys.zip(ys.drop(1)).forall((a, b) => b - a >= SessionGeometry.AxisMinGapPx - 1e-9))
+
+  test("a mark with text to show is taller than the same mark without"):
+    val plain  = Mark.One(stretch("a", 0, 1))
+    val texted = Mark.One(stretch("a", 0, 1).copy(text = Some("Wrote the schema")))
+    assertEquals(SessionGeometry.minHeight(texted) - SessionGeometry.minHeight(plain), SessionGeometry.TextExtraPx)
+    val blank = Mark.One(stretch("a", 0, 1).copy(text = Some("   ")))
+    assertEquals(SessionGeometry.minHeight(blank), SessionGeometry.minHeight(plain))
