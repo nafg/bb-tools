@@ -8,8 +8,8 @@ class SessionsTest extends munit.FunSuite:
     assertEquals(Sessions.of(Nil), Vector.empty)
 
   test("stretches closer together than the gap are one session"):
-    val s = Sessions.of(Seq(w("a", 0, 10), w("b", 70, 80), w("a", 200, 210)))
-    assertEquals(s, Vector(Session(min(0), min(210), Set("a", "b"))))
+    val s = Sessions.of(Seq(w("a", 0, 10), w("b", 70, 80), w("a", 170, 180)))
+    assertEquals(s, Vector(Session(min(0), min(180), Set("a", "b"))))
 
   test("a gap of exactly the session gap ends the session"):
     val gap = Sessions.DefaultGapMs / 60_000

@@ -8,7 +8,7 @@ final case class Session(start: Long, end: Long, threadIds: Set[String]):
 
 object Sessions:
   /** How long a quiet spell, with no attention on any thread, ends one session and begins the next. */
-  val DefaultGapMs: Long = 5 * 3600_000L
+  val DefaultGapMs: Long = 2 * 3600_000L
 
   /** The sessions of the given stretches, oldest first. A stretch belongs to the session it starts in; a gap shorter
     * than `gapMs` never separates two sessions, however many stretches lie on either side.
