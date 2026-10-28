@@ -22,8 +22,11 @@ final case class Message(at: Long, seq: String, speaker: Speaker, text: String, 
   * recap plugin does.
   */
 final class Conversation(bb: BbApi)(using ExecutionContext):
-  /** Pages of the timeline read at most; a thread longer than that keeps its oldest part. */
-  private val MaxPages = 40
+  /** Pages of the timeline read at most. The timeline is read from the newest page back, so a thread longer than this
+    * loses its oldest part: a stretch from before that has no messages to count or to summarize. The limit only guards
+    * against a runaway; a thread of a few thousand rows is read whole.
+    */
+  private val MaxPages = 600
 
   def of(threadId: String): Future[Vector[Message]] =
     def page(before: Option[(String, Double)], acc: Vector[js.Dynamic], n: Int): Future[Vector[js.Dynamic]] =
