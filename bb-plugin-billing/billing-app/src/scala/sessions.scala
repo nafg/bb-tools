@@ -460,6 +460,39 @@ object SessionsView:
                 )
               ),
               <.div(
+                ^.className := "space-y-1",
+                <.div(
+                  ^.className := "flex items-center gap-2 text-xs text-muted-foreground",
+                  <.span("All sessions, oldest first. Bold means time still to bill."),
+                  <.button(
+                    ^.`type`    := "button",
+                    ^.className := buttonClass,
+                    ^.disabled  := s.loading,
+                    ^.onClick --> load(None),
+                    "Oldest with time to bill"
+                  )
+                ),
+                <.div(
+                  ^.className := "flex max-h-28 flex-wrap gap-1 overflow-auto",
+                  screen.sessions.toVector.zipWithIndex.map { (ss, i) =>
+                    val left = ss.unbilledMs > 0
+                    <.button(
+                      ^.key       := ss.start,
+                      ^.`type`    := "button",
+                      ^.title     := s"${ss.threads} threads, ${hoursMinutes(ss.end - ss.start)} long",
+                      ^.className := "rounded border px-2 py-0.5 text-[11px] " +
+                        (if i == screen.current then "border-primary bg-primary text-primary-foreground"
+                         else if left then "border-border font-semibold hover:bg-accent"
+                         else "border-border text-muted-foreground hover:bg-accent"),
+                      ^.disabled  := s.loading,
+                      ^.onClick --> go(i),
+                      s"${shortDay(ss.start, tz)} ${clock(ss.start, tz)}" +
+                        (if left then s" · ${hoursMinutes(ss.unbilledMs)} to bill" else "")
+                    )
+                  }.toVdomArray
+                )
+              ),
+              <.div(
                 ^.className := "flex flex-wrap gap-3 text-xs text-muted-foreground",
                 <.span("blue: unbilled"),
                 <.span("green: sent"),

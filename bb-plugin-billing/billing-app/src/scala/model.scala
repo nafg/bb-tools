@@ -327,6 +327,9 @@ trait SessionRefJs extends js.Object:
   val end: Double
   val threads: Int
 
+  /** Unbilled time on threads that bill, in this session. */
+  val unbilledMs: Double
+
 /** The sessions screen's reply: the recent sessions, and the stretches of every thread in the current one. */
 trait SessionScreenJs extends js.Object:
   val timeZone: String

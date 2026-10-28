@@ -244,7 +244,12 @@ object Json:
       "timeZone" -> r.calendar.timeZone,
       "now"      -> r.now.toDouble,
       "sessions" -> r.sessions.map(s =>
-        js.Dynamic.literal("start" -> s.start.toDouble, "end" -> s.end.toDouble, "threads" -> s.threadIds.size)
+        js.Dynamic.literal(
+          "start"      -> s.start.toDouble,
+          "end"        -> s.end.toDouble,
+          "threads"    -> s.threadIds.size,
+          "unbilledMs" -> r.unbilledMs.getOrElse(s.start, 0L).toDouble
+        )
       ).toJSArray,
       "current"   -> r.chosen.fold(-1)(c => r.sessions.indexWhere(_.start == c.start)),
       "threads"   -> r.threads.map(thread).toJSArray,

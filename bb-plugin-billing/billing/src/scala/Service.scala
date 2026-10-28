@@ -32,6 +32,8 @@ final case class SessionScreenResult(
   now: Long,
   calendar: IntlCalendar,
   sessions: Vector[Session],
+  /** What each session still has to bill: unbilled time on threads that bill, by the session's start. */
+  unbilledMs: Map[Long, Long],
   chosen: Option[Session],
   threads: Vector[ThreadAccount],
   stretches: Vector[LedgerLine],
@@ -344,53 +346,85 @@ final class Service(
           val split    = Intervals.splitByDay(all, cal)
           val windows  = split.map(i => Window(i.threadId, i.day, i.start, i.end))
           val sessions = Sessions.of(windows)
-          sessions.find(s => at.contains(s.start)).orElse(sessions.lastOption) match
-            case None    => Future.successful(Right(SessionScreenResult(now, cal, sessions, None, Vector.empty, Vector.empty, Map.empty)))
-            case Some(s) =>
-              val inSplit = windows.filter(w => Sessions.containing(sessions, w).contains(s))
-              val ids     = inSplit.map(_.threadId).distinct
-              for
-                ctx  <- resolveWithContext(ids)
-                msgs <- Future.traverse(ids)(t => conversationOf(t).map(t -> _)).map(_.toMap)
-              yield
-                val led       = ledgerOf()
-                // Long windows are cut at the user's message times exactly as the thread ledgers cut them, so a
-                // stretch here has the key the same stretch has there.
-                val inSession = inSplit.flatMap(w =>
-                  Windows.subdivide(
-                    w,
-                    msgs.getOrElse(w.threadId, Vector.empty).filter(_.speaker == Speaker.User).map(_.at),
-                    WindowMaxMs
-                  )
-                )
-                val stretches = Ledger.of(inSession, led.covering, led.struck, Map.empty)
-                val titles    = ctx.summaries.map((t, sm) => t -> sm.title)
-                val cached    = summaries.cached(stretches.map(_.window))
-                val lines     = stretches.map { st =>
-                  val w      = st.window
-                  val inside = msgs.getOrElse(w.threadId, Vector.empty).filter(m => m.at >= w.start && m.at < w.end)
-                  LedgerLine(
-                    st,
-                    cached.getOrElse(w.key, summaries.fallbackWindow(titles.getOrElse(w.threadId, w.threadId), inside)),
-                    cached.contains(w.key),
-                    inside
-                  )
-                }
-                Right(
-                  SessionScreenResult(
-                    now,
-                    cal,
-                    sessions,
-                    Some(s),
-                    ctx.summaries.keys.toVector.map(t =>
-                      account(t, ctx, totalsOf(t, led, split), led.submissionsOf(t), all.filter(_.threadId == t))
-                    ),
-                    lines,
-                    titles
-                  )
-                )
+          for
+            everyone <- resolveWithContext(windows.map(_.threadId).distinct)
+            led0      = ledgerOf()
+            billable  = (t: String) =>
+                          everyone.resolution.resolved.get(t).exists(_.billability match
+                            case Billability.Billable(_) => true
+                            case Billability.NotBillable => false
+                          )
+            unbilledMs = Ledger.of(windows, led0.covering, led0.struck, Map.empty)
+                           .filter(l => l.state == StretchState.Unbilled && billable(l.window.threadId))
+                           .flatMap(l => Sessions.containing(sessions, l.window).map(_.start -> l.window.durationMs))
+                           .groupMapReduce(_._1)(_._2)(_ + _)
+            // The session to open: the one asked for, else the oldest with something left to bill, else the latest.
+            chosen     = sessions.find(s => at.contains(s.start))
+                           .orElse(sessions.find(s => unbilledMs.getOrElse(s.start, 0L) > 0))
+                           .orElse(sessions.lastOption)
+            result    <- chosen match
+                           case None    =>
+                             Future.successful(
+                               SessionScreenResult(
+                                 now, cal, sessions, unbilledMs, None, Vector.empty, Vector.empty, Map.empty
+                               )
+                             )
+                           case Some(s) => sessionDetail(now, cal, all, split, windows, sessions, unbilledMs, s)
+          yield Right(result)
       }
     }
+
+  /** One session's threads and stretches, with the lines the ledger would show. */
+  private def sessionDetail(
+    now: Long,
+    cal: IntlCalendar,
+    all: Vector[Interval],
+    split: Vector[DayInterval],
+    windows: Vector[Window],
+    sessions: Vector[Session],
+    unbilledMs: Map[Long, Long],
+    s: Session): Future[SessionScreenResult] =
+    val inSplit = windows.filter(w => Sessions.containing(sessions, w).contains(s))
+    val ids     = inSplit.map(_.threadId).distinct
+    for
+      ctx  <- resolveWithContext(ids)
+      msgs <- Future.traverse(ids)(t => conversationOf(t).map(t -> _)).map(_.toMap)
+    yield
+      val led       = ledgerOf()
+      // Long windows are cut at the user's message times exactly as the thread ledgers cut them, so a stretch here
+      // has the key the same stretch has there.
+      val inSession = inSplit.flatMap(w =>
+        Windows.subdivide(
+          w,
+          msgs.getOrElse(w.threadId, Vector.empty).filter(_.speaker == Speaker.User).map(_.at),
+          WindowMaxMs
+        )
+      )
+      val stretches = Ledger.of(inSession, led.covering, led.struck, Map.empty)
+      val titles    = ctx.summaries.map((t, sm) => t -> sm.title)
+      val cached    = summaries.cached(stretches.map(_.window))
+      val lines     = stretches.map { st =>
+        val w      = st.window
+        val inside = msgs.getOrElse(w.threadId, Vector.empty).filter(m => m.at >= w.start && m.at < w.end)
+        LedgerLine(
+          st,
+          cached.getOrElse(w.key, summaries.fallbackWindow(titles.getOrElse(w.threadId, w.threadId), inside)),
+          cached.contains(w.key),
+          inside
+        )
+      }
+      SessionScreenResult(
+        now,
+        cal,
+        sessions,
+        unbilledMs,
+        Some(s),
+        ctx.summaries.keys.toVector.map(t =>
+          account(t, ctx, totalsOf(t, led, split), led.submissionsOf(t), all.filter(_.threadId == t))
+        ),
+        lines,
+        titles
+      )
 
   /** The threads under `root`, every level, archived ones included. */
   private def descendants(root: String): Future[Vector[String]] =
