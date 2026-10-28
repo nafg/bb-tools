@@ -156,7 +156,7 @@ object SessionsView:
 
     private def leaveOut(keys: Vector[String], out: Boolean): Callback =
       $.props.flatMap(p =>
-        $.modState(s => s.copy(draft = if out then s.draft -- keys else s.draft, busy = true)) >>
+        $.modState(s => s.copy(draft = if out then s.draft -- keys else s.draft ++ keys, busy = true)) >>
           Callback.future(
             keys.foldLeft(Future.unit)((done, key) =>
               done.flatMap(_ => rpc(p.call, BillingRpc.SetExcluded(key, out)).map(_ => ()))
