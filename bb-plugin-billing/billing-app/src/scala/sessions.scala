@@ -46,6 +46,9 @@ object SessionsView:
         case None    => id
 
   private val ColPx   = 170
+
+  /** Height of the sticky row naming every column; a box's own sticky name stops just under it. */
+  private val HeaderPx = 46
   private val AxisPx  = 64
 
   private def billingOf(t: ThreadAccount): Billing =
@@ -349,8 +352,8 @@ object SessionsView:
           case Billing.Bills         => ""
           case Billing.NotClientWork => " (not client work)"
           case Billing.Unmarked      => " (never marked as client work or not)")),
-        ^.className := "sticky top-0 z-20 block truncate rounded-sm bg-background/90 px-1 text-left text-[10px] font-semibold leading-[14px] hover:underline",
-        ^.style     := js.Dynamic.literal("width" -> (ColPx - 10)),
+        ^.className := "sticky top-0 z-30 block truncate rounded-sm bg-background px-1 text-left text-[10px] font-semibold leading-[14px] hover:underline",
+        ^.style     := js.Dynamic.literal("width" -> (ColPx - 10), "top" -> HeaderPx),
         ^.onClick --> openThread(p.box.info.id),
         p.box.info.title
       )
@@ -367,6 +370,8 @@ object SessionsView:
       )
       Vector[VdomNode](frame) ++ p.children.flatMap(boxView(_, openThread))
 
+    private def allBoxes(p: PlacedBox): Vector[PlacedBox] = p +: p.children.flatMap(allBoxes)
+
     private def allMarks(p: PlacedBox): Vector[(PlacedMark, Int, Option[String])] =
       p.own.zipWithIndex.map((pm, i) => (pm, p.column, if i == 0 then Some(p.box.info.title) else None)) ++
         p.children.flatMap(allMarks)
@@ -381,11 +386,45 @@ object SessionsView:
         SessionStretch(Window(l.threadId, l.day, l.start.toLong, l.end.toLong), stateOf(l.state), textOf(l))
       )
       val layout    = SessionGeometry.place(session, SessionView.forest(session, infos, stretches))
+      val width    = layout.columns * ColPx + AxisPx + 20
+      // Every thread in column order, so any thread can be found by name without scrolling the diagram.
+      val byColumn = layout.roots.flatMap(allBoxes).groupBy(_.column).toVector.sortBy(_._1)
+      val header   = <.div(
+        ^.className := "sticky top-0 z-40 border-b border-border bg-background",
+        ^.style     := js.Dynamic.literal("height" -> HeaderPx, "width" -> width),
+        byColumn.map { (column, boxes) =>
+          val names = boxes.sortBy(_.yTop).map(_.box.info)
+          <.div(
+            ^.key       := s"col-$column",
+            ^.title     := names.map(_.title).mkString("\n"),
+            ^.className := "absolute overflow-hidden text-[10px] leading-[14px]",
+            ^.style     := js.Dynamic.literal(
+              "left"   -> (AxisPx + column * ColPx + 4),
+              "top"    -> 2,
+              "width"  -> (ColPx - 10),
+              "height" -> (HeaderPx - 4)
+            ),
+            names.take(3).zipWithIndex.map { (t, i) =>
+              val label = if i == 2 && names.length > 3 then s"${t.title} +${names.length - 3} more" else t.title
+              <.button(
+                ^.`type`    := "button",
+                ^.key       := t.id,
+                ^.className := "block w-full truncate text-left font-semibold hover:underline",
+                ^.onClick --> p.openThread(t.id),
+                label
+              )
+            }.toVdomArray
+          )
+        }.toVdomArray
+      )
       <.div(
+        ^.style := js.Dynamic.literal("width" -> width),
+        header,
+        <.div(
         ^.className := "relative",
         ^.style     := js.Dynamic.literal(
           "height" -> (layout.height + 40),
-          "width"  -> (layout.columns * ColPx + AxisPx + 20)
+          "width"  -> width
         ),
         layout.roots.flatMap(boxView(_, p.openThread)).toVdomArray,
         layout.roots.flatMap(allMarks).map((pm, c, t) => markView(s, th, tz, pm, c, t)).toVdomArray,
@@ -409,6 +448,7 @@ object SessionsView:
             clock(a._2.toDouble, tz)
           )
         }.toVdomArray
+        )
       )
 
     /** What is ticked, priced per billing root, with what stops a send, and the buttons to send or settle. */
