@@ -156,13 +156,19 @@ object SessionsView:
 
     private def leaveOut(keys: Vector[String], out: Boolean): Callback =
       $.props.flatMap(p =>
-        $.modState(s => s.copy(draft = if out then s.draft -- keys else s.draft ++ keys, busy = true)) >>
+        $.modState(s => s.copy(draft = if out then s.draft -- keys else s.draft ++ keys, busy = true), saveDraft) >>
           Callback.future(
             keys.foldLeft(Future.unit)((done, key) =>
               done.flatMap(_ => rpc(p.call, BillingRpc.SetExcluded(key, out)).map(_ => ()))
             ).map(_ => $.modState(_.copy(busy = false)) >> reloadCurrent)
               .recover { case e => $.modState(_.copy(busy = false, error = Some(errorMessage(e)))) }
           )
+      )
+
+    /** Keeps the ticks of the open session where the next reload will find them. */
+    private def saveDraft: Callback =
+      $.state.map(s =>
+        s.screen.filter(_.current >= 0).foreach(sc => savedDrafts(sc.sessions(sc.current).start) = s.draft)
       )
 
     def reloadCurrent: Callback =
