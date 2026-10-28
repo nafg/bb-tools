@@ -474,31 +474,6 @@ object SessionsView:
             <.div(
               ^.className := "space-y-3",
               <.div(
-                ^.className := "flex flex-wrap items-center gap-2",
-                <.button(
-                  ^.`type`    := "button",
-                  ^.className := buttonClass,
-                  ^.disabled  := (screen.current == 0 || s.loading),
-                  ^.onClick --> go(screen.current - 1),
-                  "← Earlier session"
-                ),
-                <.span(
-                  ^.className := "text-sm font-medium",
-                  s"${stamp(ref.start, tz)} to ${clock(ref.end, tz)} · ${hoursMinutes(ref.end - ref.start)} · ${ref.threads} threads"
-                ),
-                <.button(
-                  ^.`type`    := "button",
-                  ^.className := buttonClass,
-                  ^.disabled  := (screen.current == screen.sessions.length - 1 || s.loading),
-                  ^.onClick --> go(screen.current + 1),
-                  "Later session →"
-                ),
-                <.span(
-                  ^.className := "text-xs text-muted-foreground",
-                  s"session ${screen.current + 1} of ${screen.sessions.length}; a gap of 2 hours with no attention starts a new one"
-                )
-              ),
-              <.div(
                 ^.className := "space-y-1",
                 <.div(
                   ^.className := "flex items-center gap-2 text-xs text-muted-foreground",
@@ -529,6 +504,31 @@ object SessionsView:
                         (if left then s" · ${hoursMinutes(ss.unbilledMs)} to bill" else "")
                     )
                   }.toVdomArray
+                )
+              ),
+              <.div(
+                ^.className := "flex flex-wrap items-center gap-2",
+                <.button(
+                  ^.`type`    := "button",
+                  ^.className := buttonClass,
+                  ^.disabled  := (screen.current == 0 || s.loading),
+                  ^.onClick --> go(screen.current - 1),
+                  "← Earlier session"
+                ),
+                <.span(
+                  ^.className := "text-sm font-medium",
+                  s"${stamp(ref.start, tz)} to ${clock(ref.end, tz)} · ${hoursMinutes(ref.end - ref.start)} · ${ref.threads} threads"
+                ),
+                <.button(
+                  ^.`type`    := "button",
+                  ^.className := buttonClass,
+                  ^.disabled  := (screen.current == screen.sessions.length - 1 || s.loading),
+                  ^.onClick --> go(screen.current + 1),
+                  "Later session →"
+                ),
+                <.span(
+                  ^.className := "text-xs text-muted-foreground",
+                  s"session ${screen.current + 1} of ${screen.sessions.length}; a gap of 2 hours with no attention starts a new one"
                 )
               ),
               legend,
