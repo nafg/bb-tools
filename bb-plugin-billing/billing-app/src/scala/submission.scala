@@ -443,14 +443,14 @@ object SubmissionPanel:
     private def compactRow(l: LedgerJs, s: State, g: StretchGroup, frozen: Boolean): VdomNode =
       <.div(
         ^.key       := g.first.key,
-        ^.className := "flex flex-wrap items-center gap-x-2 gap-y-1 rounded-md border px-3 py-1 text-xs " +
+        ^.className := "flex items-center gap-x-2 whitespace-nowrap rounded-md border px-3 py-1 text-xs " +
           (if g.keys.forall(s.draft) then "border-primary/60 bg-primary/5" else "border-border"),
         tickBox(s, g, frozen),
         <.span(^.className := "font-medium tabular-nums", range(l, g)),
         <.span(^.className := "text-muted-foreground", s"${hoursMinutes(g.durationMs)} recorded"),
         <.span(
-          ^.className := "text-muted-foreground",
-          if g.messages.isEmpty then "nothing said or done" else g.members.map(_.summary).mkString(" ").take(80)
+          ^.className := "min-w-0 flex-1 truncate text-muted-foreground",
+          if g.messages.isEmpty then "nothing said or done" else g.members.map(_.summary).mkString(" ")
         ),
         stateChip(l, g.first),
         leaveOutButton(g, frozen)
