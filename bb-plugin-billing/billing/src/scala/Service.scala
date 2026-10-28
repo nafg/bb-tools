@@ -348,15 +348,17 @@ final class Service(
           val split    = Intervals.splitByDay(all, cal)
           val windows  = split.map(i => Window(i.threadId, i.day, i.start, i.end))
           val sessions = Sessions.of(windows)
+          val allIds = windows.map(_.threadId).distinct
           for
-            everyone <- resolveWithContext(windows.map(_.threadId).distinct)
-            led0      = ledgerOf()
-            billable  = (t: String) =>
-                          everyone.resolution.resolved.get(t).exists(_.billability match
-                            case Billability.Billable(_) => true
-                            case Billability.NotBillable => false
-                          )
-            unbilledMs = Ledger.of(windows, led0.covering, led0.struck, Map.empty)
+            everyone  <- resolveWithContext(allIds)
+            led0       = ledgerOf()
+            billable   = (t: String) => billsTo(everyone, t).isDefined
+            billing    = allIds.filter(billable)
+            // What is still to bill leaves out time in Zoho by hand, so it takes the timer traces of every thread that
+            // bills (their conversations are read once and kept for a couple of minutes).
+            msgs0     <- Future.traverse(billing)(t => conversationOf(t).map(t -> _)).map(_.toMap)
+            traces0   <- timerTraces(everyone, cal, all, billing, windows.map(_.day).distinct.sorted, msgs0)
+            unbilledMs = Ledger.of(windows, led0.covering, led0.struck, traces0)
                            .filter(l => l.state == StretchState.Unbilled && billable(l.window.threadId))
                            .flatMap(l => Sessions.containing(sessions, l.window).map(_.start -> l.window.durationMs))
                            .groupMapReduce(_._1)(_._2)(_ + _)
@@ -374,6 +376,38 @@ final class Service(
                            case Some(s) => sessionDetail(now, cal, all, split, windows, sessions, unbilledMs, s)
           yield Right(result)
       }
+    }
+
+  /** The Zoho timer traces of each thread, as the thread ledger sees them: from the timer calls in its conversation,
+    * a timer left running measured by the time Zoho logged for its entry. That entry is dated the day the timer
+    * started, which may be before `days`, so the Zoho entries are read from each such day on, for each project the
+    * threads bill to. Read only; nothing is written to Zoho.
+    */
+  private def timerTraces(
+    ctx: Context,
+    cal: IntlCalendar,
+    all: Vector[Interval],
+    ids: Vector[String],
+    days: Vector[String],
+    msgs: Map[String, Vector[Message]]): Future[Map[String, Vector[ZohoTrace]]] =
+    val raw      = ids.map(t => t -> ZohoTrace.of(msgs.getOrElse(t, Vector.empty).flatMap(_.call))).toMap
+    val handDays = (days ++ raw.values.flatten.collect { case ZohoTrace.TimerLeftRunning(s, _) => cal.dayOf(s) })
+      .distinct.sorted
+    Future.traverse(ids.flatMap(t => billsTo(ctx, t)).distinct)(z =>
+      handEntered(Some(z), handDays).map(r => z -> r._1)
+    ).map(_.toMap).map { hands =>
+      raw.map { (t, own) =>
+        t -> ZohoTrace.lengthened(
+          own,
+          left =>
+            billsTo(ctx, t).flatMap(hands.get).flatMap(
+              _.map(_.entry).find(e =>
+                e.date == cal.dayOf(left.start) && e.notes.trim.nonEmpty && left.detail.contains(e.notes.trim)
+              )
+            ).map(_.minutes * 60_000L),
+          all.filter(_.threadId == t).map(i => (i.start, i.end))
+        )
+      }.withDefaultValue(Vector.empty)
     }
 
   /** Where a thread bills, when it does. */
@@ -394,33 +428,11 @@ final class Service(
     val ids     = inSplit.map(_.threadId).distinct
     val days = inSplit.map(_.day).distinct.sorted
     for
-      ctx   <- resolveWithContext(ids)
-      msgs  <- Future.traverse(ids)(t => conversationOf(t).map(t -> _)).map(_.toMap)
-      // A timer a thread left running is measured by the time Zoho logged for its entry, and that entry is dated the
-      // day the timer started, which may be before this session. So the Zoho entries are read from each such day on,
-      // for each project the session's threads bill to. Read only; nothing is written to Zoho.
-      rawTraces = ids.map(t => t -> ZohoTrace.of(msgs.getOrElse(t, Vector.empty).flatMap(_.call))).toMap
-      handDays  = (days ++ rawTraces.values.flatten.collect { case ZohoTrace.TimerLeftRunning(s, _) =>
-                    cal.dayOf(s)
-                  }).distinct.sorted
-      hands    <- Future.traverse(ids.flatMap(t => billsTo(ctx, t)).distinct)(z =>
-                    handEntered(Some(z), handDays).map(r => z -> r._1)
-                  ).map(_.toMap)
+      ctx    <- resolveWithContext(ids)
+      msgs   <- Future.traverse(ids)(t => conversationOf(t).map(t -> _)).map(_.toMap)
+      traces <- timerTraces(ctx, cal, all, ids, days, msgs)
     yield
       val led       = ledgerOf()
-      // The same traces the thread ledger uses, so a stretch is "in Zoho by hand" here exactly when it is there.
-      val traces    = rawTraces.map { (t, own) =>
-        t -> ZohoTrace.lengthened(
-          own,
-          left =>
-            billsTo(ctx, t).flatMap(hands.get).flatMap(
-              _.map(_.entry).find(e =>
-                e.date == cal.dayOf(left.start) && e.notes.trim.nonEmpty && left.detail.contains(e.notes.trim)
-              )
-            ).map(_.minutes * 60_000L),
-          all.filter(_.threadId == t).map(i => (i.start, i.end))
-        )
-      }.toMap.withDefaultValue(Vector.empty)
       // Long windows are cut at the user's message times exactly as the thread ledgers cut them, so a stretch here
       // has the key the same stretch has there.
       val inSession = inSplit.flatMap(w =>

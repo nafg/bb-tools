@@ -572,6 +572,21 @@ object SessionsView:
                   )
                 )
               ),
+              plan.filter(_.handEntered.length > 0).map(pl =>
+                <.div(
+                  ^.className := "space-y-0.5 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs",
+                  <.div(
+                    ^.className := "font-medium",
+                    s"Already in Zoho on these dates, not from bb (${pl.handEntered.length}): check against the ticked stretches for double billing"
+                  ),
+                  pl.handEntered.toVector.map(h =>
+                    <.div(
+                      ^.key := h.timeEntryId,
+                      s"${h.date}: ${hoursMinutes(h.minutes * 60_000)} ${h.taskName} by ${h.userName}: ${h.notes} (${h.billedStatus})"
+                    )
+                  ).toVdomArray
+                )
+              ),
               blockers.map(b => <.div(^.key := b, ^.className := "text-xs text-destructive", b)).toVdomArray,
               blocks.map { b =>
                 BlockCard.Component.withKey(b.key)(BlockCard.Props(
