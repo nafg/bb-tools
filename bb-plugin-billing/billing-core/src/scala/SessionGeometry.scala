@@ -40,6 +40,13 @@ object SessionGeometry:
   /** The minimum height a mark must get so its text is readable: what the stretch's duration alone would give. */
   def minHeight(mark: Mark): Double = StretchHeight.px(mark.durationMs)
 
+  /** The axis moments, with any closer than `AxisMinGapPx` to the last one kept dropped so labels do not pile up. */
+  val AxisMinGapPx: Double = 16.0
+  private def thin(axis: Vector[(Double, Long)]): Vector[(Double, Long)] =
+    axis.foldLeft(Vector.empty[(Double, Long)]) { (acc, p) =>
+      if acc.isEmpty || p._1 - acc.last._1 >= AxisMinGapPx then acc :+ p else acc
+    }
+
   private def marksOf(box: ThreadBox): Vector[Mark] = box.own ++ box.children.flatMap(marksOf)
 
   private def boxTimes(session: Session, box: ThreadBox): Vector[Long] =
@@ -75,21 +82,39 @@ object SessionGeometry:
     }
     def y(t: Long): Double = heights(math.min(math.max(t, session.start), session.end))
 
-    def widthOf(b: ThreadBox): Int = 1 + b.children.map(widthOf).sum
+    // A box is drawn from where its thread began, or first has activity, to where it ended, or last has activity.
+    def extent(b: ThreadBox): (Long, Long) =
+      val from = b.top match { case BoxEdge.Real(at) => at; case BoxEdge.ClippedAtSession => SessionView.firstActivity(b) }
+      val to   = b.bottom match { case BoxEdge.Real(at) => at; case BoxEdge.ClippedAtSession => SessionView.lastActivity(b) }
+      (math.min(from, SessionView.firstActivity(b)), math.max(to, SessionView.lastActivity(b)))
+
+    /** Siblings that are never active together share a column: each goes in the first lane free by its start. */
+    def lanes(siblings: Vector[ThreadBox]): Vector[Vector[ThreadBox]] =
+      siblings.sortBy(b => extent(b)._1).foldLeft(Vector.empty[Vector[ThreadBox]]) { (acc, b) =>
+        val (from, _) = extent(b)
+        acc.indexWhere(lane => extent(lane.last)._2 <= from) match
+          case -1 => acc :+ Vector(b)
+          case i  => acc.updated(i, acc(i) :+ b)
+      }
+
+    def widthOf(b: ThreadBox): Int                       = 1 + laneWidths(b.children).sum
+    def laneWidths(siblings: Vector[ThreadBox]): Vector[Int] = lanes(siblings).map(_.map(widthOf).max)
+
+    def placeAll(siblings: Vector[ThreadBox], column: Int): Vector[PlacedBox] =
+      val ls      = lanes(siblings)
+      val offsets = ls.scanLeft(column)((c, lane) => c + lane.map(widthOf).max)
+      ls.zip(offsets).flatMap((lane, c) => lane.map(b => placeBox(b, c)))
+
     def placeBox(b: ThreadBox, column: Int): PlacedBox =
-      val top      = b.top match { case BoxEdge.Real(at) => y(at); case BoxEdge.ClippedAtSession => 0.0 }
-      val bottom   = b.bottom match { case BoxEdge.Real(at) => y(at); case BoxEdge.ClippedAtSession => y(session.end) }
-      val offsets  = b.children.scanLeft(column + 1)((c, ch) => c + widthOf(ch))
-      val children = b.children.zip(offsets).map((ch, c) => placeBox(ch, c))
+      val (from, to) = extent(b)
       PlacedBox(
         b,
         column,
         widthOf(b),
-        top,
-        bottom,
+        y(from),
+        y(to),
         b.own.map(m => PlacedMark(m, y(m.start), y(m.end))),
-        children
+        placeAll(b.children, column + 1)
       )
-    val rootOffsets = forest.scanLeft(0)((c, b) => c + widthOf(b))
-    val placed      = forest.zip(rootOffsets).map((b, c) => placeBox(b, c))
-    SessionLayout(y(session.end), forest.map(widthOf).sum, placed, quiet.result(), moments.map(t => y(t) -> t))
+    val placed = placeAll(forest, 0)
+    SessionLayout(y(session.end), laneWidths(forest).sum, placed, quiet.result(), thin(moments.map(t => y(t) -> t)))

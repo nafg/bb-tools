@@ -51,3 +51,18 @@ class SessionGeometryTest extends munit.FunSuite:
     assertEquals((p.column, p.span), (0, 3))
     assertEquals(p.children.map(_.column), Vector(1, 2))
     assertEquals(l.columns, 3)
+
+  test("threads never active together share a column, threads active together do not"):
+    val l = layout(
+      Seq(thread("a"), thread("b"), thread("c")),
+      Seq(stretch("a", 0, 30), stretch("b", 40, 70), stretch("c", 20, 50))
+    )
+    val cols = l.roots.map(r => r.box.info.id -> r.column).toMap
+    assertEquals(cols("a"), cols("b"))
+    assertNotEquals(cols("a"), cols("c"))
+    assertEquals(l.columns, 2)
+
+  test("axis labels are never closer than the minimum gap"):
+    val l  = layout(Seq(thread("a")), (0 until 30).map(i => stretch("a", i * 3, i * 3 + 1)))
+    val ys = l.axis.map(_._1)
+    assert(ys.zip(ys.drop(1)).forall((a, b) => b - a >= SessionGeometry.AxisMinGapPx - 1e-9))

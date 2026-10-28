@@ -98,3 +98,7 @@ object SessionView:
   /** When the box, or anything inside it, first has activity. */
   def firstActivity(b: ThreadBox): Long =
     (b.own.map(_.start) ++ b.children.map(firstActivity)).min
+
+  /** When the box, or anything inside it, last has activity. */
+  def lastActivity(b: ThreadBox): Long =
+    (b.own.map(_.end) ++ b.children.map(lastActivity)).max
