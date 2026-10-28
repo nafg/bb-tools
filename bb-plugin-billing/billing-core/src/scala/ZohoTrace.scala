@@ -40,24 +40,30 @@ object ZohoTrace:
     n.contains("zoho") && n.contains("timer")
 
   /** A timer left running in the thread, given the time Zoho logged for its entry, becomes a run over the thread's
-    * recording from the start until that much recorded activity has gone by. Logged time is not clock time: the timer
-    * may have been paused, so the run is measured in recorded activity, not on the clock. `recording` is the thread's
-    * recorded intervals. When the recording runs out before the logged time is used up, the run ends with the
-    * recording.
+    * recorded activity: from the start until that much recorded activity has gone by, never beyond the end of the local
+    * day the timer started on (`dayEnd` of the start), because a Zoho entry's time belongs to its date and a timer does
+    * not run past midnight. Logged time is not clock time (the timer may have been paused), so the run is measured in
+    * recorded activity, and that logged time is only an upper bound: only activity that could have fallen while the
+    * timer ran counts. When the day's recorded activity runs out before the logged time is used up, the run ends with
+    * the last of it; when there is none, the trace stays a start with no run. `recording` is the thread's recorded
+    * intervals.
     */
   def lengthened(
     traces: Vector[ZohoTrace],
     loggedMs: TimerLeftRunning => Option[Long],
-    recording: Seq[(Long, Long)]): Vector[ZohoTrace] =
+    recording: Seq[(Long, Long)],
+    dayEnd: Long => Long): Vector[ZohoTrace] =
     val sorted                                        = recording.sortBy(_._1)
     def endAfter(start: Long, ms: Long): Option[Long] =
-      val (end, _) = sorted.foldLeft((Option.empty[Long], ms)) { case ((done, left), (s, e)) =>
-        if done.isDefined || e <= start then (done, left)
-        else
-          val from = math.max(s, start)
-          if e - from >= left then (Some(from + left), 0L) else (None, left - (e - from))
+      val cap   = dayEnd(start)
+      val inDay = sorted.collect { case (s, e) if e > start && s < cap => (math.max(s, start), math.min(e, cap)) }
+        .filter((s, e) => s < e)
+      val (end, _) = inDay.foldLeft((Option.empty[Long], ms)) { case ((done, left), (s, e)) =>
+        if done.isDefined then (done, left)
+        else if e - s >= left then (Some(s + left), 0L)
+        else (None, left - (e - s))
       }
-      end.orElse(sorted.filter(_._2 > start).map(_._2).maxOption)
+      end.orElse(inDay.map(_._2).maxOption)
     traces.map {
       case t: TimerLeftRunning =>
         loggedMs(t).filter(_ > 0).flatMap(ms => endAfter(t.start, ms).filter(_ > t.start).map(ms -> _))

@@ -405,7 +405,8 @@ final class Service(
                 e.date == cal.dayOf(left.start) && e.notes.trim.nonEmpty && left.detail.contains(e.notes.trim)
               )
             ).map(_.minutes * 60_000L),
-          all.filter(_.threadId == t).map(i => (i.start, i.end))
+          all.filter(_.threadId == t).map(i => (i.start, i.end)),
+          cal.nextDayStart
         )
       }.withDefaultValue(Vector.empty)
     }
@@ -539,7 +540,8 @@ final class Service(
                                                e.date == cal.dayOf(left.start) && e.notes.trim.nonEmpty &&
                                                  left.detail.contains(e.notes.trim)
                                              ).map(_.minutes * 60_000L),
-                                           raw.filter(_.threadId == t).map(i => (i.start, i.end))
+                                           raw.filter(_.threadId == t).map(i => (i.start, i.end)),
+                                           cal.nextDayStart
                                          )
                                        ).withDefaultValue(Vector.empty)
                            stretches = Ledger.of(windows, led.covering, led.struck, traces)

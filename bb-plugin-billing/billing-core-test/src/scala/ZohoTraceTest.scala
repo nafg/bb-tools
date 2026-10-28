@@ -56,7 +56,7 @@ class ZohoTraceTest extends FunSuite:
     val left = Vector(ZohoTrace.TimerLeftRunning(10 * H, "description: a"), ZohoTrace.TimerLeftRunning(20 * H, "b"))
     // recorded: 9-11, then a gap, then 12-15: 3h logged from 10 ends at 14, not at 13 on the clock
     val recording = Seq((9 * H, 11 * H), (12 * H, 15 * H))
-    val out       = ZohoTrace.lengthened(left, t => if t.detail.endsWith("a") then Some(3 * H) else None, recording)
+    val out       = ZohoTrace.lengthened(left, t => if t.detail.endsWith("a") then Some(3 * H) else None, recording, Calendar.Utc.nextDayStart)
     assertEquals(
       out,
       Vector(
@@ -69,6 +69,40 @@ class ZohoTraceTest extends FunSuite:
     val out = ZohoTrace.lengthened(
       Vector(ZohoTrace.TimerLeftRunning(10 * H, "a")),
       _ => Some(5 * H),
-      Seq((9 * H, 11 * H), (12 * H, 13 * H))
+      Seq((9 * H, 11 * H), (12 * H, 13 * H)),
+      Calendar.Utc.nextDayStart
     )
     assertEquals(out, Vector(ZohoTrace.TimerRan(10 * H, 13 * H, "a; 5h 00m logged, measured over recorded activity")))
+
+  test("a timer left running does not cover activity on later days: it could not have been running then"):
+    val day = 24 * H
+    // started on day 0 at 10:00, 2h logged; the thread's activity after that is only on days 2 and 3
+    val out = ZohoTrace.lengthened(
+      Vector(ZohoTrace.TimerLeftRunning(10 * H, "a")),
+      _ => Some(2 * H),
+      Seq((2 * day + H, 2 * day + 2 * H), (3 * day, 3 * day + H)),
+      Calendar.Utc.nextDayStart
+    )
+    assertEquals(out, Vector(ZohoTrace.TimerLeftRunning(10 * H, "a")))
+
+  test("a timer left running covers the rest of its own day only, whatever logged time is left"):
+    val day = 24 * H
+    val out = ZohoTrace.lengthened(
+      Vector(ZohoTrace.TimerLeftRunning(10 * H, "a")),
+      _ => Some(3 * H),
+      Seq((11 * H, 12 * H), (day + H, day + 3 * H)),
+      Calendar.Utc.nextDayStart
+    )
+    assertEquals(out, Vector(ZohoTrace.TimerRan(10 * H, 12 * H, "a; 3h 00m logged, measured over recorded activity")))
+
+  test("activity before the timer started is never covered"):
+    val out = ZohoTrace.lengthened(
+      Vector(ZohoTrace.TimerLeftRunning(10 * H, "a")),
+      _ => Some(2 * H),
+      Seq((8 * H, 9 * H), (11 * H, 11 * H + 30 * 60_000L)),
+      Calendar.Utc.nextDayStart
+    )
+    assertEquals(
+      out,
+      Vector(ZohoTrace.TimerRan(10 * H, 11 * H + 30 * 60_000L, "a; 2h 00m logged, measured over recorded activity"))
+    )
