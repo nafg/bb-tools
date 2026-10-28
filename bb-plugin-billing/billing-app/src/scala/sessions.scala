@@ -292,7 +292,7 @@ object SessionsView:
       val hollow = !th.bills(members.head.window.threadId) && members.forall(_.state == StretchState.Unbilled)
       def word(st: StretchState): String = if hollow then "not billable" else stateWord(st)
       def look(st: StretchState): String =
-        if hollow then "border-border bg-background text-muted-foreground" else stateClass(st, ticked)
+        if hollow then "border-border/60 bg-background font-normal text-muted-foreground/60" else stateClass(st, ticked)
       val (cls, head, body) = pm.mark match
         case Mark.One(st)  =>
           (
@@ -320,13 +320,13 @@ object SessionsView:
           "height" -> height
         ),
         ^.onClick --> (if canTick && !s.busy then tick(keys) else Callback.empty),
-        title.map(t => <.div(^.className := "truncate font-semibold", t)),
+        title.map(_ => <.div(^.className := "h-[14px]")),
         <.div(
-          ^.className := "flex items-center gap-1 font-medium whitespace-nowrap",
+          ^.className := (if hollow then "flex items-center gap-1 whitespace-nowrap" else "flex items-center gap-1 font-medium whitespace-nowrap"),
           if canTick then <.span(if ticked then "☑" else "☐") else EmptyVdom,
           <.span(^.className := "truncate", head)
         ),
-        <.div(^.className := "break-words text-muted-foreground", body.take(160)).when(body.nonEmpty && height > 44),
+        <.div(^.className := (if hollow then "break-words text-muted-foreground/60" else "break-words text-muted-foreground"), body.take(160)).when(body.nonEmpty && height > 44),
         <.button(
           ^.`type`    := "button",
           ^.className := "absolute right-0.5 bottom-0.5 rounded bg-background/80 px-1 text-[9px] underline",
@@ -342,6 +342,18 @@ object SessionsView:
         case Billing.Bills         => "border-blue-500/70 bg-blue-500/5"
         case Billing.NotClientWork => "border-border bg-muted/40"
         case Billing.Unmarked      => "border-dashed border-amber-500/70 bg-amber-500/5"
+      // The thread's name heads its box and stays at the top of the screen while the box is scrolled through.
+      val header  = <.button(
+        ^.`type`    := "button",
+        ^.title     := (p.box.info.title + (billing match
+          case Billing.Bills         => ""
+          case Billing.NotClientWork => " (not client work)"
+          case Billing.Unmarked      => " (never marked as client work or not)")),
+        ^.className := "sticky top-0 z-20 block truncate rounded-sm bg-background/90 px-1 text-left text-[10px] font-semibold leading-[14px] hover:underline",
+        ^.style     := js.Dynamic.literal("width" -> (ColPx - 10)),
+        ^.onClick --> openThread(p.box.info.id),
+        p.box.info.title
+      )
       val frame   = <.div(
         ^.key       := s"box-${p.box.info.id}",
         ^.className := s"absolute rounded border $cls",
@@ -350,22 +362,10 @@ object SessionsView:
           "top"    -> p.yTop,
           "width"  -> (p.span * ColPx - 4),
           "height" -> math.max(p.yBottom - p.yTop, 16.0)
-        )
-      )
-      // A box with marks of its own carries its title on its first mark; a container shows it at its top.
-      val title: VdomNode = if p.own.isEmpty then <.button(
-        ^.`type`    := "button",
-        ^.key       := s"title-${p.box.info.id}",
-        ^.className := "absolute truncate text-left text-[10px] font-semibold hover:underline",
-        ^.style     := js.Dynamic.literal(
-          "left"  -> (AxisPx + p.column * ColPx + 4),
-          "top"   -> (p.yTop + 1),
-          "width" -> (ColPx - 10)
         ),
-        ^.onClick --> openThread(p.box.info.id),
-        p.box.info.title
-      ) else EmptyVdom
-      Vector(frame, title) ++ p.children.flatMap(boxView(_, openThread))
+        header
+      )
+      Vector[VdomNode](frame) ++ p.children.flatMap(boxView(_, openThread))
 
     private def allMarks(p: PlacedBox): Vector[(PlacedMark, Int, Option[String])] =
       p.own.zipWithIndex.map((pm, i) => (pm, p.column, if i == 0 then Some(p.box.info.title) else None)) ++
@@ -547,7 +547,7 @@ object SessionsView:
               ),
               legend,
               sendPanel(p, s, tz, screen, th),
-              <.div(^.className := "overflow-auto rounded-md border border-border p-2", timeline(p, s, tz, screen, th))
+              <.div(^.className := "rounded-md border border-border p-2", timeline(p, s, tz, screen, th))
             )
         }.getOrElse(<.div(^.className := "text-sm text-muted-foreground", "Loading…").when(s.loading))
       )
