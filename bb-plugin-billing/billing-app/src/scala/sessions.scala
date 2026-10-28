@@ -222,6 +222,45 @@ object SessionsView:
         case StretchState.InZohoByHand(_) => "border-amber-500 bg-amber-200/70 dark:bg-amber-500/30"
       if ticked then base + " ring-2 ring-primary" else base
 
+    /** One swatch drawn like a real mark, and what it means or does. */
+    private def sample(
+      label: String,
+      state: StretchState,
+      ticked: Boolean,
+      caption: String,
+      dotted: Boolean = false): VdomNode =
+      <.div(
+        ^.key       := label,
+        ^.className := "flex items-center gap-2",
+        <.div(
+          ^.className := s"w-40 shrink-0 rounded border px-1 py-0.5 text-[10px] font-medium leading-tight ${stateClass(state, ticked)}${if dotted then " border-dotted" else ""}",
+          label
+        ),
+        <.span(caption)
+      )
+
+    private def legend: VdomNode =
+      <.div(
+        ^.className := "grid gap-x-6 gap-y-1 text-xs text-muted-foreground sm:grid-cols-2 lg:grid-cols-3",
+        sample("☑ 5m 22:28 · unbilled", StretchState.Unbilled, ticked = true, "Click to untick. Goes into the next send."),
+        sample("☐ 5m 22:28 · unbilled", StretchState.Unbilled, ticked = false, "Click to tick it."),
+        sample("3 short · 1m · unbilled", StretchState.Unbilled, ticked = true, "A few tiny stretches, ticked together.", dotted = true),
+        sample("5m 22:28 · left out", StretchState.LeftOut, ticked = false, "Out of every send. \"put back\" undoes it."),
+        sample("5m 22:28 · sent", StretchState.Sent(""), ticked = false, "Already in Zoho."),
+        sample("5m 22:28 · settled", StretchState.Settled(""), ticked = false, "Marked done without billing."),
+        sample("5m 22:28 · in Zoho by hand", StretchState.InZohoByHand(ZohoTrace.TimerLeftRunning(0L, "")), ticked = false, "Entered in Zoho yourself. Click to include it anyway."),
+        <.div(
+          ^.className := "flex items-center gap-2",
+          <.div(^.className := "h-5 w-40 shrink-0 rounded border border-dashed border-amber-500/70 bg-amber-500/5"),
+          <.span("A thread not yet marked as client work or not. Nothing to tick.")
+        ),
+        <.div(
+          ^.className := "flex items-center gap-2",
+          <.div(^.className := "h-5 w-40 shrink-0 rounded border border-blue-500/70 bg-blue-500/5"),
+          <.span("A client thread's box. Its title is on its first stretch; click the title to open it.")
+        )
+      )
+
     private def markView(
       s: State,
       th: Threads,
@@ -492,15 +531,7 @@ object SessionsView:
                   }.toVdomArray
                 )
               ),
-              <.div(
-                ^.className := "flex flex-wrap gap-3 text-xs text-muted-foreground",
-                <.span("blue: unbilled"),
-                <.span("green: sent"),
-                <.span("grey: left out or settled"),
-                <.span("amber: in Zoho by hand"),
-                <.span("ringed ☑: ticked, goes into the next send"),
-                <.span("dashed box: thread never marked as client work or not")
-              ),
+              legend,
               sendPanel(p, s, tz, screen, th),
               <.div(^.className := "overflow-auto rounded-md border border-border p-2", timeline(p, s, tz, screen, th))
             )
