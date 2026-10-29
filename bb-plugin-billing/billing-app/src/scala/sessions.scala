@@ -27,8 +27,8 @@ object SessionsView:
     busy: Boolean,
     /** The keys of the mark the pointer is over, whose full detail shows in the card at the corner. */
     hover: Option[Vector[String]],
-    /** Whether the pointer was on the right half of the window when the hover began, so the card opens on the left. */
-    hoverOnRight: Boolean,
+    /** Where the hover card goes, in window pixels: inside the Sessions panel, on the side away from the pointer. */
+    hoverAt: HoverAt,
     /** The billing roots whose summaries are being written. */
     writing: Set[String],
     /** The thread whose bill-to picker is open under its box's name. */
@@ -36,6 +36,9 @@ object SessionsView:
     /** The bb projects and the Zoho catalog the picker offers, read the first time a picker opens. */
     projects: Option[Vector[ProjectInfo]],
     catalog: Option[CatalogResult])
+
+  /** The hover card's horizontal place: its left edge and its width. */
+  final case class HoverAt(left: Double, width: Double)
 
   /** The ticks of each session, kept outside the component so a reload or a visit elsewhere does not lose them. */
   private val savedDrafts = scala.collection.mutable.Map.empty[Double, Set[String]]
@@ -219,9 +222,15 @@ object SessionsView:
     private def setHover(keys: Option[Vector[String]]): Callback =
       $.modState(s => if s.hover == keys then s else s.copy(hover = keys))
 
+    /** The card is fixed to the window but placed inside this panel, which may share the window with others. */
     private def startHover(keys: Vector[String], e: ReactMouseEvent): Callback =
-      val onRight = e.clientX > dom.window.innerWidth / 2
-      $.modState(s => if s.hover.contains(keys) && s.hoverOnRight == onRight then s else s.copy(hover = Some(keys), hoverOnRight = onRight))
+      val panel = Option(e.currentTarget.asInstanceOf[dom.Element].closest("[data-sessions-panel]"))
+        .map(_.getBoundingClientRect())
+      val (from, to) = panel.fold((0.0, dom.window.innerWidth.toDouble))(r => (r.left, r.right))
+      val width      = math.min(480.0, to - from - 32)
+      val at         =
+        if e.clientX > (from + to) / 2 then HoverAt(from + 16, width) else HoverAt(to - 16 - width, width)
+      $.modState(s => if s.hover.contains(keys) && s.hoverAt == at then s else s.copy(hover = Some(keys), hoverAt = at))
 
     /** Ticks or unticks, then prices: the price is asked once the new ticks are in the state, never before. */
     private def tick(keys: Vector[String]): Callback =
@@ -598,7 +607,8 @@ object SessionsView:
         val shown     = messages.take(12)
         <.div(
           // Opposite the pointer, so it never hides the stretch being pointed at; above the send panel (z-50).
-          ^.className := s"pointer-events-none fixed ${if s.hoverOnRight then "left-4" else "right-4"} bottom-4 z-[70] max-h-[70vh] w-[30rem] space-y-1 overflow-hidden rounded-md border border-border bg-card p-3 text-xs shadow-lg",
+          ^.style     := js.Dynamic.literal("left" -> s.hoverAt.left, "width" -> s.hoverAt.width),
+          ^.className := "pointer-events-none fixed bottom-4 z-[70] max-h-[70vh] space-y-1 overflow-hidden rounded-md border border-border bg-card p-3 text-xs shadow-lg",
           <.div(^.className := "font-semibold", first.title),
           <.div(
             ^.className := "tabular-nums",
@@ -714,6 +724,7 @@ object SessionsView:
       val pricing = s.error.isEmpty && s.screen.exists(sc => keysByRoot(sc, s.draft).keys.exists(r => !s.plans.contains(r)))
       val working = s.loading || s.busy || pricing || s.writing.nonEmpty
       <.div(
+        VdomAttr("data-sessions-panel") := "",
         ^.className := "space-y-3",
         <.div(
           ^.className := "fixed top-2 right-4 z-[60] flex items-center gap-2 rounded-md border border-border bg-background px-3 py-1 text-xs shadow-md",
@@ -826,7 +837,7 @@ object SessionsView:
 
   val Component = ScalaComponent
     .builder[Props]("SessionsView")
-    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, hoverOnRight = false, writing = Set.empty, picking = None, projects = None, catalog = None))
+    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Set.empty, picking = None, projects = None, catalog = None))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))
     .componentDidMount(_.backend.load(None))
