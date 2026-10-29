@@ -5,7 +5,6 @@ import bbplugin.SqliteDb
 import billingcore.{Allocation, BlockKey, Coverage, Span, SubmissionEntry, WireJs, ZohoTarget}
 
 import scala.scalajs.js
-import scala.scalajs.js.JSConverters.*
 
 /** A submission as stored: the stretches of one thread (and of the subthreads it covered) sent to Zoho, or deliberately
   * not billed, in one go. The spans are the state: a stretch is billed when a submission's span covers it.

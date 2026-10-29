@@ -149,7 +149,7 @@ object SubmissionPanel:
 
     def scrollIntoView: Callback =
       root.foreach(el =>
-        el.asInstanceOf[js.Dynamic].scrollIntoView(js.Dynamic.literal("behavior" -> "smooth", "block" -> "start")): Unit
+        val _ = el.asInstanceOf[js.Dynamic].scrollIntoView(js.Dynamic.literal("behavior" -> "smooth", "block" -> "start"))
       )
 
     /** Move to `phase` only if the request `id` is still the latest one; a slower, older reply changes nothing. */
@@ -195,7 +195,7 @@ object SubmissionPanel:
     def price: Callback =
       $.props.zip($.state).flatMap { (p, s) =>
         val id = s.pricing + 1
-        if s.draft.isEmpty then savedDrafts.remove(p.threadId) else savedDrafts(p.threadId) = s.draft
+        if s.draft.isEmpty then savedDrafts -= p.threadId else savedDrafts(p.threadId) = s.draft
         $.modState(_.copy(pricing = id, priced = None)) >>
           Callback.future(
             rpc(p.call, BillingRpc.Draft(p.threadId, s.subthreads, DraftPick.Keys(s.draft)))

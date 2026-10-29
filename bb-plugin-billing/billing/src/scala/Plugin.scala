@@ -1,7 +1,6 @@
 package billing
 
 import bbplugin.*
-import bbplugin.Dyn.str
 import billingcore.*
 
 import scala.concurrent.{ExecutionContext, Future}

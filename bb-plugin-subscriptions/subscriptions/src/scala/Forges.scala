@@ -6,7 +6,6 @@ import subscriptionscore.Snapshot.WorkflowRun as GitHubWorkflowRun
 
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.scalajs.js
-import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.annotation.JSImport
 
 @js.native
@@ -27,7 +26,7 @@ object Forges:
   private def run(command: String, args: String*): Future[String] =
     val promise = Promise[String]()
     val options = js.Dynamic.literal("timeout" -> 60000, "maxBuffer" -> 20 * 1024 * 1024)
-    ChildProcess.execFile(
+    val _ = ChildProcess.execFile(
       command,
       js.Array(args*),
       options,
@@ -248,7 +247,7 @@ object MavenCentral:
   private def artifactUrl(group: String, artifact: String) = s"$Base/${group.replace('.', '/')}/$artifact"
 
   /** Fetches without the CDN's cached copy, so a version that just appeared isn't hidden by a cached "not found". */
-  private def fetch(url: String, method: String)(using ExecutionContext): Future[js.Dynamic] =
+  private def fetch(url: String, method: String): Future[js.Dynamic] =
     val busted = s"$url?bb=${js.Date.now().toLong}"
     js.Dynamic.global.fetch(busted, js.Dynamic.literal("method" -> method)).asInstanceOf[js.Promise[js.Dynamic]].toFuture
 

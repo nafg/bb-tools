@@ -34,8 +34,7 @@ object Tree:
   /** Only actual numbers: circe's `Decoder[Double]` would accept an empty value (YAML null) as NaN. */
   private given Decoder[Double] = Decoder.decodeJsonNumber.map(_.toDouble)
 
-  given Decoder[Tree] = Decoder.recursive { tree =>
-    given Decoder[Tree] = tree
+  given Decoder[Tree] = Decoder.recursive { _ =>
     Decoder[Double].map(Hours(_))
       .or(Decoder[(Double, Double)].map(Range(_, _)))
       .or(Decoder[String].map(Placeholder(_)))
@@ -44,7 +43,7 @@ object Tree:
 
   given Decoder[Group] = Decoder.instance { c =>
     c.as[JsonObject].flatMap { obj =>
-      obj.toList.traverse { (key, value) =>
+      obj.toList.traverse { (key, _) =>
         val at = c.downField(key)
         if key.startsWith(IfPrefix) then at.as[Branches].map(Entry.Fork(key.drop(IfPrefix.length).trim, _))
         else at.as[Tree].map(Entry.Item(key, _))

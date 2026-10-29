@@ -45,7 +45,7 @@ object WavStream:
     * arrived; None while more of it is still to come.
     */
   private def header(bytes: IArray[Byte]): Either[String, Option[(PcmFormat, Int)]] =
-    def text(at: Int)    = new String(bytes.slice(at, at + 4).toArray, "US-ASCII")
+    def text(at: Int)    = new String(IArray.genericWrapArray(bytes.slice(at, at + 4)).toArray, "US-ASCII")
     def int16(at: Int)   = (bytes(at) & 0xff) | ((bytes(at + 1) & 0xff) << 8)
     def int32(at: Int)   = int16(at) | (int16(at + 2) << 16)
     if bytes.length < 12 then Right(None)

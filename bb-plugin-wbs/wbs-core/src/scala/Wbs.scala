@@ -76,7 +76,7 @@ object Wbs:
       case Node.Item(_, Node.Value.Group(cs)) => walk(cs)
       case Node.Item(_, _)                    => ()
       case Node.Fork(p, t, e) =>
-        seen.getOrElseUpdate(propositionKey(p), p)
+        val _ = seen.getOrElseUpdate(propositionKey(p), p)
         walk(t)
         walk(e)
     }

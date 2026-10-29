@@ -21,7 +21,6 @@ import org.scalajs.dom
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.js
-import scala.scalajs.js.JSConverters.*
 
 private given ExecutionContext = ExecutionContext.parasitic
 

@@ -112,7 +112,7 @@ final class ViewTracker(report: js.Function2[js.Dynamic, Boolean, js.Promise[js.
     span.sent = span.sent
       .flatMap(_ => report(input, unloading).toFuture)
       .map(_ => ())
-      .recover { case e => js.Dynamic.global.console.debug(s"activity-recorder: view report failed: ${e.getMessage}"): Unit }
+      .recover { case e => val _ = js.Dynamic.global.console.debug(s"activity-recorder: view report failed: ${e.getMessage}") }
 
 object ViewTracker:
   val TickMs = 5_000

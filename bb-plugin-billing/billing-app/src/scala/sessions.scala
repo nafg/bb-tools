@@ -183,7 +183,6 @@ object SessionsView:
         case BillingEvent.SummariesFailed(id, why)  =>
           $.modState(st => st.copy(writing = st.writing - id, error = Some(s"Summaries not written: $why")))
         case BillingEvent.Changed                   => reloadCurrent
-        case _                                      => Callback.empty
 
     /** Opens or closes a thread's bill-to picker, reading the projects and catalog it offers the first time. */
     private def togglePicker(id: String): Callback =
@@ -336,7 +335,6 @@ object SessionsView:
       title: Option[String]): VdomNode =
       val members  = pm.mark.members
       val keys     = members.map(_.window.key)
-      val state    = members.head.state
       val canTick  = th.bills(members.head.window.threadId) && members.forall(m => draftableKind(m.state))
       val ticked   = canTick && keys.forall(s.draft)
       val canOut   = th.bills(members.head.window.threadId) &&

@@ -6,7 +6,6 @@ import billingcore.{ToolCall, Window}
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.js
-import scala.scalajs.js.JSConverters.*
 import scala.util.Try
 
 /** Who said or did a thing in a thread. */
