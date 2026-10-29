@@ -43,7 +43,10 @@ final class Conversation(bb: BbApi)(using ExecutionContext):
             page(Some((str(c.anchorId), number(c.anchorSeq).getOrElse(0.0))), rows ++ acc, n + 1)
           case _                                            => Future.successful(rows ++ acc)
       }
-    page(None, Vector.empty, 0).map(rows => flatten(rows).flatMap(message).sortBy(_.at))
+    // A deleted thread (bb answers `thread_not_found`) has no conversation left; its recorded time remains.
+    page(None, Vector.empty, 0).map(rows => flatten(rows).flatMap(message).sortBy(_.at)).recover {
+      case js.JavaScriptException(e) if str(e.asInstanceOf[js.Dynamic].code) == "thread_not_found" => Vector.empty
+    }
 
   /** Rows with their nested rows, in order. */
   private def flatten(rows: Vector[js.Dynamic]): Vector[js.Dynamic] =

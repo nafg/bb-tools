@@ -143,7 +143,9 @@ final class Service(
     conversations.get(threadId).filter((at, _) => now - at < ConversationTtlMs) match
       case Some((_, f)) => f
       case None         =>
-        val f = conversation.of(threadId)
+        val f = conversation.of(threadId).recoverWith { case e =>
+          Future.failed(new RuntimeException(s"Reading the conversation of thread $threadId failed: ${errorMessage(e)}", e))
+        }
         conversations.update(threadId, (now, f))
         f.failed.foreach(_ => conversations.remove(threadId))
         f
