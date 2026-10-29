@@ -158,20 +158,39 @@ object SessionsView:
         ))
       )
 
-    /** Starts the existing summary run for the ticked stretches of a billing root that have no line yet. The run takes a
-      * while; `BillingEvent` says when it ended (see `onEvent`).
-      */
+    /** Starts the existing summary run for the ticked stretches of a billing root that have no line yet. */
     private def writeSummaries(root: String): Callback =
-      $.props.zip($.state).flatMap { (p, s) =>
-        s.screen.fold(Callback.empty) { screen =>
-          val keys = keysByRoot(screen, s.draft).getOrElse(root, Vector.empty)
-          $.modState(st => st.copy(writing = st.writing + root, error = None)) >>
-            Callback.future(
-              rpc(p.call, BillingRpc.Summarize(root, subthreads = true, DraftPick.Keys(keys.toSet)))
-                .map(_ => Callback.empty)
-                .recover { case e => $.modState(st => st.copy(writing = st.writing - root, error = Some(errorMessage(e)))) }
-            )
-        }
+      $.state.flatMap(s =>
+        s.screen.fold(Callback.empty)(screen => summarize(root, keysByRoot(screen, s.draft).getOrElse(root, Vector.empty)))
+      )
+
+    /** The unbilled stretches of the session's billing threads that have no model summary, by billing root: what can be
+      * summarized before anything is ticked.
+      */
+    private def unsummarized(screen: SessionScreenJs): Map[String, Vector[String]] =
+      val th = threadsOf(screen)
+      screen.stretches.toVector
+        .filter(l => th.bills(l.threadId) && l.state.kind == "unbilled" && !l.fromModel)
+        .groupMap(l => th.rootOf(l.threadId))(_.key)
+
+    private def summarizeSession: Callback =
+      $.state.flatMap(s =>
+        s.screen.fold(Callback.empty)(screen =>
+          Callback.sequence(unsummarized(screen).map((root, keys) => summarize(root, keys)))
+        )
+      )
+
+    /** Starts the existing summary run for some stretches of a billing root. The run takes a while; `BillingEvent` says
+      * when it ended (see `onEvent`).
+      */
+    private def summarize(root: String, keys: Vector[String]): Callback =
+      $.props.flatMap { p =>
+        $.modState(st => st.copy(writing = st.writing + root, error = None)) >>
+          Callback.future(
+            rpc(p.call, BillingRpc.Summarize(root, subthreads = true, DraftPick.Keys(keys.toSet)))
+              .map(_ => Callback.empty)
+              .recover { case e => $.modState(st => st.copy(writing = st.writing - root, error = Some(errorMessage(e)))) }
+          )
       }
 
     def onEvent(event: BillingEvent): Callback =
@@ -755,6 +774,18 @@ object SessionsView:
                 )
               ),
               legend,
+              {
+                val waiting = unsummarized(screen)
+                val count   = waiting.values.map(_.size).sum
+                <.button(
+                  ^.`type`    := "button",
+                  ^.className := buttonClass,
+                  ^.title     := "Asks a model to write a one-line summary of each unbilled stretch in this session that has none, ticked or not.",
+                  ^.disabled  := (s.busy || waiting.keys.exists(s.writing)),
+                  ^.onClick --> summarizeSession,
+                  if waiting.keys.exists(s.writing) then "Writing summaries…" else s"Write summaries for this session ($count without one)"
+                ).when(count > 0)
+              },
               s.hover.map(keys => detailCard(s, tz, screen, th, keys)),
               sendPanel(p, s, tz, screen, th),
               <.div(^.className := "rounded-md border border-border p-2", timeline(p, s, tz, screen, th))
