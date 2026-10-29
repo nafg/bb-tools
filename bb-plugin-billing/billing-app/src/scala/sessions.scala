@@ -395,7 +395,23 @@ object SessionsView:
         ).when(canOut && height > 26)
       )
 
-    private def boxView(pr: Props, s: State, th: Threads, p: PlacedBox): Vector[VdomNode] =
+    /** Where a thread bills, in a word; a click opens the picker that changes it. */
+    private def billingChip(th: Threads, id: String, billing: Billing): VdomNode =
+      <.button(
+        ^.`type`    := "button",
+        ^.title     := th.account(id).fold("")(a => Words.billsTo(a.resolved)) + " (click to change)",
+        ^.className := "shrink-0 rounded border border-border px-1 font-normal hover:bg-muted " + (billing match
+          case Billing.Bills         => "text-blue-600 dark:text-blue-400"
+          case Billing.NotClientWork => "text-muted-foreground"
+          case Billing.Unmarked      => "border-amber-500/70 text-amber-600 dark:text-amber-400"),
+        ^.onClick --> togglePicker(id),
+        billing match
+          case Billing.Bills         => th.account(id).flatMap(_.billsTo).fold("bills")(_.customerName)
+          case Billing.NotClientWork => "not client"
+          case Billing.Unmarked      => "unset"
+      )
+
+    private def boxView(pr: Props, p: PlacedBox): Vector[VdomNode] =
       val id      = p.box.info.id
       val billing = p.box.info.billing
       val cls     = billing match
@@ -409,44 +425,10 @@ object SessionsView:
           case Billing.Bills         => ""
           case Billing.NotClientWork => " (not client work)"
           case Billing.Unmarked      => " (never marked as client work or not)")),
-        ^.className := "min-w-0 flex-1 truncate text-left font-semibold hover:underline",
+        ^.className := "sticky top-0 z-30 block truncate rounded-sm bg-background px-1 text-left text-[10px] font-semibold leading-[14px] hover:underline",
+        ^.style     := js.Dynamic.literal("width" -> (ColPx - 10), "top" -> HeaderPx),
         ^.onClick --> pr.openThread(id),
         p.box.info.title
-      )
-      // Where the thread bills, in a word; a click opens the picker that changes it.
-      val chip    = <.button(
-        ^.`type`    := "button",
-        ^.title     := th.account(id).fold("")(a => Words.billsTo(a.resolved)) + " (click to change)",
-        ^.className := "shrink-0 rounded border border-border px-1 font-normal hover:bg-muted " + (billing match
-          case Billing.Bills         => "text-blue-600 dark:text-blue-400"
-          case Billing.NotClientWork => "text-muted-foreground"
-          case Billing.Unmarked      => "border-amber-500/70 text-amber-600 dark:text-amber-400"),
-        ^.onClick --> togglePicker(id),
-        billing match
-          case Billing.Bills         => th.account(id).flatMap(_.billsTo).fold("bills")(_.customerName)
-          case Billing.NotClientWork => "not client"
-          case Billing.Unmarked      => "unset"
-      )
-      val picker  = th.account(id).filter(_ => s.picking.contains(id)).map(a =>
-        <.div(
-          ^.className := "absolute left-0 top-full z-50 w-72 rounded border border-border bg-background p-1 shadow-md",
-          s.projects.fold[VdomNode](<.div(^.className := "p-1 text-muted-foreground", "Loading…"))(projects =>
-            BillToSelect.Component.withKey(id)(BillToSelect.Props(
-              a,
-              projects.find(_.projectId == a.projectId),
-              s.catalog,
-              pr.call,
-              $.modState(_.copy(picking = None)) >> reloadCurrent
-            ))
-          )
-        )
-      )
-      val heading = <.div(
-        ^.className := "sticky top-0 z-30 flex items-center gap-1 rounded-sm bg-background px-1 text-[10px] leading-[14px]",
-        ^.style     := js.Dynamic.literal("width" -> (ColPx - 10), "top" -> HeaderPx),
-        header,
-        chip,
-        picker
       )
       val frame   = <.div(
         ^.key       := s"box-${p.box.info.id}",
@@ -457,9 +439,9 @@ object SessionsView:
           "width"  -> (p.span * ColPx - 4),
           "height" -> math.max(p.yBottom - p.yTop, 16.0)
         ),
-        heading
+        header
       )
-      Vector[VdomNode](frame) ++ p.children.flatMap(boxView(pr, s, th, _))
+      Vector[VdomNode](frame) ++ p.children.flatMap(boxView(pr, _))
 
     private def allBoxes(p: PlacedBox): Vector[PlacedBox] = p +: p.children.flatMap(allBoxes)
 
@@ -502,16 +484,37 @@ object SessionsView:
             ),
             names.take(3).zipWithIndex.map { (t, i) =>
               val label = if i == 2 && names.length > 3 then s"${t.title} +${names.length - 3} more" else t.title
-              <.button(
-                ^.`type`    := "button",
+              <.div(
                 ^.key       := t.id,
-                ^.className := "block w-full truncate text-left font-semibold hover:underline",
-                ^.onClick --> p.openThread(t.id),
-                label
+                ^.className := "flex items-center gap-1",
+                <.button(
+                  ^.`type`    := "button",
+                  ^.className := "min-w-0 flex-1 truncate text-left font-semibold hover:underline",
+                  ^.onClick --> p.openThread(t.id),
+                  label
+                ),
+                billingChip(th, t.id, t.billing)
               )
             }.toVdomArray
           )
-        }.toVdomArray
+        }.toVdomArray,
+        // The picker opens under the header row, at the column of the thread it changes.
+        s.picking.flatMap(id => byColumn.find(_._2.exists(_.box.info.id == id)).map(_._1).zip(th.account(id))).map {
+          (column, a) =>
+            <.div(
+              ^.className := "absolute z-50 w-72 rounded border border-border bg-background p-1 text-xs shadow-md",
+              ^.style     := js.Dynamic.literal("left" -> (AxisPx + column * ColPx), "top" -> HeaderPx),
+              s.projects.fold[VdomNode](<.div(^.className := "p-1 text-muted-foreground", "Loading…"))(projects =>
+                BillToSelect.Component.withKey(a.threadId)(BillToSelect.Props(
+                  a,
+                  projects.find(_.projectId == a.projectId),
+                  s.catalog,
+                  p.call,
+                  $.modState(_.copy(picking = None)) >> reloadCurrent
+                ))
+              )
+            )
+        }
       )
       <.div(
         ^.style := js.Dynamic.literal("width" -> width),
@@ -522,7 +525,7 @@ object SessionsView:
           "height" -> (layout.height + 40),
           "width"  -> width
         ),
-        layout.roots.flatMap(boxView(p, s, th, _)).toVdomArray,
+        layout.roots.flatMap(boxView(p, _)).toVdomArray,
         layout.roots.flatMap(allMarks).map((pm, c, t) => markView(s, th, tz, pm, c, t)).toVdomArray,
         layout.quiet.zipWithIndex.map { (q, i) =>
           <.div(
