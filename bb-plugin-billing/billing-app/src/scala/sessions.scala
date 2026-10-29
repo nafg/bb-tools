@@ -787,7 +787,8 @@ object SessionsView:
                 ).when(count > 0)
               },
               s.hover.map(keys => detailCard(s, tz, screen, th, keys)),
-              sendPanel(p, s, tz, screen, th),
+              // Above the timeline header's opaque strip, which reaches 40px above the header to hide what scrolls under it.
+              <.div(^.className := "relative z-50", sendPanel(p, s, tz, screen, th)),
               <.div(^.className := "rounded-md border border-border p-2", timeline(p, s, tz, screen, th))
             )
         }.getOrElse(<.div(^.className := "text-sm text-muted-foreground", "Loading…").when(s.loading))
