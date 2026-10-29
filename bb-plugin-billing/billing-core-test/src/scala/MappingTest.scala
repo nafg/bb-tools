@@ -35,6 +35,11 @@ class MappingTest extends munit.FunSuite:
       Resolved(Billability.Billable(globex), Some(MappingSource.Project))
     )
 
+  test("a thread follows its parent's bb project default, not its own project's"):
+    val defaults: String => Option[ZohoTarget] = { case "root" => Some(acme); case _ => None }
+    assertEquals(Mapping.projectDefaultFor("child", Seq("parent", "root"), defaults), Some(acme))
+    assertEquals(Mapping.projectDefaultFor("child", Seq("parent"), { case "child" => Some(globex); case _ => None }), Some(globex))
+
   test("no entry anywhere and no project default means not billable"):
     assertEquals(
       Mapping.resolve("child", Seq("parent"), _ => MappingEntry.Absent, None),

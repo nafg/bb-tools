@@ -378,7 +378,7 @@ object BillToSelect:
           ^.className := "text-xs text-muted-foreground",
           t.resolved.source match
             case Some(MappingSource.Thread(_)) => s"Follows its parent: ${Words.billsTo(t.resolved)}"
-            case Some(MappingSource.Project)   => s"Follows the bb project's default: ${Words.billsTo(t.resolved)}"
+            case Some(MappingSource.Project)   => s"Follows the bb project default of the top thread above it: ${Words.billsTo(t.resolved)}"
             case None if hasParent             => "Nothing above it has chosen, so it is not client work."
             case None                          => "Not client work until chosen."
         ).when(!own),

@@ -16,10 +16,21 @@ enum MappingSource:
   /** The entry on this thread (`threadId` is the thread itself) or on the nearest ancestor with one. */
   case Thread(threadId: String)
 
-  /** The bb project's default: it maps to exactly one Zoho project with a default task. */
+  /** The default of the bb project of the topmost thread in the chain that has one; it maps to exactly one Zoho project
+    * with a default task.
+    */
   case Project
 
 object Mapping:
+  /** The project default a thread falls back to: that of the topmost thread in its chain whose bb project has one, so a
+    * thread follows its parent rather than its own bb project. `defaultOf` answers for a thread id.
+    */
+  def projectDefaultFor(
+    threadId: String,
+    ancestorsParentFirst: Seq[String],
+    defaultOf: String => Option[ZohoTarget]): Option[ZohoTarget] =
+    (ancestorsParentFirst.reverse :+ threadId).iterator.flatMap(defaultOf(_)).nextOption()
+
   /** Where a thread's time belongs: its own entry if it has one, else the nearest ancestor's (parent first), else the
     * bb project's default when it has one. Nothing anywhere means not billable.
     */

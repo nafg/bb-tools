@@ -213,7 +213,9 @@ final class Service(
       projects   <- projectNames()
       catalog    <- zoho.cachedCatalog()
       defaults   <- projectMappings.defaults(catalog)
-      resolution <- mappings.resolveAll(threadIds, t => summaries.get(t).flatMap(sm => defaults.get(sm.projectId)))
+      defaultOf = (t: String) => summaries.get(t).flatMap(sm => defaults.get(sm.projectId))
+      defaultFor = (t: String) => Mapping.projectDefaultFor(t, ancestry.getOrElse(t, Vector.empty), defaultOf)
+      resolution <- mappings.resolveAll(threadIds, defaultFor)
     yield Context(resolution, summaries, projects, defaults)
 
   def resolve(threadId: String): Future[Resolved] =
