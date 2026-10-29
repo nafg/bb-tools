@@ -788,7 +788,19 @@ object SessionsView:
               },
               s.hover.map(keys => detailCard(s, tz, screen, th, keys)),
               // Above the timeline header's opaque strip, which reaches 40px above the header to hide what scrolls under it.
-              <.div(^.className := "relative z-50", sendPanel(p, s, tz, screen, th)),
+              <.div(
+                ^.className := "relative z-50 space-y-1",
+                {
+                  val tickable = screen.stretches.toVector.filter(l => th.bills(l.threadId) && draftableKind(stateOf(l.state)))
+                  val ticked   = tickable.count(l => s.draft(l.key))
+                  <.div(
+                    ^.className := "flex items-center gap-2 text-xs text-muted-foreground",
+                    <.progress(^.className := "h-1.5 w-32", VdomAttr("max") := tickable.length, ^.value := ticked.toString),
+                    s"$ticked of ${tickable.length} tickable stretches ticked"
+                  ).when(tickable.nonEmpty)
+                },
+                sendPanel(p, s, tz, screen, th)
+              ),
               <.div(^.className := "rounded-md border border-border p-2", timeline(p, s, tz, screen, th))
             )
         }.getOrElse(<.div(^.className := "text-sm text-muted-foreground", "Loading…").when(s.loading))
