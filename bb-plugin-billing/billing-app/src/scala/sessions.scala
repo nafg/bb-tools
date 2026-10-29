@@ -726,13 +726,17 @@ object SessionsView:
       <.div(
         VdomAttr("data-sessions-panel") := "",
         ^.className := "space-y-3",
+        // Sticks to the top of the Sessions panel, wherever the panel sits in the window; takes no height.
         <.div(
-          ^.className := "fixed top-2 right-4 z-[60] flex items-center gap-2 rounded-md border border-border bg-background px-3 py-1 text-xs shadow-md",
-          <.span(^.className := "inline-block h-3 w-3 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent"),
-          if s.loading then "Loading…"
-          else if s.busy then "Saving…"
-          else if pricing then "Pricing ticked time…"
-          else "Writing summaries…"
+          ^.className := "sticky top-0 z-[60] flex h-0 justify-end",
+          <.div(
+            ^.className := "mt-1 mr-1 flex h-fit items-center gap-2 rounded-md border border-border bg-background px-3 py-1 text-xs shadow-md",
+            <.span(^.className := "inline-block h-3 w-3 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent"),
+            if s.loading then "Loading…"
+            else if s.busy then "Saving…"
+            else if pricing then "Pricing ticked time…"
+            else "Writing summaries…"
+          )
         ).when(working),
         s.error.map(e => banner("error", e)),
         s.screen.map { screen =>
