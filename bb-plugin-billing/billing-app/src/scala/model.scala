@@ -286,11 +286,11 @@ def errorMessage(e: Throwable): String =
 
 def nullable[A](value: A | Null): Option[A] = Option(value.asInstanceOf[A])
 
-/** `HH:mm` of an instant in the given zone. */
+/** `2:05 PM` of an instant in the given zone. */
 def clock(ms: Double, timeZone: String): String =
   val format = js.Dynamic.newInstance(js.Dynamic.global.Intl.DateTimeFormat)(
     "en-US",
-    js.Dynamic.literal("timeZone" -> timeZone, "hourCycle" -> "h23", "hour" -> "2-digit", "minute" -> "2-digit")
+    js.Dynamic.literal("timeZone" -> timeZone, "hourCycle" -> "h12", "hour" -> "numeric", "minute" -> "2-digit")
   )
   format.format(new js.Date(ms)).asInstanceOf[String]
 
@@ -302,16 +302,16 @@ def shortDay(ms: Double, timeZone: String): String =
   )
   format.format(new js.Date(ms)).asInstanceOf[String]
 
-/** `Oct 18, 14:05` of an instant in the given zone. */
+/** `Oct 18, 2:05 PM` of an instant in the given zone. */
 def stamp(ms: Double, timeZone: String): String =
   val format = js.Dynamic.newInstance(js.Dynamic.global.Intl.DateTimeFormat)(
     "en-US",
     js.Dynamic.literal(
       "timeZone"  -> timeZone,
-      "hourCycle" -> "h23",
+      "hourCycle" -> "h12",
       "month"     -> "short",
       "day"       -> "numeric",
-      "hour"      -> "2-digit",
+      "hour"      -> "numeric",
       "minute"    -> "2-digit"
     )
   )
