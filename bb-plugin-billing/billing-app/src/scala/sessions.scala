@@ -367,7 +367,8 @@ object SessionsView:
         <.div(^.className := (if hollow then "break-words text-muted-foreground/60" else "break-words text-muted-foreground"), body.take(160)).when(body.nonEmpty && height > 44),
         <.button(
           ^.`type`    := "button",
-          ^.className := "absolute right-0.5 bottom-0.5 rounded bg-background/80 px-1 text-[9px] underline",
+          // A generous target, so a click meant for it does not land on the mark and tick it instead.
+          ^.className := "absolute right-0 bottom-0 z-10 rounded border border-border bg-background px-2 py-1 text-[10px] leading-none hover:bg-muted",
           ^.disabled  := s.busy,
           ^.onClick ==> ((e: ReactMouseEvent) => e.stopPropagationCB >> leaveOut(keys, out = !isOut)),
           if isOut then "put back" else "leave out"
