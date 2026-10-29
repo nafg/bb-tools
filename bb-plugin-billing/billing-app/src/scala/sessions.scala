@@ -703,8 +703,19 @@ object SessionsView:
         )
 
     def render(p: Props, s: State): VdomElement =
+      // Ticked roots without a plan yet are being priced, unless pricing failed and said so.
+      val pricing = s.error.isEmpty && s.screen.exists(sc => keysByRoot(sc, s.draft).keys.exists(r => !s.plans.contains(r)))
+      val working = s.loading || s.busy || pricing || s.writing.nonEmpty
       <.div(
         ^.className := "space-y-3",
+        <.div(
+          ^.className := "fixed top-2 right-4 z-[60] flex items-center gap-2 rounded-md border border-border bg-background px-3 py-1 text-xs shadow-md",
+          <.span(^.className := "inline-block h-3 w-3 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent"),
+          if s.loading then "Loading…"
+          else if s.busy then "Saving…"
+          else if pricing then "Pricing ticked time…"
+          else "Writing summaries…"
+        ).when(working),
         s.error.map(e => banner("error", e)),
         s.screen.map { screen =>
           val tz = screen.timeZone
