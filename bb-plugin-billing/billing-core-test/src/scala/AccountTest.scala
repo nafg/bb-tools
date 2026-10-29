@@ -37,8 +37,13 @@ class AccountTest extends FunSuite:
     assertEquals(
       ThreadAccount.decode(a.copy(resolved = Resolved(Billability.NotBillable, None), parentThreadId = None).encode)
         .map(_.standing),
-      Some(Standing.NotClientWork)
+      Some(Standing.Undecided)
     )
+    assertEquals(
+      a.copy(resolved = Resolved(Billability.NotBillable, Some(MappingSource.Thread("thr_1")))).standing,
+      Standing.NotClientWork
+    )
+    assertEquals(a.copy(resolved = Resolved(Billability.NotBillable, None), totals = Totals.zero).standing, Standing.NotClientWork)
 
   test("a submission survives the wire and reads the same everywhere"):
     val s     = SubmissionRecord(

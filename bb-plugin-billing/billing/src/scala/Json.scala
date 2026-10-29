@@ -36,10 +36,16 @@ object Json:
 
   def submission(s: SubmissionRecord): js.Any = WireJs.toJs(s.encode)
 
-  def project(bbProjectId: String, name: String, zoho: Vector[ProjectZoho], catalog: Option[Catalog]): js.Dynamic =
+  def project(
+    bbProjectId: String,
+    name: String,
+    zoho: Vector[ProjectZoho],
+    notClientWork: Boolean,
+    catalog: Option[Catalog]): js.Dynamic =
     js.Dynamic.literal(
-      "projectId" -> bbProjectId,
-      "name"      -> name,
+      "projectId"     -> bbProjectId,
+      "name"          -> name,
+      "notClientWork" -> notClientWork,
       "zoho"      -> zoho.map { z =>
         val target = catalog.flatMap(_.target(z.projectId, z.taskId))
         js.Dynamic.literal(
@@ -67,7 +73,7 @@ object Json:
         base.updateDynamic("zoneSource")(zoneSourceName(o.zoneSource))
         base.updateDynamic("threads")(o.threads.sortBy(_.title).map(thread).toJSArray)
         base.updateDynamic("projects")(o.threads.map(t => t.projectId -> t.projectName).distinct.map { (id, name) =>
-          project(id, name, r.projectZoho.getOrElse(id, Vector.empty), r.catalog)
+          project(id, name, r.projectZoho.getOrElse(id, Vector.empty), r.notClientWork(id), r.catalog)
         }.toJSArray)
         base.updateDynamic("warnings")(o.warnings.toJSArray)
         base.updateDynamic("recorder")(recorder(r.recorder))
@@ -137,11 +143,12 @@ object Json:
       case _: BillingRpc.Mapping                        => mapping(out)
       case _: BillingRpc.ProjectMappings.type           =>
         js.Dynamic.literal("projects" -> out.projects.map((id, name, zoho) =>
-          project(id, name, zoho, out.catalog)
+          project(id, name, zoho, out.notClientWork(id), out.catalog)
         ).toJSArray)
       case _: BillingRpc.Report                         => report(out)
       case _: (BillingRpc.SetExcluded | BillingRpc.SetNotes | BillingRpc.Decide | BillingRpc.Undecide |
-            BillingRpc.Assign | BillingRpc.MarkUnbillable | BillingRpc.ClearMapping | BillingRpc.SetProjectMapping) =>
+            BillingRpc.Assign | BillingRpc.MarkUnbillable | BillingRpc.ClearMapping | BillingRpc.SetProjectMapping |
+            BillingRpc.SetProjectNotClientWork) =>
         ok
 
   def zoneSourceName(source: ZoneSource): String =

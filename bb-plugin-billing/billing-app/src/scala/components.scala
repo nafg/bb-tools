@@ -378,9 +378,8 @@ object BillToSelect:
           ^.className := "text-xs text-muted-foreground",
           t.resolved.source match
             case Some(MappingSource.Thread(_)) => s"Follows its parent: ${Words.billsTo(t.resolved)}"
-            case Some(MappingSource.Project)   => s"Follows the bb project default of the top thread above it: ${Words.billsTo(t.resolved)}"
-            case None if hasParent             => "Nothing above it has chosen, so it is not client work."
-            case None                          => "Not client work until chosen."
+            case Some(MappingSource.Project)   => s"Follows a bb project's rule: ${Words.billsTo(t.resolved)}"
+            case None                          => "Nothing on it, above it, or in its bb project says whether this is client work: choose."
         ).when(!own),
         s.error.map(m => <.div(^.className := "text-xs text-destructive", m))
       )
@@ -428,10 +427,10 @@ object ThreadTree:
     val showOthers                               = p.showOthers || !anyClient
     /** The unbilled time of the thread and its descendants, counting only the threads that bill unless others are shown. */
     def subtreeMs(t: ThreadAccount): Long        =
-      (if showOthers || t.billsTo.isDefined then t.totals.unbilledMs else 0L) +
+      (if showOthers || t.billsTo.isDefined || t.standing == Standing.Undecided then t.totals.unbilledMs else 0L) +
         children.getOrElse(t.threadId, Vector.empty).map(subtreeMs).sum
     def keep(t: ThreadAccount): Boolean          =
-      showOthers || (t.billsTo.isDefined && (t.totals.unbilledMs >= 60_000 || t.standing.needsDecision)) ||
+      showOthers || (t.billsTo.isDefined && t.totals.unbilledMs >= 60_000) || t.standing.needsDecision ||
         children.getOrElse(t.threadId, Vector.empty).exists(keep)
 
     def row(t: ThreadAccount, depth: Int): VdomNode =
@@ -857,8 +856,10 @@ object ProjectsView:
       }
 
     private def save(project: ProjectInfo, zoho: Vector[(String, String)]): Callback =
+      send(project, BillingRpc.SetProjectMapping(project.projectId, zoho.map(ProjectZoho.apply)))
+
+    private def send(project: ProjectInfo, request: BillingRpc[Reply.Ok]): Callback =
       $.props.flatMap { p =>
-        val request = BillingRpc.SetProjectMapping(project.projectId, zoho.map(ProjectZoho.apply))
         $.modState(st => st.copy(busy = st.busy + project.projectId, error = None)) >>
           Callback.future(
             rpc(p.call, request)
@@ -898,6 +899,18 @@ object ProjectsView:
             ^.key       := project.projectId,
             ^.className := cardClass,
             <.div(^.className := "text-sm font-semibold", project.name),
+            <.label(
+              ^.className := "flex items-center gap-2 text-xs",
+              <.input(
+                ^.`type`    := "checkbox",
+                ^.checked   := project.notClientWork,
+                ^.disabled  := busy,
+                ^.onChange --> send(project, BillingRpc.SetProjectNotClientWork(project.projectId, !project.notClientWork))
+              ),
+              "Not client work, unless a thread or its parent chooses otherwise",
+              <.span(^.className := "text-muted-foreground", " (a single Zoho project below takes precedence)")
+                .when(project.notClientWork && project.zoho.length == 1)
+            ),
             project.zoho.map { z =>
               val tasks = s.catalog.flatMap(_.projects.find(_.projectId == z.projectId)).map(
                 _.tasks.toVector

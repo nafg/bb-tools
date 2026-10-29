@@ -52,7 +52,7 @@ final case class ThreadAccount(
       case Billability.Billable(t) => Some(t)
       case Billability.NotBillable => None
 
-  def standing: Standing = Standing.of(billsTo.isDefined, totals.unbilledMs, archivedAt.isDefined, submissions > 0)
+  def standing: Standing = Standing.of(billsTo.isDefined, resolved.source.isDefined, totals.unbilledMs, archivedAt.isDefined, submissions > 0)
 
   def encode: Wire.Obj =
     Wire.obj(
@@ -180,14 +180,14 @@ object Words:
   def billsTo(r: Resolved): String =
     r.billability match
       case Billability.Billable(t) => target(t)
-      case Billability.NotBillable => "not client work"
+      case Billability.NotBillable => if r.source.isDefined then "not client work" else "not chosen whether client work"
 
   /** Which rule decided where a thread bills, seen from that thread. */
   def decidedBy(r: Resolved, threadId: String): String =
     r.source match
       case Some(MappingSource.Thread(id)) if id == threadId => "chosen here"
       case Some(MappingSource.Thread(id))                   => s"follows thread $id"
-      case Some(MappingSource.Project)                      => "bb project default"
+      case Some(MappingSource.Project)                      => "bb project rule"
       case None                                             => "not chosen"
 
   def dayLabel(day: String): String =

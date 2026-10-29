@@ -7,14 +7,14 @@ class MappingTest extends munit.FunSuite:
   test("a thread's own entry wins"):
     val entries: String => MappingEntry = { case "child" => MappingEntry.Assigned(acme); case _ => MappingEntry.Absent }
     assertEquals(
-      Mapping.resolve("child", Seq("parent", "root"), entries, Some(globex)),
+      Mapping.resolve("child", Seq("parent", "root"), entries, Some(ProjectRule.Default(globex))),
       Resolved(Billability.Billable(acme), Some(MappingSource.Thread("child")))
     )
 
   test("an absent entry inherits from the nearest ancestor before the project default"):
     val entries: String => MappingEntry = { case "root" => MappingEntry.Assigned(acme); case _ => MappingEntry.Absent }
     assertEquals(
-      Mapping.resolve("child", Seq("parent", "root"), entries, Some(globex)),
+      Mapping.resolve("child", Seq("parent", "root"), entries, Some(ProjectRule.Default(globex))),
       Resolved(Billability.Billable(acme), Some(MappingSource.Thread("root")))
     )
 
@@ -25,20 +25,29 @@ class MappingTest extends munit.FunSuite:
       case _        => MappingEntry.Absent
     }
     assertEquals(
-      Mapping.resolve("child", Seq("parent", "root"), entries, Some(globex)),
+      Mapping.resolve("child", Seq("parent", "root"), entries, Some(ProjectRule.Default(globex))),
       Resolved(Billability.NotBillable, Some(MappingSource.Thread("parent")))
     )
 
   test("with no entry anywhere the project default applies"):
     assertEquals(
-      Mapping.resolve("child", Seq("parent"), _ => MappingEntry.Absent, Some(globex)),
+      Mapping.resolve("child", Seq("parent"), _ => MappingEntry.Absent, Some(ProjectRule.Default(globex))),
       Resolved(Billability.Billable(globex), Some(MappingSource.Project))
     )
 
-  test("a thread follows its parent's bb project default, not its own project's"):
-    val defaults: String => Option[ZohoTarget] = { case "root" => Some(acme); case _ => None }
-    assertEquals(Mapping.projectDefaultFor("child", Seq("parent", "root"), defaults), Some(acme))
-    assertEquals(Mapping.projectDefaultFor("child", Seq("parent"), { case "child" => Some(globex); case _ => None }), Some(globex))
+  test("a thread follows its parent's bb project rule, not its own project's"):
+    val rules: String => Option[ProjectRule] = { case "root" => Some(ProjectRule.Default(acme)); case _ => None }
+    assertEquals(Mapping.projectRuleFor("child", Seq("parent", "root"), rules), Some(ProjectRule.Default(acme)))
+    assertEquals(
+      Mapping.projectRuleFor("child", Seq("parent"), { case "child" => Some(ProjectRule.NotClientWork); case _ => None }),
+      Some(ProjectRule.NotClientWork)
+    )
+
+  test("a bb project marked not client work decides, unlike one that says nothing"):
+    assertEquals(
+      Mapping.resolve("child", Seq("parent"), _ => MappingEntry.Absent, Some(ProjectRule.NotClientWork)),
+      Resolved(Billability.NotBillable, Some(MappingSource.Project))
+    )
 
   test("no entry anywhere and no project default means not billable"):
     assertEquals(

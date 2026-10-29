@@ -33,6 +33,7 @@ class BillingRpcTest extends FunSuite:
     BillingRpc.ClearMapping("thr_1"),
     BillingRpc.ProjectMappings,
     BillingRpc.SetProjectMapping("proj_1", Vector(ProjectZoho("p1", "t1"), ProjectZoho("p2", "t2"))),
+    BillingRpc.SetProjectNotClientWork("proj_1", notClientWork = true),
     BillingRpc.Report("c1", CivilDate(2026, 10, 1), CivilDate(2026, 10, 31))
   )
 

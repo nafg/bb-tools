@@ -24,7 +24,7 @@ final case class Overview(
   calendar: IntlCalendar,
   zoneSource: ZoneSource,
   threads: Vector[ThreadAccount],
-  projectDefaults: Map[String, ZohoTarget],
+  projectRules: Map[String, ProjectRule],
   warnings: Vector[String])
 
 /** The sessions screen: the recent sessions, and for one of them every thread's stretches in their ledger state. */
@@ -202,7 +202,7 @@ final class Service(
     resolution: Resolution,
     summaries: Map[String, ThreadSummary],
     projectNames: Map[String, String],
-    projectDefaults: Map[String, ZohoTarget])
+    projectRules: Map[String, ProjectRule])
 
   /** Resolution of every listed thread with the context it needs: ancestors, summaries, project names and defaults. */
   def resolveWithContext(threadIds: Seq[String]): Future[Context] =
@@ -212,11 +212,11 @@ final class Service(
       summaries  <- Future.traverse(everyThread)(t => threadSummary(t).map(t -> _)).map(_.toMap)
       projects   <- projectNames()
       catalog    <- zoho.cachedCatalog()
-      defaults   <- projectMappings.defaults(catalog)
-      defaultOf = (t: String) => summaries.get(t).flatMap(sm => defaults.get(sm.projectId))
-      defaultFor = (t: String) => Mapping.projectDefaultFor(t, ancestry.getOrElse(t, Vector.empty), defaultOf)
-      resolution <- mappings.resolveAll(threadIds, defaultFor)
-    yield Context(resolution, summaries, projects, defaults)
+      rules      <- projectMappings.rules(catalog)
+      ruleOf = (t: String) => summaries.get(t).flatMap(sm => rules.get(sm.projectId))
+      ruleFor = (t: String) => Mapping.projectRuleFor(t, ancestry.getOrElse(t, Vector.empty), ruleOf)
+      resolution <- mappings.resolveAll(threadIds, ruleFor)
+    yield Context(resolution, summaries, projects, rules)
 
   def resolve(threadId: String): Future[Resolved] =
     resolveWithContext(Seq(threadId)).map(_.resolution.resolved.getOrElse(
@@ -327,7 +327,7 @@ final class Service(
                     all.filter(_.threadId == t)
                   )
                 ),
-                projectDefaults = ctx.projectDefaults,
+                projectRules = ctx.projectRules,
                 warnings = ctx.resolution.warnings
               )
             })

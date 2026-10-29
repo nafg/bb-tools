@@ -37,9 +37,10 @@ object Text:
       .toVector
       .sortBy(_._1._2)
       .flatMap { case ((projectId, name), rs) =>
-        val zoho = o.projectDefaults.get(projectId).fold("no single Zoho project")(z =>
-          s"default ${z.projectName} / ${z.taskName}"
-        )
+        val zoho = o.projectRules.get(projectId) match
+          case Some(ProjectRule.Default(z))    => s"default ${z.projectName} / ${z.taskName}"
+          case Some(ProjectRule.NotClientWork) => "not client work"
+          case None                            => "no single Zoho project, not marked not client work"
         s"## ${if name.isEmpty then "(unknown bb project)" else name} ($zoho)" +: rs.sortBy(_.title).flatMap(r =>
           line(r, 0)
         )

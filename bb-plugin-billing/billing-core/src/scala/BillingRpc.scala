@@ -80,6 +80,7 @@ enum BillingRpc[Reply]:
   case ClearMapping(threadId: String)                                  extends BillingRpc[Reply.Ok]
   case ProjectMappings                                                 extends BillingRpc[Reply.ProjectMappings]
   case SetProjectMapping(projectId: String, zoho: Vector[ProjectZoho]) extends BillingRpc[Reply.Ok]
+  case SetProjectNotClientWork(projectId: String, notClientWork: Boolean) extends BillingRpc[Reply.Ok]
   case Report(customerId: String, from: CivilDate, to: CivilDate)      extends BillingRpc[Reply.Report]
 
   /** The method name on the wire. */
@@ -128,6 +129,8 @@ enum BillingRpc[Reply]:
       case MarkUnbillable(threadId)                      => Wire.obj("threadId" -> Str(threadId))
       case ClearMapping(threadId)                        => Wire.obj("threadId" -> Str(threadId))
       case ProjectMappings                               => Wire.obj()
+      case SetProjectNotClientWork(projectId, on)        =>
+        Wire.obj("projectId" -> Str(projectId), "notClientWork" -> Wire.Bool(on))
       case SetProjectMapping(projectId, zoho)            =>
         Wire.obj(
           "projectId" -> Str(projectId),
@@ -188,6 +191,7 @@ object BillingRpc:
     "clearMapping",
     "projectMappings",
     "setProjectMapping",
+    "setProjectNotClientWork",
     "report"
   )
 
@@ -250,6 +254,10 @@ object BillingRpc:
               yield ProjectZoho(p, t)
             )
           )
+        )
+      case "setProjectNotClientWork" =>
+        required("projectId").map(projectId =>
+          SetProjectNotClientWork(projectId, input.field("notClientWork").flatMap(_.asBool).getOrElse(false))
         )
       case "report"            =>
         for customerId <- required("customerId"); from <- date("from"); to <- date("to")

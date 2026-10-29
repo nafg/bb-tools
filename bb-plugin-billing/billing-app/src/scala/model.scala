@@ -28,6 +28,7 @@ trait ProjectZohoRow extends js.Object:
 trait ProjectInfo extends js.Object:
   val projectId: String
   val name: String
+  val notClientWork: Boolean
   val zoho: js.Array[ProjectZohoRow]
 
 trait ProjectMappingsResult extends js.Object:

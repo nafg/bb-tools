@@ -16,20 +16,26 @@ enum MappingSource:
   /** The entry on this thread (`threadId` is the thread itself) or on the nearest ancestor with one. */
   case Thread(threadId: String)
 
-  /** The default of the bb project of the topmost thread in the chain that has one; it maps to exactly one Zoho project
-    * with a default task.
-    */
+  /** The rule of the bb project of the topmost thread in the chain that has one (see [[ProjectRule]]). */
   case Project
 
+/** What a bb project says about threads that choose nothing. */
+enum ProjectRule:
+  /** It maps to exactly one Zoho project with a default task. */
+  case Default(target: ZohoTarget)
+
+  /** It is marked not client work. */
+  case NotClientWork
+
 object Mapping:
-  /** The project default a thread falls back to: that of the topmost thread in its chain whose bb project has one, so a
-    * thread follows its parent rather than its own bb project. `defaultOf` answers for a thread id.
+  /** The project rule a thread falls back to: that of the topmost thread in its chain whose bb project has one, so a
+    * thread follows its parent rather than its own bb project. `ruleOf` answers for a thread id.
     */
-  def projectDefaultFor(
+  def projectRuleFor(
     threadId: String,
     ancestorsParentFirst: Seq[String],
-    defaultOf: String => Option[ZohoTarget]): Option[ZohoTarget] =
-    (ancestorsParentFirst.reverse :+ threadId).iterator.flatMap(defaultOf(_)).nextOption()
+    ruleOf: String => Option[ProjectRule]): Option[ProjectRule] =
+    (ancestorsParentFirst.reverse :+ threadId).iterator.flatMap(ruleOf(_)).nextOption()
 
   /** Where a thread's time belongs: its own entry if it has one, else the nearest ancestor's (parent first), else the
     * bb project's default when it has one. Nothing anywhere means not billable.
@@ -38,7 +44,7 @@ object Mapping:
     threadId: String,
     ancestorsParentFirst: Seq[String],
     entries: String => MappingEntry,
-    projectDefault: Option[ZohoTarget]): Resolved =
+    projectRule: Option[ProjectRule]): Resolved =
     (threadId +: ancestorsParentFirst).iterator
       .map(t => t -> entries(t))
       .collectFirst {
@@ -46,9 +52,10 @@ object Mapping:
         case (t, MappingEntry.Unbillable)       => Resolved(Billability.NotBillable, Some(MappingSource.Thread(t)))
       }
       .getOrElse(
-        projectDefault.fold(Resolved(Billability.NotBillable, None))(target =>
-          Resolved(Billability.Billable(target), Some(MappingSource.Project))
-        )
+        projectRule match
+          case Some(ProjectRule.Default(target)) => Resolved(Billability.Billable(target), Some(MappingSource.Project))
+          case Some(ProjectRule.NotClientWork)   => Resolved(Billability.NotBillable, Some(MappingSource.Project))
+          case None                              => Resolved(Billability.NotBillable, None)
       )
 
 /** `source` is the rule that decided the outcome; `None` when no thread in the chain has an entry and the project has

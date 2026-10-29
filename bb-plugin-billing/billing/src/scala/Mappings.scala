@@ -2,7 +2,7 @@ package billing
 
 import bbplugin.Dyn.str
 import bbplugin.BbApi
-import billingcore.{Billability, Mapping, MappingEntry, Resolved, ZohoTarget}
+import billingcore.{Billability, Mapping, MappingEntry, ProjectRule, Resolved, ZohoTarget}
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.js
@@ -72,9 +72,9 @@ final class Mappings(bb: BbApi)(using ExecutionContext):
       }.map(_.toMap)
 
   /** Where every listed thread's time belongs, following each one's ancestry and then its bb project's default
-    * (`projectDefault` answers for a thread id).
+    * (`projectRule` answers for a thread id).
     */
-  def resolveAll(threadIds: Seq[String], projectDefault: String => Option[ZohoTarget]): Future[Resolution] =
+  def resolveAll(threadIds: Seq[String], projectRule: String => Option[ProjectRule]): Future[Resolution] =
     ancestors(threadIds).flatMap { ancestry =>
       val everyThread = (threadIds ++ ancestry.values.flatten).distinct
       namespaces(everyThread).map { spaces =>
@@ -87,7 +87,7 @@ final class Mappings(bb: BbApi)(using ExecutionContext):
         val lookup: String => MappingEntry = t => entries.get(t).flatMap(_.toOption).getOrElse(MappingEntry.Absent)
         Resolution(
           everyThread.map(t =>
-            t -> Mapping.resolve(t, ancestry.getOrElse(t, Vector.empty), lookup, projectDefault(t))
+            t -> Mapping.resolve(t, ancestry.getOrElse(t, Vector.empty), lookup, projectRule(t))
           ).toMap,
           ancestry,
           warnings.toVector.sorted
@@ -95,8 +95,8 @@ final class Mappings(bb: BbApi)(using ExecutionContext):
       }
     }
 
-  def resolve(threadId: String, projectDefault: String => Option[ZohoTarget]): Future[Resolved] =
-    resolveAll(Seq(threadId), projectDefault).map(_.resolved.getOrElse(
+  def resolve(threadId: String, projectRule: String => Option[ProjectRule]): Future[Resolved] =
+    resolveAll(Seq(threadId), projectRule).map(_.resolved.getOrElse(
       threadId,
       Resolved(Billability.NotBillable, None)
     ))

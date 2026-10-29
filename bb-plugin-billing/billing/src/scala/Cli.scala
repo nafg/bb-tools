@@ -125,6 +125,11 @@ object Cli:
       "bb billing project-zoho [<bb project name|id>] [--add <zoho project> [--task <name|id>]] [--remove <zoho project>]"
     ),
     (
+      "project-unbillable",
+      "Mark a bb project's threads not client work unless they or a parent choose otherwise; --off takes the mark away",
+      "bb billing project-unbillable <bb project name|id> [--off]"
+    ),
+    (
       "report",
       "Time sent to Zoho for a customer in a date range, per thread, as Markdown",
       "bb billing report --customer <name|id> --from yyyy-MM-dd --to yyyy-MM-dd"
@@ -162,13 +167,15 @@ object Cli:
         s"billed to ${t.customerName}: ${t.projectName} / ${t.taskName} (project ${t.projectId}, task ${t.taskId})" +
           (resolved.source match
             case Some(MappingSource.Thread(id)) => s", chosen on thread $id"
-            case Some(MappingSource.Project)    => ", the bb project's default"
+            case Some(MappingSource.Project)    => ", a bb project's default"
             case None                           => ""
           )
       case Billability.NotBillable =>
         resolved.source match
           case Some(MappingSource.Thread(id)) => s"not client work: thread $id is marked so"
-          case _ => "not client work: nothing chosen on the thread, above it, or in its bb project"
+          case Some(MappingSource.Project)    => "not client work: its bb project is marked so"
+          case None                           =>
+            "not chosen whether client work: nothing on the thread, above it, or in its bb project says"
 
   /** `--keys a,b`: the stretches to draft; none means every unbilled stretch. */
   private def pickArg(flags: Map[String, String]): DraftPick =
@@ -370,6 +377,21 @@ object Cli:
           ok(if lines.isEmpty then "No active Zoho projects." else lines.mkString("\n"))
         }
       case Some("project-zoho")              => projectZoho(bb, projectMappings, zoho, positional.headOption, flags)
+      case Some("project-unbillable")        =>
+        positional.headOption.fold(Future.successful(err("a bb project name or id is required"))) { text =>
+          bb.sdk.projects.list(js.Dynamic.literal("includePersonal" -> true)).toFuture.flatMap { list =>
+            list.toVector.map(p => str(p.id) -> str(p.name)).find((id, name) =>
+              id == text || name.equalsIgnoreCase(text)
+            ) match
+              case None             => Future.successful(err(s"no bb project named \"$text\""))
+              case Some((id, name)) =>
+                val on = !flags.contains("off")
+                projectMappings.setNotClientWork(id, on).map(_ =>
+                  ok(if on then s"$name: not client work unless a thread chooses otherwise"
+                     else s"$name: no longer marked not client work")
+                )
+          }
+        }
       case Some("report")                    =>
         orErr(for
           customer <- flags.get("customer").toRight("--customer is required")

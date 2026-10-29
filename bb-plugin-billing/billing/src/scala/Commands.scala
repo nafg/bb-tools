@@ -16,6 +16,7 @@ final case class OverviewReply(
   recorder: RecorderStatus,
   zohoMissing: List[String],
   projectZoho: Map[String, Vector[ProjectZoho]],
+  notClientWork: Set[String],
   catalog: Option[Catalog],
   summariesAvailable: Boolean)
 
@@ -25,7 +26,10 @@ final case class MappingReply(threadId: String, title: String, own: Either[Strin
 final case class SubmissionsReply(timeZone: String, submissions: Vector[SubmissionRecord])
 
 /** Each bb project with the Zoho projects its threads may bill to. */
-final case class ProjectMappingsReply(projects: Vector[(String, String, Vector[ProjectZoho])], catalog: Option[Catalog])
+final case class ProjectMappingsReply(
+  projects: Vector[(String, String, Vector[ProjectZoho])],
+  notClientWork: Set[String],
+  catalog: Option[Catalog])
 
 /** What each request of the contract answers with on the server. */
 type Served[R] = R match
@@ -66,10 +70,11 @@ final class Commands(
           status      <- recorder.status()
           missing     <- zoho.missingSettings()
           projectZoho <- projectMappings.all()
+          unbillable  <- projectMappings.notClientWork()
           catalog     <- zoho.cachedCatalog()
           available   <- summaries.available()
           result      <- service.overview(since)
-        yield OverviewReply(result, since, status, missing, projectZoho, catalog, available)
+        yield OverviewReply(result, since, status, missing, projectZoho, unbillable, catalog, available)
       case BillingRpc.SessionScreen(at)                     => service.sessionScreen(at).flatMap(orFail)
       case BillingRpc.Ledger(threadId, subthreads)          => service.ledger(threadId, subthreads).flatMap(orFail)
       case BillingRpc.Draft(threadId, subthreads, pick)     =>
@@ -116,11 +121,14 @@ final class Commands(
       case BillingRpc.ProjectMappings                            =>
         for
           all        <- projectMappings.all()
+          unbillable <- projectMappings.notClientWork()
           catalog    <- zoho.cachedCatalog()
           bbProjects <- bb.sdk.projects.list(js.Dynamic.literal("includePersonal" -> true)).toFuture
         yield ProjectMappingsReply(
           bbProjects.toVector.map(p => (str(p.id), str(p.name), all.getOrElse(str(p.id), Vector.empty))),
+          unbillable,
           catalog
         )
       case BillingRpc.SetProjectMapping(projectId, zohoList) => projectMappings.set(projectId, zohoList).map(_ => ())
+      case BillingRpc.SetProjectNotClientWork(projectId, on) => projectMappings.setNotClientWork(projectId, on)
       case BillingRpc.Report(customerId, from, to)           => service.report(customerId, from.iso, to.iso)
