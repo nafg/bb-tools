@@ -28,7 +28,12 @@ object SessionsView:
     /** The keys of the mark the pointer is over, whose full detail shows in the card at the corner. */
     hover: Option[Vector[String]],
     /** The billing roots whose summaries are being written. */
-    writing: Set[String])
+    writing: Set[String],
+    /** The thread whose bill-to picker is open under its box's name. */
+    picking: Option[String],
+    /** The bb projects and the Zoho catalog the picker offers, read the first time a picker opens. */
+    projects: Option[Vector[ProjectInfo]],
+    catalog: Option[CatalogResult])
 
   /** The ticks of each session, kept outside the component so a reload or a visit elsewhere does not lose them. */
   private val savedDrafts = scala.collection.mutable.Map.empty[Double, Set[String]]
@@ -36,6 +41,7 @@ object SessionsView:
   /** What the screen knows of the session's threads: who each is, and which thread's submission each bills through. */
   private final class Threads(val accts: Vector[ThreadAccount]):
     private val byId                       = accts.map(t => t.threadId -> t).toMap
+    def account(id: String): Option[ThreadAccount] = byId.get(id)
     def billing(id: String): Billing       = byId.get(id).fold(Billing.Unmarked)(billingOf)
     def bills(id: String): Boolean         = billing(id) == Billing.Bills
     def title(id: String): String          = byId.get(id).fold(id)(_.title)
@@ -178,6 +184,20 @@ object SessionsView:
           $.modState(st => st.copy(writing = st.writing - id, error = Some(s"Summaries not written: $why")))
         case BillingEvent.Changed                   => reloadCurrent
         case _                                      => Callback.empty
+
+    /** Opens or closes a thread's bill-to picker, reading the projects and catalog it offers the first time. */
+    private def togglePicker(id: String): Callback =
+      $.props.zip($.state).flatMap { (p, s) =>
+        val open = $.modState(_.copy(picking = Option.when(!s.picking.contains(id))(id)))
+        if s.projects.nonEmpty then open
+        else
+          open >> Callback.future(
+            rpc(p.call, BillingRpc.Overview(js.Date.now().toLong)).flatMap(o =>
+              (if o.zoho.configured then rpc(p.call, BillingRpc.Catalog(refresh = false)).map(Some(_)) else Future.successful(None))
+                .map(c => $.modState(_.copy(projects = Some(o.projects.toVector), catalog = c)))
+            ).recover { case e => $.modState(_.copy(error = Some(errorMessage(e)))) }
+          )
+      }
 
     private def setHover(keys: Option[Vector[String]]): Callback =
       $.modState(s => if s.hover == keys then s else s.copy(hover = keys))
@@ -375,7 +395,8 @@ object SessionsView:
         ).when(canOut && height > 26)
       )
 
-    private def boxView(p: PlacedBox, openThread: String => Callback): Vector[VdomNode] =
+    private def boxView(pr: Props, s: State, th: Threads, p: PlacedBox): Vector[VdomNode] =
+      val id      = p.box.info.id
       val billing = p.box.info.billing
       val cls     = billing match
         case Billing.Bills         => "border-blue-500/70 bg-blue-500/5"
@@ -388,10 +409,44 @@ object SessionsView:
           case Billing.Bills         => ""
           case Billing.NotClientWork => " (not client work)"
           case Billing.Unmarked      => " (never marked as client work or not)")),
-        ^.className := "sticky top-0 z-30 block truncate rounded-sm bg-background px-1 text-left text-[10px] font-semibold leading-[14px] hover:underline",
-        ^.style     := js.Dynamic.literal("width" -> (ColPx - 10), "top" -> HeaderPx),
-        ^.onClick --> openThread(p.box.info.id),
+        ^.className := "min-w-0 flex-1 truncate text-left font-semibold hover:underline",
+        ^.onClick --> pr.openThread(id),
         p.box.info.title
+      )
+      // Where the thread bills, in a word; a click opens the picker that changes it.
+      val chip    = <.button(
+        ^.`type`    := "button",
+        ^.title     := th.account(id).fold("")(a => Words.billsTo(a.resolved)) + " (click to change)",
+        ^.className := "shrink-0 rounded border border-border px-1 font-normal hover:bg-muted " + (billing match
+          case Billing.Bills         => "text-blue-600 dark:text-blue-400"
+          case Billing.NotClientWork => "text-muted-foreground"
+          case Billing.Unmarked      => "border-amber-500/70 text-amber-600 dark:text-amber-400"),
+        ^.onClick --> togglePicker(id),
+        billing match
+          case Billing.Bills         => th.account(id).flatMap(_.billsTo).fold("bills")(_.customerName)
+          case Billing.NotClientWork => "not client"
+          case Billing.Unmarked      => "unset"
+      )
+      val picker  = th.account(id).filter(_ => s.picking.contains(id)).map(a =>
+        <.div(
+          ^.className := "absolute left-0 top-full z-50 w-72 rounded border border-border bg-background p-1 shadow-md",
+          s.projects.fold[VdomNode](<.div(^.className := "p-1 text-muted-foreground", "Loading…"))(projects =>
+            BillToSelect.Component.withKey(id)(BillToSelect.Props(
+              a,
+              projects.find(_.projectId == a.projectId),
+              s.catalog,
+              pr.call,
+              $.modState(_.copy(picking = None)) >> reloadCurrent
+            ))
+          )
+        )
+      )
+      val heading = <.div(
+        ^.className := "sticky top-0 z-30 flex items-center gap-1 rounded-sm bg-background px-1 text-[10px] leading-[14px]",
+        ^.style     := js.Dynamic.literal("width" -> (ColPx - 10), "top" -> HeaderPx),
+        header,
+        chip,
+        picker
       )
       val frame   = <.div(
         ^.key       := s"box-${p.box.info.id}",
@@ -402,9 +457,9 @@ object SessionsView:
           "width"  -> (p.span * ColPx - 4),
           "height" -> math.max(p.yBottom - p.yTop, 16.0)
         ),
-        header
+        heading
       )
-      Vector[VdomNode](frame) ++ p.children.flatMap(boxView(_, openThread))
+      Vector[VdomNode](frame) ++ p.children.flatMap(boxView(pr, s, th, _))
 
     private def allBoxes(p: PlacedBox): Vector[PlacedBox] = p +: p.children.flatMap(allBoxes)
 
@@ -467,7 +522,7 @@ object SessionsView:
           "height" -> (layout.height + 40),
           "width"  -> width
         ),
-        layout.roots.flatMap(boxView(_, p.openThread)).toVdomArray,
+        layout.roots.flatMap(boxView(p, s, th, _)).toVdomArray,
         layout.roots.flatMap(allMarks).map((pm, c, t) => markView(s, th, tz, pm, c, t)).toVdomArray,
         layout.quiet.zipWithIndex.map { (q, i) =>
           <.div(
@@ -711,7 +766,7 @@ object SessionsView:
 
   val Component = ScalaComponent
     .builder[Props]("SessionsView")
-    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, writing = Set.empty))
+    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, writing = Set.empty, picking = None, projects = None, catalog = None))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))
     .componentDidMount(_.backend.load(None))
