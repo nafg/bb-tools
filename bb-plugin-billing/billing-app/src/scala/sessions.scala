@@ -115,16 +115,13 @@ object SessionsView:
 
     private def threadsOf(screen: SessionScreenJs) = new Threads(accounts(screen.threads))
 
-    /** A new screen: the ticks come back from where this session left them, else every unbilled stretch of a thread
-      * that bills is ticked.
-      */
+    /** A new screen: the ticks come back from where this session left them, else nothing is ticked. */
     private def arrive(r: SessionScreenJs): Callback =
       val th        = threadsOf(r)
       val draftable = r.stretches.toVector.filter(l => th.bills(l.threadId) && draftableKind(stateOf(l.state))).map(_.key).toSet
-      val fresh     = r.stretches.toVector.filter(l => th.bills(l.threadId) && l.state.kind == "unbilled").map(_.key).toSet
       val saved     = if r.current >= 0 then savedDrafts.get(r.sessions(r.current).start) else None
       $.modState(
-        _.copy(screen = Some(r), loading = false, draft = saved.fold(fresh)(_.intersect(draftable))),
+        _.copy(screen = Some(r), loading = false, draft = saved.fold(Set.empty[String])(_.intersect(draftable))),
         price
       )
 
