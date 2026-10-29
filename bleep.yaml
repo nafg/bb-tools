@@ -232,7 +232,7 @@ templates:
       name: jvm
   template-common:
     scala:
-      options: -encoding utf8 -feature -unchecked
+      options: -encoding utf8 -feature -unchecked -Wconf:id=E029:e,id=E030:e,id=E121:e
       strict: true
       version: 3.8.3
     source-layout: cross-pure
