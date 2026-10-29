@@ -27,6 +27,8 @@ object SessionsView:
     busy: Boolean,
     /** The keys of the mark the pointer is over, whose full detail shows in the card at the corner. */
     hover: Option[Vector[String]],
+    /** Whether the pointer was on the right half of the window when the hover began, so the card opens on the left. */
+    hoverOnRight: Boolean,
     /** The billing roots whose summaries are being written. */
     writing: Set[String],
     /** The thread whose bill-to picker is open under its box's name. */
@@ -217,6 +219,10 @@ object SessionsView:
     private def setHover(keys: Option[Vector[String]]): Callback =
       $.modState(s => if s.hover == keys then s else s.copy(hover = keys))
 
+    private def startHover(keys: Vector[String], e: ReactMouseEvent): Callback =
+      val onRight = e.clientX > dom.window.innerWidth / 2
+      $.modState(s => if s.hover.contains(keys) && s.hoverOnRight == onRight then s else s.copy(hover = Some(keys), hoverOnRight = onRight))
+
     /** Ticks or unticks, then prices: the price is asked once the new ticks are in the state, never before. */
     private def tick(keys: Vector[String]): Callback =
       $.modState(
@@ -381,7 +387,7 @@ object SessionsView:
           )
       <.div(
         ^.key       := keys.head,
-        ^.onMouseEnter --> setHover(Some(keys)),
+        ^.onMouseEnter ==> ((e: ReactMouseEvent) => startHover(keys, e)),
         ^.onMouseLeave --> setHover(None),
         ^.className := s"absolute overflow-hidden rounded border px-1 text-[10px] leading-tight $cls " +
           (if canTick then "cursor-pointer" else ""),
@@ -591,7 +597,8 @@ object SessionsView:
         val summary   = lines.map(_.summary).filter(_.nonEmpty).mkString(" ")
         val shown     = messages.take(12)
         <.div(
-          ^.className := "pointer-events-none fixed right-4 bottom-4 z-50 max-h-[70vh] w-[30rem] space-y-1 overflow-hidden rounded-md border border-border bg-card p-3 text-xs shadow-lg",
+          // Opposite the pointer, so it never hides the stretch being pointed at; above the send panel (z-50).
+          ^.className := s"pointer-events-none fixed ${if s.hoverOnRight then "left-4" else "right-4"} bottom-4 z-[70] max-h-[70vh] w-[30rem] space-y-1 overflow-hidden rounded-md border border-border bg-card p-3 text-xs shadow-lg",
           <.div(^.className := "font-semibold", first.title),
           <.div(
             ^.className := "tabular-nums",
@@ -819,7 +826,7 @@ object SessionsView:
 
   val Component = ScalaComponent
     .builder[Props]("SessionsView")
-    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, writing = Set.empty, picking = None, projects = None, catalog = None))
+    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, hoverOnRight = false, writing = Set.empty, picking = None, projects = None, catalog = None))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))
     .componentDidMount(_.backend.load(None))
