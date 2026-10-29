@@ -396,7 +396,7 @@ object BillToSelect:
 private def standingChip(standing: Standing): VdomElement =
   val cls = standing match
     case Standing.NotClientWork | Standing.NothingRecorded | Standing.Settled => "bg-muted text-muted-foreground"
-    case Standing.ArchivedToSettle                                            => "bg-amber-500/20"
+    case Standing.ArchivedToSettle | Standing.Undecided                       => "bg-amber-500/20"
     case Standing.OpenUnbilled | Standing.OpenPartlyBilled                    => "bg-blue-500/15"
   <.span(^.className := s"ml-1 rounded px-1 text-xs $cls", standing.label)
 
