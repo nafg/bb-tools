@@ -335,6 +335,13 @@ trait SessionRefJs extends js.Object:
   val unbilledMs: Double
 
 /** The sessions screen's reply: the recent sessions, and the stretches of every thread in the current one. */
+trait SignalMarkJs extends js.Object:
+  val threadId: String
+
+  /** The activity recorder's name for the kind: `speech`, `playback`, `message`, `turn` or `view`. */
+  val kind: String
+  val at: Double
+
 trait SessionScreenJs extends js.Object:
   val timeZone: String
   val now: Double
@@ -352,3 +359,6 @@ trait SessionScreenJs extends js.Object:
 
   /** The billing roots whose summaries are being written now. */
   val summarizing: js.Array[String]
+
+  /** The recorded signals of the session's threads, where each starts. */
+  val signals: js.Array[SignalMarkJs]

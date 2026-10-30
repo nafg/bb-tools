@@ -262,7 +262,10 @@ object Json:
       "threads"   -> r.threads.map(thread).toJSArray,
       "stretches"   -> r.stretches.map(stretchLine(_, r.titles)).toJSArray,
       "submissions" -> js.Dictionary(r.submissionStamps.toSeq.map((id, at) => id -> at.toDouble)*),
-      "summarizing" -> r.summarizing.toJSArray
+      "summarizing" -> r.summarizing.toJSArray,
+      "signals"     -> r.signals.map(g =>
+        js.Dynamic.literal("threadId" -> g.threadId, "kind" -> g.kind, "at" -> g.at.toDouble)
+      ).toJSArray
     )
 
   def ledger(l: LedgerResult): js.Dynamic =

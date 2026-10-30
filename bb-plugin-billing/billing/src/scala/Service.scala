@@ -47,7 +47,12 @@ final case class SessionScreenResult(
   /** When each submission was made, by its id, for "sent on" and "settled on". */
   submissionStamps: Map[String, Long],
   /** The billing roots whose summaries are being written now. */
-  summarizing: Set[String])
+  summarizing: Set[String],
+  /** The recorded signals of the chosen session's threads that start in it. */
+  signals: Vector[SignalMark])
+
+/** A recorded signal where it starts: its kind is the activity recorder's name for it (`speech`, `message`, …). */
+final case class SignalMark(threadId: String, kind: String, at: Long)
 
 /** A window as the submission panel shows it: with its day, clock times, and one-line summary. */
 final case class WindowLine(
@@ -418,7 +423,7 @@ final class Service(
                            case None    =>
                              Future.successful(
                                SessionScreenResult(
-                                 now, cal, sessions, unbilledMs, None, Vector.empty, Vector.empty, Map.empty, Map.empty, summarizing
+                                 now, cal, sessions, unbilledMs, None, Vector.empty, Vector.empty, Map.empty, Map.empty, summarizing, Vector.empty
                                )
                              )
                            case Some(s) => sessionDetail(now, cal, all, split, windows, sessions, unbilledMs, s)
@@ -480,6 +485,8 @@ final class Service(
       ctx    <- resolveWithContext(ids)
       msgs   <- Future.traverse(ids)(t => conversationOf(t).map(t -> _)).map(_.toMap)
       traces <- timerTraces(ctx, cal, all, ids, days, msgs)
+      // The dots are an aid: a recorder that cannot list signals leaves them out rather than failing the screen.
+      sigs   <- recorder.signals(s.start, s.end).map(_.getOrElse(Vector.empty))
     yield
       val led       = ledgerOf()
       // Long windows are cut at the user's message times exactly as the thread ledgers cut them, so a stretch here
@@ -516,7 +523,9 @@ final class Service(
         lines,
         titles,
         store.submissionsOf(None).map(sub => sub.id -> sub.createdAt.toLong).toMap,
-        summarizing
+        summarizing,
+        sigs.filter(g => ids.contains(g.threadId) && g.start >= s.start && g.start <= s.end)
+          .map(g => SignalMark(g.threadId, g.kind.name, g.start))
       )
 
   /** The threads under `root`, every level, archived ones included. */

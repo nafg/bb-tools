@@ -24,7 +24,21 @@ final case class SessionLayout(
   columns: Int,
   roots: Vector[PlacedBox],
   quiet: Vector[QuietGap],
-  axis: Vector[(Double, Long)])
+  axis: Vector[(Double, Long)],
+  /** Every moment the layout placed, by time, with its height. */
+  placed: Vector[(Long, Double)]):
+
+  /** The height of any moment of the session: a placed moment's own, else in proportion between the placed moments on
+    * either side.
+    */
+  def yAt(t: Long): Double =
+    placed.indexWhere(_._1 > t) match
+      case -1 => placed.lastOption.fold(0.0)(_._2)
+      case 0  => placed.head._2
+      case i  =>
+        val (t0, y0) = placed(i - 1)
+        val (t1, y1) = placed(i)
+        y0 + (y1 - y0) * (t - t0).toDouble / (t1 - t0).toDouble
 
 object SessionGeometry:
   /** Height given to a step between two moments when something is happening in it. */
@@ -124,4 +138,11 @@ object SessionGeometry:
         placeAll(b.children, column + 1)
       )
     val placed = placeAll(forest, 0)
-    SessionLayout(y(session.end), laneWidths(forest).sum, placed, quiet.result(), thin(moments.map(t => y(t) -> t)))
+    SessionLayout(
+      y(session.end),
+      laneWidths(forest).sum,
+      placed,
+      quiet.result(),
+      thin(moments.map(t => y(t) -> t)),
+      moments.map(t => t -> y(t))
+    )

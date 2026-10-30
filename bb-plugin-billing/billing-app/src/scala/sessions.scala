@@ -66,7 +66,17 @@ object SessionsView:
 
   /** Height of the sticky row naming every column; a box's own sticky name stops just under it. */
   private val HeaderPx = 46
-  private val AxisPx  = 64
+  /** The axis: the signal dots in its left part, the clock times right-aligned in the rest. */
+  private val AxisPx  = 92
+
+  /** The signal kinds in their lanes down the axis, left to right, each with its dot's colour and what it means. */
+  private val SignalLanes = Vector(
+    ("speech", "bg-sky-500", "you spoke to the thread"),
+    ("playback", "bg-violet-500", "a reply was read aloud to you"),
+    ("message", "bg-emerald-500", "you sent a typed message"),
+    ("view", "bg-amber-500", "the thread was on screen while you were active"),
+    ("turn", "bg-zinc-400", "the agent ran a turn")
+  )
 
   private def billingOf(t: ThreadAccount): Billing =
     if t.billsTo.isDefined then Billing.Bills
@@ -331,6 +341,14 @@ object SessionsView:
     private def legend: VdomNode =
       <.div(
         ^.className := "grid gap-x-6 gap-y-1 text-xs text-muted-foreground sm:grid-cols-2 lg:grid-cols-3",
+        SignalLanes.map((kind, colour, meaning) =>
+          <.div(
+            ^.key       := s"signal-$kind",
+            ^.className := "flex items-center gap-2",
+            <.span(^.className := s"inline-block h-[7px] w-[7px] shrink-0 rounded-full $colour"),
+            <.span(s"Dot down the time axis: $meaning ($kind).")
+          )
+        ).toVdomArray,
         sample("☑ 5m 22:28 · unbilled", StretchState.Unbilled, ticked = true, "Click to untick. Goes into the next send."),
         sample("☐ 5m 22:28 · unbilled", StretchState.Unbilled, ticked = false, "Click to tick it."),
         sample("3 short · 1m · unbilled", StretchState.Unbilled, ticked = true, "Several tiny stretches of one thread as one mark. One click ticks or unticks all of them.", dotted = true),
@@ -571,6 +589,18 @@ object SessionsView:
             ),
             s"${hoursMinutes(q.durationMs.toDouble)} with no attention on any thread"
           )
+        }.toVdomArray,
+        screen.signals.toVector.zipWithIndex.flatMap { (g, i) =>
+          val lane = SignalLanes.indexWhere(_._1 == g.kind)
+          Option.when(lane >= 0) {
+            val title = infos.find(_.id == g.threadId).fold(g.threadId)(_.title)
+            <.div(
+              ^.key       := s"sig-$i",
+              ^.className := s"absolute h-[5px] w-[5px] rounded-full ${SignalLanes(lane)._2}",
+              ^.style     := js.Dynamic.literal("top" -> (layout.yAt(g.at.toLong) - 2), "left" -> (2 + lane * 6)),
+              ^.title     := s"${g.kind} · ${clock(g.at, tz)} · $title"
+            )
+          }
         }.toVdomArray,
         layout.axis.zipWithIndex.map { (a, i) =>
           <.div(

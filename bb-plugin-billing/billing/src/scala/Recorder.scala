@@ -36,6 +36,14 @@ final class Recorder(bb: BbApi)(using ExecutionContext):
       .map(s => RecorderStatus(available = true, error = None, status = Some(s)))
       .recover { case e => RecorderStatus(available = false, error = Some(errorMessage(e)), status = None) }
 
+  /** Every recorded signal reaching into `[from, to)`, of every kind. */
+  def signals(from: Long, to: Long): Future[Either[String, Vector[activitycore.Signal]]] =
+    call("signals", js.Dynamic.literal("from" -> from.toDouble, "to" -> to.toDouble))
+      .map(result =>
+        ActivityJson.signals(result).left.map(problem => s"the activity recorder's signals output could not be read: $problem")
+      )
+      .recover { case e => Left(errorMessage(e)) }
+
   /** Attention intervals in `[from, to)`, with the recorder's default kinds (attention only, never `turn`). An output
     * the shared parser rejects is an error, never a shorter list: a shape change must show up, not lower totals.
     */
