@@ -65,7 +65,7 @@ object SessionsView:
   private val ColPx   = 170
 
   /** Height of the sticky row naming every column; a box's own sticky name stops just under it. */
-  private val HeaderPx = 46
+  private val HeaderPx = 50
   /** The axis: the signal dots in its left part, the clock times right-aligned in the rest. */
   private val AxisPx  = 92
 
@@ -494,6 +494,22 @@ object SessionsView:
       )
       Vector[VdomNode](frame) ++ p.children.flatMap(boxView(pr, _))
 
+    /** What a column's threads still need, most urgent first. */
+    private enum ColumnNeed(val headerClass: String, val words: String):
+      case Settle   extends ColumnNeed("border-t-4 border-amber-500", "Has time already in Zoho by hand to settle.")
+      case Decide   extends ColumnNeed("border-t-4 border-dashed border-amber-500", "Has a thread never marked as client work or not.")
+      case Bill     extends ColumnNeed("border-t-4 border-blue-500", "Has unbilled time.")
+      case Nothing  extends ColumnNeed("border-t-4 border-transparent opacity-60", "Nothing left to review.")
+
+    /** The most urgent need of the threads whose own strips are in one column. */
+    private def needOf(th: Threads, boxes: Vector[PlacedBox]): ColumnNeed =
+      val stretches = boxes.flatMap(_.own).flatMap(_.mark.members)
+      val billing   = stretches.filter(m => th.bills(m.window.threadId)).map(_.state)
+      if billing.exists { case StretchState.InZohoByHand(_) => true; case _ => false } then ColumnNeed.Settle
+      else if boxes.exists(b => b.box.info.billing == Billing.Unmarked && b.own.nonEmpty) then ColumnNeed.Decide
+      else if billing.contains(StretchState.Unbilled) then ColumnNeed.Bill
+      else ColumnNeed.Nothing
+
     private def allBoxes(p: PlacedBox): Vector[PlacedBox] = p +: p.children.flatMap(allBoxes)
 
     private def allMarks(p: PlacedBox): Vector[(PlacedMark, Int, Option[String])] =
@@ -523,10 +539,11 @@ object SessionsView:
         ),
         byColumn.map { (column, boxes) =>
           val names = boxes.sortBy(_.yTop).map(_.box.info)
+          val need  = needOf(th, boxes)
           <.div(
             ^.key       := s"col-$column",
-            ^.title     := names.map(_.title).mkString("\n"),
-            ^.className := "absolute overflow-hidden text-[10px] leading-[14px]",
+            ^.title     := (names.map(_.title) :+ need.words).mkString("\n"),
+            ^.className := s"absolute overflow-hidden text-[10px] leading-[14px] ${need.headerClass}",
             ^.style     := js.Dynamic.literal(
               "left"   -> (AxisPx + column * ColPx + 4),
               "top"    -> 2,
