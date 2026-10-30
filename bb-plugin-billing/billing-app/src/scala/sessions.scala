@@ -128,7 +128,7 @@ object SessionsView:
       val draftable = r.stretches.toVector.filter(l => th.bills(l.threadId) && draftableKind(stateOf(l.state))).map(_.key).toSet
       val saved     = if r.current >= 0 then savedDrafts.get(r.sessions(r.current).start) else None
       $.modState(
-        _.copy(screen = Some(r), loading = false, leaving = Set.empty, draft = saved.fold(Set.empty[String])(_.intersect(draftable))),
+        _.copy(screen = Some(r), loading = false, leaving = Set.empty, writing = r.summarizing.toSet, draft = saved.fold(Set.empty[String])(_.intersect(draftable))),
         price
       )
 

@@ -65,6 +65,9 @@ def plugin(bb: BbApi): Unit =
   Cli.register(bb, service, commands, projectMappings, zoho, summaries)
   AgentTools.register(bb, service, commands)
 
+  // A page open across a reload refreshes, so it stops waiting on summary runs the old plugin took with it.
+  service.publish(BillingEvent.Changed)
+
   // An archived thread must get a billing decision; the page refreshes its must-decide list.
   bb.events.on("thread.archived", (_: js.Dynamic) => service.publish(BillingEvent.Changed))
   bb.events.on("thread.unarchived", (_: js.Dynamic) => service.publish(BillingEvent.Changed))

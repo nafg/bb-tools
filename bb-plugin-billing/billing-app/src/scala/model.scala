@@ -349,3 +349,6 @@ trait SessionScreenJs extends js.Object:
 
   /** When each submission was made, by id (epoch milliseconds). */
   val submissions: js.Dictionary[Double]
+
+  /** The billing roots whose summaries are being written now. */
+  val summarizing: js.Array[String]

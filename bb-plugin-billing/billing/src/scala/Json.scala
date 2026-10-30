@@ -261,7 +261,8 @@ object Json:
       "current"   -> r.chosen.fold(-1)(c => r.sessions.indexWhere(_.start == c.start)),
       "threads"   -> r.threads.map(thread).toJSArray,
       "stretches"   -> r.stretches.map(stretchLine(_, r.titles)).toJSArray,
-      "submissions" -> js.Dictionary(r.submissionStamps.toSeq.map((id, at) => id -> at.toDouble)*)
+      "submissions" -> js.Dictionary(r.submissionStamps.toSeq.map((id, at) => id -> at.toDouble)*),
+      "summarizing" -> r.summarizing.toJSArray
     )
 
   def ledger(l: LedgerResult): js.Dynamic =
