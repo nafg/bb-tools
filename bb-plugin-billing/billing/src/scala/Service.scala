@@ -15,7 +15,13 @@ final case class ThreadSummary(
   parentThreadId: Option[String],
   createdAt: Long,
   archivedAt: Option[Long],
-  environmentId: Option[String])
+  environmentId: Option[String],
+  deleted: Boolean)
+
+/** Whether a bb SDK failure is bb answering that the thread does not exist (it was deleted). */
+def isThreadNotFound(error: Throwable): Boolean = error match
+  case js.JavaScriptException(e) => str(e.asInstanceOf[js.Dynamic].code) == "thread_not_found"
+  case _                         => false
 
 /** The "To bill" view: every thread with recorded attention since `since`, resolved, with what is unbilled. */
 final case class Overview(
@@ -184,12 +190,28 @@ final class Service(
               Option(str(thread.parentThreadId)).filter(_.nonEmpty),
               number(thread.createdAt).fold(0L)(_.toLong),
               number(thread.archivedAt).map(_.toLong),
-              Option(str(thread.environmentId)).filter(_.nonEmpty)
+              Option(str(thread.environmentId)).filter(_.nonEmpty),
+              deleted = false
             )
             if title.isDefined && summary.archivedAt.isDefined then cache.update(threadId, summary)
             summary
           }
-          .recover { case _ => ThreadSummary(threadId, "", None, 0L, None, None) }
+          .recover {
+            case e if isThreadNotFound(e) =>
+              val deleted = ThreadSummary(threadId, "", None, 0L, None, None, deleted = true)
+              cache.update(threadId, deleted)
+              deleted
+            case _                        => ThreadSummary(threadId, "", None, 0L, None, None, deleted = false)
+          }
+
+  /** The recorded intervals from `from` to `to`, without those of deleted threads. */
+  private def intervalsOfLiveThreads(from: Long, to: Long): Future[Either[String, Vector[Interval]]] =
+    recorder.intervals(from, to).flatMap {
+      case Left(error) => Future.successful(Left(error))
+      case Right(all)  =>
+        Future.traverse(all.map(_.threadId).distinct)(t => threadSummary(t).map(sm => Option.when(sm.deleted)(t)))
+          .map(deleted => Right(all.filterNot(i => deleted.flatten.contains(i.threadId))))
+    }
 
   def threadTitle(threadId: String): Future[String] = threadSummary(threadId).map(_.title)
 
@@ -262,7 +284,7 @@ final class Service(
     totals: Totals,
     submissions: Int,
     recording: Seq[Interval]): ThreadAccount =
-    val summary = ctx.summaries.getOrElse(threadId, ThreadSummary(threadId, "", None, 0L, None, None))
+    val summary = ctx.summaries.getOrElse(threadId, ThreadSummary(threadId, "", None, 0L, None, None, deleted = false))
     ThreadAccount(
       threadId = threadId,
       title = summary.title,
@@ -304,7 +326,7 @@ final class Service(
   def overview(since: Long): Future[Either[String, Overview]] =
     val now = js.Date.now().toLong
     calendar().flatMap { (cal, zoneSource) =>
-      recorder.intervals(since, now).flatMap {
+      intervalsOfLiveThreads(since, now).flatMap {
         case Left(error)   => Future.successful(Left(error))
         case Right(recent) =>
           val threadIds = recent.map(_.threadId).distinct
@@ -312,7 +334,7 @@ final class Service(
             // The account counts the whole recording, from before the oldest listed thread began.
             val from = threadIds.flatMap(t => ctx.summaries.get(t).map(_.createdAt - 24 * 3600_000L)).filter(_ > 0)
               .minOption.fold(since)(math.min(_, since))
-            recorder.intervals(cal.dayStart(from), now).map(_.map { all =>
+            intervalsOfLiveThreads(cal.dayStart(from), now).map(_.map { all =>
               val split = Intervals.splitByDay(all, cal)
               val led   = ledgerOf()
               Overview(
@@ -346,7 +368,7 @@ final class Service(
   def sessionScreen(at: Option[Long]): Future[Either[String, SessionScreenResult]] =
     val now = js.Date.now().toLong
     calendar().flatMap { (cal, _) =>
-      recorder.intervals(now - SessionHistoryMs, now).flatMap {
+      intervalsOfLiveThreads(now - SessionHistoryMs, now).flatMap {
         case Left(error) => Future.successful(Left(error))
         case Right(all)  =>
           val split    = Intervals.splitByDay(all, cal)

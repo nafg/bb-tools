@@ -45,7 +45,7 @@ final class Conversation(bb: BbApi)(using ExecutionContext):
       }
     // A deleted thread (bb answers `thread_not_found`) has no conversation left; its recorded time remains.
     page(None, Vector.empty, 0).map(rows => flatten(rows).flatMap(message).sortBy(_.at)).recover {
-      case js.JavaScriptException(e) if str(e.asInstanceOf[js.Dynamic].code) == "thread_not_found" => Vector.empty
+      case e if isThreadNotFound(e) => Vector.empty
     }
 
   /** Rows with their nested rows, in order. */
