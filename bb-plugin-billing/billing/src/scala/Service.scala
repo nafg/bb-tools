@@ -142,21 +142,41 @@ final class Service(
   private val cache = mutable.Map.empty[String, ThreadSummary]
 
   /** A thread's conversation is read from bb's timeline once and kept for a couple of minutes, so that ticking a
-    * stretch or striking one out does not refetch every covered thread.
+    * stretch or striking one out does not refetch every covered thread. An archived thread's is kept until a thread is
+    * unarchived (see [[forgetArchived]]): nothing is said in an archived thread.
     */
   private val conversations     = mutable.Map.empty[String, (Double, Future[Vector[Message]])]
+  private val archivedConversations = mutable.Map.empty[String, Future[Vector[Message]]]
   private val ConversationTtlMs = 120_000.0
   private def conversationOf(threadId: String): Future[Vector[Message]] =
-    val now = js.Date.now()
-    conversations.get(threadId).filter((at, _) => now - at < ConversationTtlMs) match
-      case Some((_, f)) => f
-      case None         =>
-        val f = conversation.of(threadId).recoverWith { case e =>
-          Future.failed(new RuntimeException(s"Reading the conversation of thread $threadId failed: ${errorMessage(e)}", e))
-        }
-        conversations.update(threadId, (now, f))
-        f.failed.foreach(_ => conversations.remove(threadId))
-        f
+    archivedConversations.get(threadId) match
+      case Some(f) => f
+      case None    =>
+        val now = js.Date.now()
+        conversations.get(threadId).filter((at, _) => now - at < ConversationTtlMs) match
+          case Some((_, f)) => f
+          case None         =>
+            val f = threadSummary(threadId).flatMap { summary =>
+              val read = conversation.of(threadId).recoverWith { case e =>
+                Future.failed(
+                  new RuntimeException(s"Reading the conversation of thread $threadId failed: ${errorMessage(e)}", e)
+                )
+              }
+              if summary.archivedAt.isDefined then
+                archivedConversations.update(threadId, read)
+                read.failed.foreach(_ => archivedConversations.remove(threadId))
+              read
+            }
+            conversations.update(threadId, (now, f))
+            f.failed.foreach(_ => conversations.remove(threadId))
+            f
+
+  /** Drops what is kept for archived threads (their summaries and conversations), one of which may have just been
+    * unarchived.
+    */
+  def forgetArchived(): Unit =
+    cache.clear()
+    archivedConversations.clear()
 
   /** How long a window may run before it is cut at a message boundary. */
   private val WindowMaxMs = 60 * 60_000L
@@ -823,12 +843,26 @@ final class Service(
         yield Right(Audit(record, cal, titles, inside, existing._1, existing._2))
 
   /** Zoho entries on the plan's dates for the same project that this plugin did not create. */
+  /** A Zoho project's time entries from one day to another, kept for half a minute, so that one screen asking twice
+    * reads Zoho once.
+    */
+  private val zohoEntryReads = mutable.Map.empty[(String, String, String), (Double, Future[Vector[ZohoExistingEntry]])]
+  private def zohoEntries(projectId: String, from: String, to: String): Future[Vector[ZohoExistingEntry]] =
+    val now = js.Date.now()
+    zohoEntryReads.get((projectId, from, to)).filter((at, _) => now - at < 30_000.0) match
+      case Some((_, f)) => f
+      case None         =>
+        val f = zoho.clientOrFail().flatMap(_.timeEntries(from, to, projectId))
+        zohoEntryReads.update((projectId, from, to), (now, f))
+        f.failed.foreach(_ => zohoEntryReads.remove((projectId, from, to)))
+        f
+
   private def handEntered(
     target: Option[ZohoTarget],
     days: Seq[String]): Future[(Vector[HandEntered], Option[String])] =
     (target, days.minOption, days.maxOption) match
       case (Some(t), Some(from), Some(to)) =>
-        zoho.clientOrFail().flatMap(_.timeEntries(from, to, t.projectId)).map { entries =>
+        zohoEntries(t.projectId, from, to).map { entries =>
           val mine = store.allEntryIds()
           (entries.filterNot(e => mine(e.timeEntryId)).filter(e => days.contains(e.date)).map(HandEntered.apply), None)
         }.recover { case e => (Vector.empty, Some(errorMessage(e))) }

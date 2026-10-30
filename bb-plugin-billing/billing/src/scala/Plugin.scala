@@ -70,7 +70,12 @@ def plugin(bb: BbApi): Unit =
 
   // An archived thread must get a billing decision; the page refreshes its must-decide list.
   bb.events.on("thread.archived", (_: js.Dynamic) => service.publish(BillingEvent.Changed))
-  bb.events.on("thread.unarchived", (_: js.Dynamic) => service.publish(BillingEvent.Changed))
+  bb.events.on(
+    "thread.unarchived",
+    (_: js.Dynamic) =>
+      service.forgetArchived()
+      service.publish(BillingEvent.Changed)
+  )
 
   zoho.missingSettings().foreach { missing =>
     if missing.nonEmpty then
