@@ -37,7 +37,11 @@ object SessionsView:
     projects: Option[Vector[ProjectInfo]],
     catalog: Option[CatalogResult],
     /** The keys being left out or put back, until the screen that shows the change arrives. */
-    leaving: Set[String])
+    leaving: Set[String],
+    /** Columns folded or unfolded by hand, by the id of the column's first thread; true is folded. Any other column
+      * is folded when it has nothing left to review.
+      */
+    folding: Map[String, Boolean])
 
   /** The hover card's horizontal place: its left edge and its width. */
   final case class HoverAt(left: Double, width: Double)
@@ -63,6 +67,15 @@ object SessionsView:
         case None    => id
 
   private val ColPx   = 170
+
+  /** The width of a folded column: a strip that keeps the marks' colours and the button that unfolds it. */
+  private val FoldedPx = 28
+
+  /** Where the columns sit across the page, after the axis: a folded column is a narrow strip. */
+  private final case class Columns(folded: Set[Int]):
+    def width(c: Int): Int              = if folded(c) then FoldedPx else ColPx
+    def left(c: Int): Int               = AxisPx + (0 until c).map(width).sum
+    def spanWidth(c: Int, n: Int): Int  = (c until c + n).map(width).sum
 
   /** Height of the sticky row naming every column; a box's own sticky name stops just under it. */
   private val HeaderPx = 50
@@ -382,8 +395,10 @@ object SessionsView:
       th: Threads,
       tz: String,
       pm: PlacedMark,
+      cols: Columns,
       column: Int,
       title: Option[String]): VdomNode =
+      val folded   = cols.folded(column)
       val members  = pm.mark.members
       val keys     = members.map(_.window.key)
       val canTick  = th.bills(members.head.window.threadId) && members.forall(m => draftableKind(m.state))
@@ -421,9 +436,9 @@ object SessionsView:
         ^.className := s"absolute overflow-hidden rounded border px-1 text-[10px] leading-tight $cls " +
           (if canTick then "cursor-pointer " else "") + (if keys.exists(s.leaving) then "animate-pulse opacity-60" else ""),
         ^.style     := js.Dynamic.literal(
-          "left"   -> (AxisPx + column * ColPx + 2),
+          "left"   -> (cols.left(column) + 2),
           "top"    -> pm.yTop,
-          "width"  -> (ColPx - 8),
+          "width"  -> (cols.width(column) - 8),
           "height" -> height
         ),
         ^.onClick --> (if canTick && !s.busy then tick(keys) else Callback.empty),
@@ -432,8 +447,8 @@ object SessionsView:
           ^.className := (if hollow then "flex items-center gap-1 whitespace-nowrap" else "flex items-center gap-1 font-medium whitespace-nowrap"),
           if canTick then <.span(if ticked then "☑" else "☐") else EmptyVdom,
           <.span(^.className := "truncate", head)
-        ),
-        <.div(^.className := (if hollow then "break-words text-muted-foreground/60" else "break-words text-muted-foreground"), body.take(160)).when(body.nonEmpty && height > 44),
+        ).when(!folded),
+        <.div(^.className := (if hollow then "break-words text-muted-foreground/60" else "break-words text-muted-foreground"), body.take(160)).when(!folded && body.nonEmpty && height > 44),
         <.button(
           ^.`type`    := "button",
           // A generous target, so a click meant for it does not land on the mark and tick it instead.
@@ -443,7 +458,7 @@ object SessionsView:
           if keys.exists(s.leaving) then (if isOut then "putting back…" else "leaving out…")
           else if isOut then "put back"
           else "leave out"
-        ).when(canOut && height > 26)
+        ).when(!folded && canOut && height > 26)
       )
 
     /** Where a thread bills, in a word; a click opens the picker that changes it. */
@@ -462,7 +477,7 @@ object SessionsView:
           case Billing.Unmarked      => "unset"
       )
 
-    private def boxView(pr: Props, p: PlacedBox): Vector[VdomNode] =
+    private def boxView(pr: Props, cols: Columns, p: PlacedBox): Vector[VdomNode] =
       val id      = p.box.info.id
       val billing = p.box.info.billing
       val cls     = billing match
@@ -477,7 +492,7 @@ object SessionsView:
           case Billing.NotClientWork => " (not client work)"
           case Billing.Unmarked      => " (never marked as client work or not)")),
         ^.className := "sticky top-0 z-30 block truncate rounded-sm bg-background px-1 text-left text-[10px] font-semibold leading-[14px] hover:underline",
-        ^.style     := js.Dynamic.literal("width" -> (ColPx - 10), "top" -> HeaderPx),
+        ^.style     := js.Dynamic.literal("width" -> (cols.width(p.column) - 10), "top" -> HeaderPx),
         ^.onClick --> pr.openThread(id),
         p.box.info.title
       )
@@ -485,14 +500,14 @@ object SessionsView:
         ^.key       := s"box-${p.box.info.id}",
         ^.className := s"absolute rounded border $cls",
         ^.style     := js.Dynamic.literal(
-          "left"   -> (AxisPx + p.column * ColPx),
+          "left"   -> cols.left(p.column),
           "top"    -> p.yTop,
-          "width"  -> (p.span * ColPx - 4),
+          "width"  -> (cols.spanWidth(p.column, p.span) - 4),
           "height" -> math.max(p.yBottom - p.yTop, 16.0)
         ),
         header
       )
-      Vector[VdomNode](frame) ++ p.children.flatMap(boxView(pr, _))
+      Vector[VdomNode](frame) ++ p.children.flatMap(boxView(pr, cols, _))
 
     /** What a column's threads still need, most urgent first. */
     private enum ColumnNeed(val headerClass: String, val words: String):
@@ -526,9 +541,14 @@ object SessionsView:
         SessionStretch(Window(l.threadId, l.day, l.start.toLong, l.end.toLong), stateOf(l.state), textOf(l))
       )
       val layout    = SessionGeometry.place(session, SessionView.forest(session, infos, stretches))
-      val width    = layout.columns * ColPx + AxisPx + 20
       // Every thread in column order, so any thread can be found by name without scrolling the diagram.
       val byColumn = layout.roots.flatMap(allBoxes).groupBy(_.column).toVector.sortBy(_._1)
+      val needs    = byColumn.map((column, boxes) => column -> needOf(th, boxes)).toMap
+      def columnId(boxes: Vector[PlacedBox]): String = boxes.minBy(_.yTop).box.info.id
+      val cols     = Columns(byColumn.collect {
+        case (column, boxes) if s.folding.getOrElse(columnId(boxes), needs(column) == ColumnNeed.Nothing) => column
+      }.toSet)
+      val width    = cols.left(layout.columns) + 20
       val header   = <.div(
         ^.className := "sticky top-0 z-40 border-b border-border bg-background",
         ^.style     := js.Dynamic.literal("height" -> HeaderPx, "width" -> width),
@@ -538,23 +558,33 @@ object SessionsView:
           ^.style     := js.Dynamic.literal("top" -> -40, "height" -> 40)
         ),
         byColumn.map { (column, boxes) =>
-          val names = boxes.sortBy(_.yTop).map(_.box.info)
-          val need  = needOf(th, boxes)
+          val names  = boxes.sortBy(_.yTop).map(_.box.info)
+          val need   = needs(column)
+          val folded = cols.folded(column)
+          val fold   = <.button(
+            ^.`type`    := "button",
+            ^.title     := (if folded then "Unfold this column" else "Fold this column to a narrow strip"),
+            ^.className := "shrink-0 rounded px-0.5 text-muted-foreground hover:bg-muted",
+            ^.onClick --> $.modState(st => st.copy(folding = st.folding + (columnId(boxes) -> !folded))),
+            if folded then "▸" else "◂"
+          )
           <.div(
             ^.key       := s"col-$column",
             ^.title     := (names.map(_.title) :+ need.words).mkString("\n"),
             ^.className := s"absolute overflow-hidden text-[10px] leading-[14px] ${need.headerClass}",
             ^.style     := js.Dynamic.literal(
-              "left"   -> (AxisPx + column * ColPx + 4),
+              "left"   -> (cols.left(column) + 4),
               "top"    -> 2,
-              "width"  -> (ColPx - 10),
+              "width"  -> (cols.width(column) - 10),
               "height" -> (HeaderPx - 4)
             ),
-            names.take(3).zipWithIndex.map { (t, i) =>
+            if folded then fold
+            else names.take(3).zipWithIndex.map { (t, i) =>
               val label = if i == 2 && names.length > 3 then s"${t.title} +${names.length - 3} more" else t.title
               <.div(
                 ^.key       := t.id,
                 ^.className := "flex items-center gap-1",
+                fold.when(i == 0),
                 <.button(
                   ^.`type`    := "button",
                   ^.className := "min-w-0 flex-1 truncate text-left font-semibold hover:underline",
@@ -571,7 +601,7 @@ object SessionsView:
           (column, a) =>
             <.div(
               ^.className := "absolute z-50 w-72 rounded border border-border bg-background p-1 text-xs shadow-md",
-              ^.style     := js.Dynamic.literal("left" -> (AxisPx + column * ColPx), "top" -> HeaderPx),
+              ^.style     := js.Dynamic.literal("left" -> cols.left(column), "top" -> HeaderPx),
               s.projects.fold[VdomNode](<.div(^.className := "p-1 text-muted-foreground", "Loading…"))(projects =>
                 BillToSelect.Component.withKey(a.threadId)(BillToSelect.Props(
                   a,
@@ -593,8 +623,8 @@ object SessionsView:
           "height" -> (layout.height + 40),
           "width"  -> width
         ),
-        layout.roots.flatMap(boxView(p, _)).toVdomArray,
-        layout.roots.flatMap(allMarks).map((pm, c, t) => markView(s, th, tz, pm, c, t)).toVdomArray,
+        layout.roots.flatMap(boxView(p, cols, _)).toVdomArray,
+        layout.roots.flatMap(allMarks).map((pm, c, t) => markView(s, th, tz, pm, cols, c, t)).toVdomArray,
         layout.quiet.zipWithIndex.map { (q, i) =>
           <.div(
             ^.key       := s"quiet-$i",
@@ -602,7 +632,7 @@ object SessionsView:
             ^.style     := js.Dynamic.literal(
               "top"    -> q.yTop,
               "height" -> (q.yBottom - q.yTop),
-              "width"  -> (layout.columns * ColPx + AxisPx)
+              "width"  -> cols.left(layout.columns)
             ),
             s"${hoursMinutes(q.durationMs.toDouble)} with no attention on any thread"
           )
@@ -892,7 +922,7 @@ object SessionsView:
 
   val Component = ScalaComponent
     .builder[Props]("SessionsView")
-    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Set.empty, picking = None, projects = None, catalog = None, leaving = Set.empty))
+    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Set.empty, picking = None, projects = None, catalog = None, leaving = Set.empty, folding = Map.empty))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))
     .componentDidMount(_.backend.load(None))
