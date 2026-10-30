@@ -27,10 +27,19 @@ final class Conversation(bb: BbApi)(using ExecutionContext):
     */
   private val MaxPages = 600
 
+  /** Each thread's timeline rows from its last read, oldest first, back to the thread's start. */
+  private val known = scala.collection.mutable.Map.empty[String, Vector[js.Dynamic]]
+
+  /** The thread's conversation. A thread read before is read again only from its newest page back to the first page
+    * that meets the rows kept from then: the rows of the pages read come fresh (a turn that was running has changed),
+    * older rows are taken from then.
+    */
   def of(threadId: String): Future[Vector[Message]] =
-    def page(before: Option[(String, Double)], acc: Vector[js.Dynamic], n: Int): Future[Vector[js.Dynamic]] =
+    val before   = known.getOrElse(threadId, Vector.empty)
+    val beforeAt = before.zipWithIndex.map((r, i) => str(r.id) -> i).toMap
+    def page(cursor: Option[(String, Double)], acc: Vector[js.Dynamic], n: Int): Future[(Vector[js.Dynamic], Boolean)] =
       val request = js.Dynamic.literal("threadId" -> threadId, "includeNestedRows" -> "true")
-      before.foreach { (id, seq) =>
+      cursor.foreach { (id, seq) =>
         request.updateDynamic("beforeAnchorId")(id)
         request.updateDynamic("beforeAnchorSeq")(seq.toLong.toString)
       }
@@ -38,13 +47,22 @@ final class Conversation(bb: BbApi)(using ExecutionContext):
         val rows  = response.rows.asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]].fold(Vector.empty)(_.toVector)
         // A null `olderCursor` means the page reached the thread's start.
         val older = Option(response.timelinePage).filter(isDefined).map(_.olderCursor).filter(isDefined)
+        val meets = rows.exists(r => beforeAt.contains(str(r.id)))
         older match
-          case Some(c) if n + 1 < MaxPages && rows.nonEmpty =>
+          case Some(c) if n + 1 < MaxPages && rows.nonEmpty && !meets =>
             page(Some((str(c.anchorId), number(c.anchorSeq).getOrElse(0.0))), rows ++ acc, n + 1)
-          case _                                            => Future.successful(rows ++ acc)
+          case _                                                          =>
+            Future.successful((rows ++ acc, older.isEmpty || rows.isEmpty))
       }
-    // A deleted thread (bb answers `thread_not_found`) has no conversation left; its recorded time remains.
-    page(None, Vector.empty, 0).map(rows => flatten(rows).flatMap(message).sortBy(_.at)).recover {
+    page(None, Vector.empty, 0).map { (fresh, reachedStart) =>
+      val oldestMet = fresh.flatMap(r => beforeAt.get(str(r.id))).minOption
+      val rows      = oldestMet match
+        case Some(i) if !reachedStart => before.take(i).filterNot(r => fresh.exists(f => str(f.id) == str(r.id))) ++ fresh
+        case _                        => fresh
+      known.update(threadId, rows)
+      flatten(rows).flatMap(message).sortBy(_.at)
+    }.recover {
+      // A deleted thread (bb answers `thread_not_found`) has no conversation left; its recorded time remains.
       case e if isThreadNotFound(e) => Vector.empty
     }
 
