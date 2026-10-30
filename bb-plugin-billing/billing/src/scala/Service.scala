@@ -426,7 +426,7 @@ final class Service(
                                  now, cal, sessions, unbilledMs, None, Vector.empty, Vector.empty, Map.empty, Map.empty, summarizing, Vector.empty
                                )
                              )
-                           case Some(s) => sessionDetail(now, cal, all, split, windows, sessions, unbilledMs, s)
+                           case Some(s) => sessionDetail(now, cal, all, split, windows, sessions, unbilledMs, traces0, s)
           yield Right(result)
       }
     }
@@ -477,6 +477,7 @@ final class Service(
     windows: Vector[Window],
     sessions: Vector[Session],
     unbilledMs: Map[Long, Long],
+    knownTraces: Map[String, Vector[ZohoTrace]],
     s: Session): Future[SessionScreenResult] =
     val inSplit = windows.filter(w => Sessions.containing(sessions, w).contains(s))
     val ids     = inSplit.map(_.threadId).distinct
@@ -484,7 +485,9 @@ final class Service(
     for
       ctx    <- resolveWithContext(ids)
       msgs   <- Future.traverse(ids)(t => conversationOf(t).map(t -> _)).map(_.toMap)
-      traces <- timerTraces(ctx, cal, all, ids, days, msgs)
+      // The billing threads' traces are known already, read over the whole history; only the others are worked out.
+      others  = ids.filterNot(knownTraces.contains)
+      traces <- timerTraces(ctx, cal, all, others, days, msgs).map(t => (knownTraces ++ t).withDefaultValue(Vector.empty))
       // The dots are an aid: a recorder that cannot list signals leaves them out rather than failing the screen.
       sigs   <- recorder.signals(s.start, s.end).map(_.getOrElse(Vector.empty))
     yield
