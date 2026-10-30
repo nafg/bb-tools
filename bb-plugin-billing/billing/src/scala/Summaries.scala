@@ -253,18 +253,18 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
       else
         s"""Below are ${pending.size} stretches of work a developer did with a coding agent, each with the thread it happened in and the conversation during it: what the developer asked (often dictated, so the transcription may be rough), what the agent answered, and the commands and tools the agent used.
            |
-           |For each stretch, write two or three sentences, at most 400 characters, saying what was worked on and what came of it, in plain past tense, for the client to read: name the feature, bug, change, decision or finding, with the specifics (what was changed, what was found, what was decided), never the agent or the tools. These sentences are later condensed into one note per day, so keep every fact a day's note would need. When a stretch has no turn, describe it from the thread title and the stretches around it.
+           |For each stretch, write the line of a client's invoice for it: one or two sentences, at most 300 characters, in plain past tense, saying what was done for the client and what came of it. Name the feature, bug, change or finding with its specifics (what was changed, what was found, what was decided); a merge request or task number may be named. Write it as the work itself, with no actor: never mention the developer, the agent, threads, tools, reviews, who asked or agreed to what, or internal steps such as rebasing, branches, worktrees, rebuilding or retrying. Leave out open questions and next steps. These lines are later condensed into one note per day, so keep every fact a day's note would need. When a stretch has no turn, describe it from the thread title and the stretches around it.
            |
            |${items.mkString("\n\n")}
            |""".stripMargin
     val dayPart     =
       if days.isEmpty then ""
       else
-        s"""Then, for each day below, write the notes of that day's time entry: one paragraph of at most 450 characters, for the client, in plain past tense, that tells what was accomplished that day from its stretch lines (a stretch referred to by number means the line you wrote for it above). Group related stretches, drop repetition, keep the specifics: names of features, bugs, changes and findings.
+        s"""Then, for each day below, write the notes of that day's time entry as the client will read them on the invoice: one paragraph of at most 450 characters, in plain past tense, that tells what was accomplished for the client that day from its stretch lines (a stretch referred to by number means the line you wrote for it above). Group related stretches, drop repetition, keep the specifics: names of features, bugs, changes and findings. The same rules as for the lines apply: no actor, no tools, no internal steps, no open questions.
            |
            |${dayItems.mkString("\n\n")}
            |""".stripMargin
-    s"""You are writing the notes for a client's time sheet. Do not run any tool or read any file.
+    s"""You are writing the lines of a client's invoice. Do not run any tool or read any file.
        |
        |$stretchPart
        |$dayPart
