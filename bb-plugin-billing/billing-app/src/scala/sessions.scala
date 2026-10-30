@@ -35,7 +35,9 @@ object SessionsView:
     picking: Option[String],
     /** The bb projects and the Zoho catalog the picker offers, read the first time a picker opens. */
     projects: Option[Vector[ProjectInfo]],
-    catalog: Option[CatalogResult])
+    catalog: Option[CatalogResult],
+    /** The keys being left out or put back, until the screen that shows the change arrives. */
+    leaving: Set[String])
 
   /** The hover card's horizontal place: its left edge and its width. */
   final case class HoverAt(left: Double, width: Double)
@@ -114,7 +116,7 @@ object SessionsView:
           Callback.future(
             rpc(p.call, BillingRpc.SessionScreen(at))
               .map(r => arrive(r))
-              .recover { case e => $.modState(_.copy(loading = false, error = Some(errorMessage(e)))) }
+              .recover { case e => $.modState(_.copy(loading = false, leaving = Set.empty, error = Some(errorMessage(e)))) }
           )
       }
 
@@ -126,7 +128,7 @@ object SessionsView:
       val draftable = r.stretches.toVector.filter(l => th.bills(l.threadId) && draftableKind(stateOf(l.state))).map(_.key).toSet
       val saved     = if r.current >= 0 then savedDrafts.get(r.sessions(r.current).start) else None
       $.modState(
-        _.copy(screen = Some(r), loading = false, draft = saved.fold(Set.empty[String])(_.intersect(draftable))),
+        _.copy(screen = Some(r), loading = false, leaving = Set.empty, draft = saved.fold(Set.empty[String])(_.intersect(draftable))),
         price
       )
 
@@ -243,12 +245,12 @@ object SessionsView:
 
     private def leaveOut(keys: Vector[String], out: Boolean): Callback =
       $.props.flatMap(p =>
-        $.modState(s => s.copy(draft = if out then s.draft -- keys else s.draft ++ keys, busy = true), saveDraft) >>
+        $.modState(s => s.copy(draft = if out then s.draft -- keys else s.draft ++ keys, busy = true, leaving = s.leaving ++ keys), saveDraft) >>
           Callback.future(
             keys.foldLeft(Future.unit)((done, key) =>
               done.flatMap(_ => rpc(p.call, BillingRpc.SetExcluded(key, out)).map(_ => ()))
             ).map(_ => $.modState(_.copy(busy = false)) >> reloadCurrent)
-              .recover { case e => $.modState(_.copy(busy = false, error = Some(errorMessage(e)))) }
+              .recover { case e => $.modState(st => st.copy(busy = false, leaving = st.leaving -- keys, error = Some(errorMessage(e)))) }
           )
       )
 
@@ -399,7 +401,7 @@ object SessionsView:
         ^.onMouseEnter ==> ((e: ReactMouseEvent) => startHover(keys, e)),
         ^.onMouseLeave --> setHover(None),
         ^.className := s"absolute overflow-hidden rounded border px-1 text-[10px] leading-tight $cls " +
-          (if canTick then "cursor-pointer" else ""),
+          (if canTick then "cursor-pointer " else "") + (if keys.exists(s.leaving) then "animate-pulse opacity-60" else ""),
         ^.style     := js.Dynamic.literal(
           "left"   -> (AxisPx + column * ColPx + 2),
           "top"    -> pm.yTop,
@@ -420,7 +422,9 @@ object SessionsView:
           ^.className := "absolute right-0 bottom-0 z-10 rounded border border-border bg-background px-2 py-1 text-[10px] leading-none hover:bg-muted",
           ^.disabled  := s.busy,
           ^.onClick ==> ((e: ReactMouseEvent) => e.stopPropagationCB >> leaveOut(keys, out = !isOut)),
-          if isOut then "put back" else "leave out"
+          if keys.exists(s.leaving) then (if isOut then "putting back…" else "leaving out…")
+          else if isOut then "put back"
+          else "leave out"
         ).when(canOut && height > 26)
       )
 
@@ -841,7 +845,7 @@ object SessionsView:
 
   val Component = ScalaComponent
     .builder[Props]("SessionsView")
-    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Set.empty, picking = None, projects = None, catalog = None))
+    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Set.empty, picking = None, projects = None, catalog = None, leaving = Set.empty))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))
     .componentDidMount(_.backend.load(None))
