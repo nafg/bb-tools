@@ -1,5 +1,7 @@
 package converse
 
+import conversecore.ParakeetDevice
+
 /** The local Parakeet transcription service the plugin starts on demand: a
   * small OpenAI-compatible HTTP wrapper around onnx-asr, run by `uv` with its
   * dependencies declared inline (PEP 723). It transcribes each upload whole,
@@ -242,13 +244,3 @@ private object ParakeetServer:
     * and replaced.
     */
   def version(device: ParakeetDevice): String = (Script, Model, MaxSeconds, device.flag).hashCode.toHexString
-
-/** Where Parakeet runs its model. */
-enum ParakeetDevice(val flag: String):
-  /** The GPU when loading the model leaves it enough free memory, otherwise
-    * the CPU.
-    */
-  case GpuIfFree extends ParakeetDevice("gpu-if-free")
-
-  /** The CPU, leaving the GPU to speech synthesis. */
-  case Cpu extends ParakeetDevice("cpu")

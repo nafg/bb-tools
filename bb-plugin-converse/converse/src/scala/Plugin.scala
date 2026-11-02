@@ -16,6 +16,8 @@ import conversecore.{
   GoogleCloudVoices,
   IdleOutcome,
   ContinuationWaiters,
+  GpuTtsProvider,
+  ParakeetDevice,
   ReplyInterruption,
   SoundCue,
   SoundCueSettings,
@@ -135,10 +137,10 @@ private def parakeetService(device: ParakeetDevice) = ManagedService(
   )
 )
 
-/** The speech synthesis provider that runs on the GPU, beside which Parakeet
-  * has to run on the CPU: the two do not fit on the card with the desktop.
+/** Qwen3-TTS runs on the GPU, so Parakeet runs on the CPU while it speaks:
+  * see [[GpuTtsProvider]].
   */
-private val QwenTtsProvider = "qwen3-tts"
+private val QwenTtsProvider = GpuTtsProvider.Qwen3Tts.id
 
 private val QwenService = ManagedService(
   key = "qwen",
@@ -153,18 +155,18 @@ private val QwenService = ManagedService(
   versionCheck = Some(ServiceVersionCheck(s"http://127.0.0.1:${QwenServer.Port}/version", QwenServer.Version))
 )
 
-/** The speech synthesis provider that runs on the CPU, for when the GPU is
-  * better left alone.
-  */
-private val ChatterboxNanoProvider = "chatterbox-nano"
+/** Chatterbox Nano runs on the GPU too: see [[GpuTtsProvider]]. */
+private val ChatterboxNanoProvider = GpuTtsProvider.ChatterboxNano.id
 
 private val ChatterboxService = ManagedService(
   key = "chatterbox",
   label = "Chatterbox Nano",
   probeUrl = s"http://127.0.0.1:${ChatterboxServer.Port}/tts",
   startCommand = ChatterboxServer.startCommand,
-  // The first start installs PyTorch and downloads the model, about 1.5 GB.
-  readyWithinSeconds = 900,
+  // The first start installs PyTorch with its CUDA libraries, about 6 GB, and
+  // downloads the model.
+  readyWithinSeconds = 1800,
+  // While it runs it holds its GPU memory, so it does not linger long.
   idleMinutes = 15,
   files = Map(ChatterboxServer.ScriptRelativePath -> ChatterboxServer.Script),
   versionCheck =
@@ -664,9 +666,7 @@ def plugin(bb: BbApi): Unit =
 
   /** The Parakeet to use under `currentSettings`. */
   def parakeetFor(currentSettings: js.Dynamic): ManagedService =
-    parakeetService(
-      if str(currentSettings.ttsProvider) == QwenTtsProvider then ParakeetDevice.Cpu else ParakeetDevice.GpuIfFree
-    )
+    parakeetService(ParakeetDevice.whileSpeakingWith(str(currentSettings.ttsProvider)))
 
   def stringArray(value: js.Dynamic): Vector[String] =
     value.asInstanceOf[js.UndefOr[js.Array[String]]].fold(Vector.empty)(_.toVector)
@@ -1625,15 +1625,16 @@ def plugin(bb: BbApi): Unit =
           started
     }
 
-  /** Qwen3-TTS's URL once it answers. When Parakeet is the transcriber it is
-    * seen to first, so one still on the GPU moves to the CPU before Qwen3-TTS
-    * needs that memory.
+  /** `service`'s URL once it answers, `service` being the local server of the
+    * [[GpuTtsProvider]] in `currentSettings`. When Parakeet is the transcriber
+    * it is seen to first, so one still on the GPU moves to the CPU before the
+    * server needs that memory.
     */
-  def ensureQwenTts(currentSettings: js.Dynamic): Future[Either[String, String]] =
+  def ensureGpuTts(currentSettings: js.Dynamic, service: ManagedService): Future[Either[String, String]] =
     val parakeetSettled =
       if str(currentSettings.sttProvider) == "parakeet" then ensureService(parakeetFor(currentSettings)).map(_ => ())
       else Future.unit
-    parakeetSettled.flatMap(_ => ensureService(QwenService))
+    parakeetSettled.flatMap(_ => ensureService(service))
 
   bb.background.schedule(
     "service-idle",
@@ -1990,8 +1991,8 @@ def plugin(bb: BbApi): Unit =
         settings.get().toFuture.foreach { s =>
           val speechService = str(s.ttsProvider) match
             case "pocket-tts"            => Some(ensureService(PocketService))
-            case QwenTtsProvider         => Some(ensureQwenTts(s))
-            case ChatterboxNanoProvider  => Some(ensureService(ChatterboxService))
+            case QwenTtsProvider         => Some(ensureGpuTts(s, QwenService))
+            case ChatterboxNanoProvider  => Some(ensureGpuTts(s, ChatterboxService))
             // The access token, so the first sentence does not wait for it.
             case GoogleCloudTts.Provider => Some(googleAuth(s).map(_.map(_ => "")))
             case _                       => None
@@ -2561,7 +2562,7 @@ def plugin(bb: BbApi): Unit =
                   }))
                 case QwenTtsProvider =>
                   // Stresses a marked word in its own notation, so it gets the marks.
-                  passedOn(ensureQwenTts(s).map(_.map { url =>
+                  passedOn(ensureGpuTts(s, QwenService).map(_.map { url =>
                     val payload = js.Dynamic.literal(
                       "text"  -> markedText,
                       "voice" -> (if voice.nonEmpty then voice else QwenServer.DefaultVoice)
@@ -2576,7 +2577,7 @@ def plugin(bb: BbApi): Unit =
                     )
                   }))
                 case ChatterboxNanoProvider =>
-                  passedOn(ensureService(ChatterboxService).map(_.map { url =>
+                  passedOn(ensureGpuTts(s, ChatterboxService).map(_.map { url =>
                     val payload = js.Dynamic.literal(
                       "text"  -> text,
                       "voice" -> (if voice.nonEmpty then voice else ChatterboxServer.BuiltInVoice)

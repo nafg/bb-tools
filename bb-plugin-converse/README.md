@@ -43,8 +43,10 @@ bb plugin install .    # from this directory
   word the agent puts between *asterisks* is stressed; it takes about 2.1 GB
   of the GPU, so Parakeet runs on the CPU while it is the provider);
   `chatterbox-nano` (a local Chatterbox Nano the plugin starts and stops, on
-  the CPU: besides its built-in voice, a voice is the path of a WAV clip of a
-  voice to clone); `google-cloud-tts` (Google's hosted WaveNet voices: a word
+  the GPU, where it takes about 2.1 GB, so Parakeet runs on the CPU while it
+  is the provider; if the GPU has too little free memory when it starts it
+  runs on the CPU instead, more slowly: besides its built-in voice, a voice is
+  the path of a WAV clip of a voice to clone); `google-cloud-tts` (Google's hosted WaveNet voices: a word
   between *asterisks* is stressed through SSML, the first 4 million characters
   a month are free and the plugin counts what it sends; it calls the API with
   gcloud's application default credentials, or with an API key from the

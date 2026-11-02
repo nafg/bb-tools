@@ -346,9 +346,10 @@ function TtsProviderCard({
         )}
         {provider === "chatterbox-nano" && (
           <p className="text-xs text-muted-foreground">
-            Converse starts and stops Chatterbox Nano automatically; it runs on the CPU and leaves the GPU alone.
-            Besides its built-in voice, a voice is the path on this host of a WAV clip, over five seconds long,
-            of the voice to clone.
+            Converse starts and stops Chatterbox Nano automatically; it runs on the GPU, so Parakeet moves to the
+            CPU while it is the provider. If the GPU has too little memory free when it starts, it runs on the CPU
+            instead, more slowly. Besides its built-in voice, a voice is the path on this host of a WAV clip,
+            over five seconds long, of the voice to clone.
           </p>
         )}
         {provider === "google-cloud-tts" && (
