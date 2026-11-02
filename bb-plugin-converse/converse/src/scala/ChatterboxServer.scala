@@ -50,8 +50,14 @@ private object ChatterboxServer:
     */
   val CpuThreads = 8
 
-  /** Where the script is written on the host before it is started. */
-  val ScriptRelativePath = ".cache/bb-converse/chatterbox_nano_server.py"
+  /** Where the script is written on the host before it is started. `uv` keeps
+    * the environment it built for a script path and reuses it while it still
+    * satisfies the script's requirements, and the unpinned `torch` is satisfied
+    * by the CPU build the earlier path's environment holds. So the path changed
+    * with the move to the GPU, to get an environment with the CUDA build; it
+    * has to change again if the requirements ever need a different build.
+    */
+  val ScriptRelativePath = ".cache/bb-converse/chatterbox_nano_gpu_server.py"
 
   def startCommand(home: String): String =
     s"uv run --script $home/$ScriptRelativePath --port $Port --version $Version " +
@@ -215,4 +221,4 @@ private object ChatterboxServer:
   /** Identifies this script and its start command, so a running server
     * started from an earlier one can be recognized and replaced.
     */
-  lazy val Version: String = (Script, GpuThreads, CpuThreads, BuiltInVoice).hashCode.toHexString
+  lazy val Version: String = (Script, ScriptRelativePath, GpuThreads, CpuThreads, BuiltInVoice).hashCode.toHexString
