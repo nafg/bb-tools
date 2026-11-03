@@ -1,5 +1,7 @@
 package billingcore
 
+import activitycore.Session
+
 /** A mark placed on the page: `yTop` and `yBottom` in pixels from the top of the session. */
 final case class PlacedMark(mark: Mark, yTop: Double, yBottom: Double)
 

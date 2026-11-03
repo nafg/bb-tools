@@ -1,5 +1,7 @@
 package billingcore
 
+import activitycore.Window
+
 /** The one state a stretch of a thread's recording is in. A stretch is billed when a submission covers it, and not
   * otherwise; the other cases say why an uncovered stretch is, or is not, offered for a draft.
   */

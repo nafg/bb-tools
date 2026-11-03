@@ -1,5 +1,7 @@
 package billingcore
 
+import activitycore.Window
+
 class SubmissionsTest extends munit.FunSuite:
   private val Day                                      = "2026-10-19"
   private def at(minutes: Int): Long                   = 1_000_000_000L + minutes * 60_000L

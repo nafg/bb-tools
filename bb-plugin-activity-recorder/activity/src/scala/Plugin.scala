@@ -51,6 +51,16 @@ private object Schema:
     "end"      -> number("Epoch milliseconds; equal to start for a point signal"),
     "source"   -> string("What produced it: converse, converse-replay, converse-backfill, bb, or app")
   )
+  val agentSpan: js.Dynamic = obj(
+    Seq("threadId", "start", "end", "startedBy"),
+    "threadId" -> string("The thread whose agent ran the turn"),
+    "start"    -> number("Epoch milliseconds"),
+    "end"      -> number("Epoch milliseconds; the time of the call for a turn still running"),
+    "startedBy" -> js.Dynamic.literal(
+      "type"        -> "object",
+      "description" -> "{ kind: \"user\" }, or { kind: \"threads\", ids } when other threads started the turn"
+    )
+  )
   val interval: js.Dynamic = obj(
     Seq("threadId", "start", "end", "kinds"),
     "threadId" -> string("The thread"),
@@ -70,9 +80,10 @@ private object Converse:
 
 /** The bb thread events the recorder reads, and the cursor it keeps per thread. */
 private object ThreadEvents:
-  val Types     = js.Array("client/turn/requested", "turn/started", "turn/completed")
+  val Types     = js.Array("client/turn/requested", "turn/input/accepted", "turn/started", "turn/completed")
   val PageLimit = 100 // the most bb serves per request
-  def cursor(threadId: String): String = s"thread:$threadId"
+  // Versioned: reading turn requests and their acceptance (who started each turn) meant reading every thread again.
+  def cursor(threadId: String): String = s"thread-v2:$threadId"
 
 private val DefaultGapMs        = 300_000L
 private val DefaultStaleAfterMs = 86_400_000L
@@ -118,7 +129,17 @@ final class Store(storage: BbStorageArea):
       "DROP TABLE signals",
       "ALTER TABLE signals_by_source RENAME TO signals",
       "CREATE INDEX IF NOT EXISTS signals_by_thread ON signals (thread_id, start_at)",
-      "CREATE INDEX IF NOT EXISTS signals_by_end ON signals (end_at)"
+      "CREATE INDEX IF NOT EXISTS signals_by_end ON signals (end_at)",
+      // A turn signal remembers its turn and who started it (see `Starter.encode`); null until the turn's input is accepted.
+      "ALTER TABLE signals ADD COLUMN turn_id TEXT",
+      "ALTER TABLE signals ADD COLUMN starter TEXT",
+      "CREATE INDEX IF NOT EXISTS signals_by_turn ON signals (thread_id, turn_id)",
+      """CREATE TABLE IF NOT EXISTS turn_requests (
+        |  thread_id TEXT NOT NULL,
+        |  request_id TEXT NOT NULL,
+        |  starter TEXT NOT NULL,
+        |  PRIMARY KEY (thread_id, request_id)
+        |)""".stripMargin
     )
   )
 
@@ -130,6 +151,56 @@ final class Store(storage: BbStorageArea):
           "ON CONFLICT(source, id) DO UPDATE SET end_at = excluded.end_at"
       )
       .run(signal.source, signal.id, signal.threadId, signal.kind.name, signal.start.toDouble, signal.end.toDouble, js.Date.now())
+
+  /** Inserts the turn's signal, or moves the existing one's end; the turn's starter is kept if already known. */
+  def upsertTurn(signal: Signal, turnId: String): Unit =
+    val _ = db
+      .prepare(
+        "INSERT INTO signals (source, id, thread_id, kind, start_at, end_at, recorded_at, turn_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?) " +
+          "ON CONFLICT(source, id) DO UPDATE SET end_at = excluded.end_at, turn_id = excluded.turn_id"
+      )
+      .run(signal.source, signal.id, signal.threadId, signal.kind.name, signal.start.toDouble, signal.end.toDouble, js.Date.now(), turnId)
+
+  def setRequestStarter(threadId: String, requestId: String, starter: Option[Starter]): Unit =
+    val _ = db
+      .prepare("INSERT INTO turn_requests (thread_id, request_id, starter) VALUES (?, ?, ?) ON CONFLICT(thread_id, request_id) DO UPDATE SET starter = excluded.starter")
+      .run(threadId, requestId, Starter.encode(starter))
+
+  def requestStarter(threadId: String, requestId: String): Option[String] =
+    db.prepare("SELECT starter FROM turn_requests WHERE thread_id = ? AND request_id = ?").get(threadId, requestId).toOption.map(row => str(row.starter))
+
+  /** Sets who started the turn, unless an earlier accepted input already did. */
+  def setTurnStarter(threadId: String, turnId: String, starter: String): Unit =
+    val _ = db
+      .prepare("UPDATE signals SET starter = ? WHERE source = 'bb' AND kind = 'turn' AND thread_id = ? AND turn_id = ? AND starter IS NULL")
+      .run(starter, threadId, turnId)
+
+  /** The turns the user set going that reach into `[from, to)`, by thread then start. A turn still running ends at
+    * `now`. A turn with no accepted input is bb's agent resuming on its own, after a background task finished, so it
+    * takes the starter of the thread's nearest earlier turn that has one.
+    */
+  def agentSpans(from: Long, to: Long, threadIds: Option[Seq[String]], now: Long): Vector[AgentSpan] =
+    if threadIds.exists(_.isEmpty) then Vector.empty
+    else
+      val threadClause = threadIds.fold("")(ids => s" AND s.thread_id IN (${ids.map(_ => "?").mkString(", ")})")
+      val params: Seq[js.Any] = Seq[js.Any](to.toDouble) ++ threadIds.getOrElse(Nil).map(id => id: js.Any) :+ (from.toDouble: js.Any)
+      db.prepare(
+        "SELECT thread_id, start_at, end_at, starter, open FROM (" +
+          "SELECT s.thread_id, s.start_at, s.end_at, (o.signal_id IS NOT NULL) AS open, COALESCE(s.starter, " +
+          "(SELECT p.starter FROM signals p WHERE p.source = 'bb' AND p.kind = 'turn' AND p.thread_id = s.thread_id " +
+          "AND p.starter IS NOT NULL AND p.start_at < s.start_at ORDER BY p.start_at DESC LIMIT 1)) AS starter " +
+          "FROM signals s LEFT JOIN open_turns o ON o.thread_id = s.thread_id AND o.signal_id = s.id " +
+          s"WHERE s.source = 'bb' AND s.kind = 'turn' AND s.start_at < ?$threadClause AND (o.signal_id IS NOT NULL OR s.end_at > ?)" +
+          ") WHERE starter IS NOT NULL AND starter != '' ORDER BY thread_id, start_at"
+      ).all(params*)
+        .toVector
+        .flatMap { row =>
+          Starter.decode(str(row.starter)).map { starter =>
+            val start = row.start_at.asInstanceOf[Double].toLong
+            val end   = if row.open.asInstanceOf[Double] != 0 then math.max(now, start) else row.end_at.asInstanceOf[Double].toLong
+            AgentSpan(str(row.thread_id), start, end, starter)
+          }
+        }
 
   def setEnd(source: String, id: String, end: Long): Unit =
     val _ = db.prepare("UPDATE signals SET end_at = ? WHERE source = ? AND id = ?").run(end.toDouble, source, id)
@@ -189,6 +260,25 @@ final class Store(storage: BbStorageArea):
 final class ThreadIngest(bb: BbApi, store: Store):
   private val Source = "bb"
 
+  /** What the recorder needs to know about a thread to tell who started its turns. */
+  private final case class ThreadInfo(hidden: Boolean, parentThreadId: Option[String])
+
+  private val infos = scala.collection.mutable.Map.empty[String, ThreadInfo]
+
+  private def infoOf(row: js.Dynamic): ThreadInfo =
+    ThreadInfo(str(row.visibility) == "hidden", Option(str(row.parentThreadId)).filter(_.nonEmpty))
+
+  /** A thread's visibility and parent never change, so each is read once. */
+  private def info(threadId: String): Future[ThreadInfo] =
+    infos.get(threadId) match
+      case Some(known) => Future.successful(known)
+      case None        =>
+        bb.sdk.threads.get(js.Dynamic.literal("threadId" -> threadId)).toFuture.map { thread =>
+          val known = infoOf(if isDefined(thread.thread) then thread.thread else thread)
+          infos.update(threadId, known)
+          known
+        }
+
   private val reads = OneInFlight[String](
     readPages,
     (threadId, e) => bb.log.warn(s"could not read events of thread $threadId: ${e.getMessage}")
@@ -207,20 +297,25 @@ final class ThreadIngest(bb: BbApi, store: Store):
       "limit"    -> ThreadEvents.PageLimit.toString
     )
     store.cursor(ThreadEvents.cursor(threadId)).foreach(seq => request.updateDynamic("afterSeq")(seq))
-    bb.sdk.threads.events.list(request).toFuture.flatMap { rows =>
-      rows.foreach(record)
+    info(threadId).zip(bb.sdk.threads.events.list(request).toFuture).flatMap { (info, rows) =>
+      rows.foreach(record(info, _))
       rows.lastOption.foreach(row => store.setCursor(ThreadEvents.cursor(threadId), str(row.seq)))
       if rows.length >= ThreadEvents.PageLimit then readPages(threadId) else Future.unit
     }
 
-  private def record(row: js.Dynamic): Unit =
+  private def record(info: ThreadInfo, row: js.Dynamic): Unit =
     val threadId = str(row.threadId)
     val at       = number(row.createdAt).map(_.toLong)
     (str(row.`type`), at) match
-      case ("client/turn/requested", Some(at)) if isUserMessage(row.data) =>
-        store.upsert(Signal(str(row.id), threadId, SignalKind.Message, at, at, Source))
+      case ("client/turn/requested", Some(at)) =>
+        if isUserMessage(row.data) then store.upsert(Signal(str(row.id), threadId, SignalKind.Message, at, at, Source))
+        store.setRequestStarter(threadId, str(row.data.requestId), starterOf(info, row.data))
+      case ("turn/input/accepted", Some(_)) =>
+        store.requestStarter(threadId, str(row.data.clientRequestId)).foreach(starter =>
+          store.setTurnStarter(threadId, str(row.scope.turnId), starter)
+        )
       case ("turn/started", Some(at)) =>
-        store.upsert(Signal(str(row.id), threadId, SignalKind.Turn, at, at, Source))
+        store.upsertTurn(Signal(str(row.id), threadId, SignalKind.Turn, at, at, Source), str(row.scope.turnId))
         store.setOpenTurn(threadId, str(row.id))
       case ("turn/completed", Some(at)) =>
         store.openTurn(threadId).foreach { signalId =>
@@ -228,6 +323,31 @@ final class ThreadIngest(bb: BbApi, store: Store):
           store.clearOpenTurn(threadId)
         }
       case _ => ()
+
+  /** Who started the turn this request begins, when it is work the user set going. A hidden thread is one of bb's
+    * own workers (recap, summaries), which never counts.
+    */
+  private def starterOf(info: ThreadInfo, data: js.Dynamic): Option[Starter] =
+    if info.hidden then None
+    else
+      val subject = data.systemMessageSubject
+      val subjectIds =
+        if !isDefined(subject) || subject == null then Set.empty[String]
+        else
+          val own      = Option(str(subject.threadId)).filter(_.nonEmpty).toSet
+          val outcomes = subject.outcomes.asInstanceOf[js.UndefOr[js.Array[js.Dynamic]]].fold(Set.empty[String])(_.iterator.map(o => str(o.threadId)).filter(_.nonEmpty).toSet)
+          own ++ outcomes
+      Starter.of(
+        TurnRequest(
+          initiator = str(data.initiator),
+          senderThreadId = Option(str(data.senderThreadId)).filter(_.nonEmpty),
+          systemMessageKind = str(data.systemMessageKind),
+          subjectThreadIds = subjectIds,
+          text = text(data),
+          startsThread = isDefined(data.target) && str(data.target.kind) == "thread-start",
+          parentThreadId = info.parentThreadId
+        )
+      )
 
   /** A message the user wrote: not one an agent, bb, or an automation sent.
     * Automations arrive tagged as the user, so their "[bb " prefix is the
@@ -251,6 +371,7 @@ final class ThreadIngest(bb: BbApi, store: Store):
         .list(js.Dynamic.literal("archived" -> archived, "includeHidden" -> true, "limit" -> 200, "offset" -> offset))
         .toFuture
         .flatMap { threads =>
+          threads.foreach(thread => infos.update(str(thread.id), infoOf(thread)))
           threads.foldLeft(Future.unit)((prior, thread) => prior.flatMap(_ => sync(str(thread.id)))).flatMap { _ =>
             if threads.length >= 200 then page(archived, offset + 200) else Future.unit
           }
@@ -567,6 +688,12 @@ def plugin(bb: BbApi): Unit =
     val rows       = store.signals(from, to, threadIdsOf(input), kindsOf(input, SignalKind.values.toSet))
     js.Dynamic.literal("signals" -> rows.map(ActivityJson.signal).toJSArray)
 
+  def agentSpans(rawInput: js.Dynamic): js.Any =
+    val input      = objectInput(rawInput)
+    val (from, to) = window(input)
+    val spans      = store.agentSpans(from, to, threadIdsOf(input), js.Date.now().toLong)
+    js.Dynamic.literal("agentSpans" -> spans.map(ActivityJson.agentSpan).toJSArray)
+
   def status(): Future[js.Any] =
     currentSettings.map { s =>
       js.Dynamic.literal(
@@ -637,6 +764,17 @@ def plugin(bb: BbApi): Unit =
         ),
         Schema.obj(Seq("signals"), "signals" -> Schema.array(Schema.signal, "By thread id, then start"))
       ),
+      ActivityRecorderRpc.AgentSpans -> method(
+        "The agent turns the user set going that reach into [from, to): started by the user, or by a thread working " +
+          "for them. Turns of automations, subscriptions and bb's own workers are left out.",
+        Schema.obj(
+          Seq("from", "to"),
+          "from"      -> Schema.from,
+          "to"        -> Schema.to,
+          "threadIds" -> Schema.threadIds
+        ),
+        Schema.obj(Seq("agentSpans"), "agentSpans" -> Schema.array(Schema.agentSpan, "By thread id, then start"))
+      ),
       ActivityRecorderRpc.Status -> method(
         "The gap setting and the state of each signal source.",
         Schema.Null,
@@ -681,6 +819,7 @@ def plugin(bb: BbApi): Unit =
     js.Dynamic.literal(
       ActivityRecorderRpc.Intervals -> js.Any.fromFunction1((input: js.Dynamic) => intervals(input).toJSPromise),
       ActivityRecorderRpc.Signals   -> js.Any.fromFunction1((input: js.Dynamic) => signals(input)),
+      ActivityRecorderRpc.AgentSpans -> js.Any.fromFunction1((input: js.Dynamic) => agentSpans(input)),
       ActivityRecorderRpc.Status    -> js.Any.fromFunction1((_: js.Dynamic) => status().toJSPromise),
       "reportView"                  -> js.Any.fromFunction1((input: js.Dynamic) => reportView(input))
     ),

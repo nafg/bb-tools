@@ -64,6 +64,7 @@ projects:
     - template-js
     folder: ./bb-plugin-billing/billing
   billing-core:
+    dependsOn: activity-core
     cross:
       jvm3:
         extends:

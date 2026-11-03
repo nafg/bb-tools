@@ -1,5 +1,7 @@
 package billingapp
 
+import activitycore.{Window, Session, Sessions}
+
 import billingcore.*
 import japgolly.scalajs.react.*
 import japgolly.scalajs.react.vdom.html_<^.*

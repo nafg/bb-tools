@@ -1,5 +1,7 @@
 package billing
 
+import activitycore.Window
+
 import bbplugin.BbApi
 import bbplugin.Dyn.str
 import billingcore.*

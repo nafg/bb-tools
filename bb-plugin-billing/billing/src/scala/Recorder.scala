@@ -1,6 +1,6 @@
 package billing
 
-import activitycore.ActivityJson
+import activitycore.{ActivityJson, AgentSpan}
 import bbplugin.BbApi
 import billingcore.Interval
 
@@ -41,6 +41,14 @@ final class Recorder(bb: BbApi)(using ExecutionContext):
     call("signals", js.Dynamic.literal("from" -> from.toDouble, "to" -> to.toDouble))
       .map(result =>
         ActivityJson.signals(result).left.map(problem => s"the activity recorder's signals output could not be read: $problem")
+      )
+      .recover { case e => Left(errorMessage(e)) }
+
+  /** The agent turns the user set going that reach into `[from, to)`, which keep a session open while they run. */
+  def agentSpans(from: Long, to: Long): Future[Either[String, Vector[AgentSpan]]] =
+    call("agentSpans", js.Dynamic.literal("from" -> from.toDouble, "to" -> to.toDouble))
+      .map(result =>
+        ActivityJson.agentSpans(result).left.map(problem => s"the activity recorder's agentSpans output could not be read: $problem")
       )
       .recover { case e => Left(errorMessage(e)) }
 

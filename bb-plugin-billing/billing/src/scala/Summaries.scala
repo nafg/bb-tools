@@ -1,8 +1,10 @@
 package billing
 
+import activitycore.Window
+
 import bbplugin.Dyn.{isDefined, number, str}
 import bbplugin.{BbApi, BbSettingsHandle}
-import billingcore.{ToolCall, Window}
+import billingcore.ToolCall
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.js

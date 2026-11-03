@@ -1,9 +1,6 @@
 package billingcore
 
-/** One recorded interval of one covered thread, as a submission lists it; `day` is its local day. */
-final case class Window(threadId: String, day: String, start: Long, end: Long):
-  def durationMs: Long = end - start
-  def key: String      = s"$threadId|$start|$end"
+import activitycore.Window
 
 /** What a draft of `windows` would bill. Stretches are cut on the unclipped recording, so their keys never depend on
   * what was sent before; only the summing is confined to the draft.

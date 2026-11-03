@@ -1,5 +1,7 @@
 package billing
 
+import activitycore.{AgentSpan, Window, Session, Sessions}
+
 import bbplugin.Dyn.{number, str}
 import bbplugin.{BbApi, BbSettingsHandle}
 import billingcore.*
@@ -240,6 +242,17 @@ final class Service(
           .map(deleted => Right(all.filterNot(i => deleted.flatten.contains(i.threadId))))
     }
 
+  /** The agent turns the user set going from `from` to `to`, without those of deleted threads. They only decide how
+    * sessions group stretches, so a recorder that cannot list them leaves them out rather than failing the screen.
+    */
+  private def agentSpansOfLiveThreads(from: Long, to: Long): Future[Vector[AgentSpan]] =
+    recorder.agentSpans(from, to).flatMap {
+      case Left(_)      => Future.successful(Vector.empty)
+      case Right(spans) =>
+        Future.traverse(spans.map(_.threadId).distinct)(t => threadSummary(t).map(sm => Option.when(sm.deleted)(t)))
+          .map(deleted => spans.filterNot(s => deleted.flatten.contains(s.threadId)))
+    }
+
   def threadTitle(threadId: String): Future[String] = threadSummary(threadId).map(_.title)
 
   private def projectNames(): Future[Map[String, String]] =
@@ -395,12 +408,12 @@ final class Service(
   def sessionScreen(at: Option[Long]): Future[Either[String, SessionScreenResult]] =
     val now = js.Date.now().toLong
     calendar().flatMap { (cal, _) =>
-      intervalsOfLiveThreads(now - SessionHistoryMs, now).flatMap {
-        case Left(error) => Future.successful(Left(error))
-        case Right(all)  =>
+      intervalsOfLiveThreads(now - SessionHistoryMs, now).zip(agentSpansOfLiveThreads(now - SessionHistoryMs, now)).flatMap {
+        case (Left(error), _)       => Future.successful(Left(error))
+        case (Right(all), agentSpans) =>
           val split    = Intervals.splitByDay(all, cal)
           val windows  = split.map(i => Window(i.threadId, i.day, i.start, i.end))
-          val sessions = Sessions.of(windows)
+          val sessions = Sessions.of(windows, agentSpans)
           val allIds = windows.map(_.threadId).distinct
           for
             everyone  <- resolveWithContext(allIds)

@@ -25,6 +25,35 @@ object ActivityJson:
       "kinds"    -> value.kinds.toVector.map(_.name).sorted.toJSArray
     )
 
+  def agentSpan(value: AgentSpan): js.Dynamic =
+    js.Dynamic.literal(
+      "threadId"  -> value.threadId,
+      "start"     -> value.start.toDouble,
+      "end"       -> value.end.toDouble,
+      "startedBy" -> (value.startedBy match
+        case Starter.User         => js.Dynamic.literal("kind" -> "user")
+        case Starter.Threads(ids) => js.Dynamic.literal("kind" -> "threads", "ids" -> ids.toVector.sorted.toJSArray))
+    )
+
+  /** The `agentSpans` output, or a message describing what is wrong with it. */
+  def agentSpans(output: js.Dynamic): Either[String, Vector[AgentSpan]] =
+    array(output.agentSpans).flatMap(_.traverse(readAgentSpan))
+
+  private def readAgentSpan(value: js.Dynamic): Either[String, AgentSpan] =
+    for
+      threadId  <- string(value.threadId, "threadId")
+      start     <- long(value.start, "start")
+      end       <- long(value.end, "end")
+      startedBy <- readStarter(value.startedBy)
+    yield AgentSpan(threadId, start, end, startedBy)
+
+  private def readStarter(value: js.Dynamic): Either[String, Starter] =
+    string(value.kind, "startedBy.kind").flatMap {
+      case "user"    => Right(Starter.User)
+      case "threads" => array(value.ids).flatMap(_.traverse(id => string(id, "startedBy.ids"))).map(ids => Starter.Threads(ids.toSet))
+      case other     => Left(s"unknown starter kind: $other")
+    }
+
   /** The `intervals` output, or a message describing what is wrong with it. */
   def intervals(output: js.Dynamic): Either[String, Vector[Interval]] =
     array(output.intervals).flatMap(_.traverse(readInterval))

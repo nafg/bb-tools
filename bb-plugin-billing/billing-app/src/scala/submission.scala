@@ -1,5 +1,7 @@
 package billingapp
 
+import activitycore.Window
+
 import billingcore.{
   Allocation,
   Billability,
@@ -11,7 +13,6 @@ import billingcore.{
   DraftPick,
   SubmissionRecord,
   Submissions,
-  Window,
   Words,
   ZohoTarget
 }

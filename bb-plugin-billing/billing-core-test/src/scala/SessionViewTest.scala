@@ -1,5 +1,7 @@
 package billingcore
 
+import activitycore.{Window, Session}
+
 class SessionViewTest extends munit.FunSuite:
   private def min(m: Int): Long = m * 60_000L
   private def stretch(thread: String, from: Int, to: Int): SessionStretch =

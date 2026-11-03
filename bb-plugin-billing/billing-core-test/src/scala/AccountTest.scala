@@ -1,5 +1,7 @@
 package billingcore
 
+import activitycore.Window
+
 import munit.FunSuite
 
 class AccountTest extends FunSuite:

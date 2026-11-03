@@ -13,6 +13,11 @@ package activitycore
   *   - `signals`: input `{ from, to, threadIds?, kinds? }` (default: every
   *     kind), output `{ signals: [{ id, threadId, kind, start, end, source }] }`
   *     for signals reaching into `[from, to)`.
+  *   - `agentSpans`: input `{ from, to, threadIds? }`, output `{ agentSpans: [{
+  *     threadId, start, end, startedBy }] }` for the agent turns the user set
+  *     going that reach into `[from, to)`; see [[Starter]]. `startedBy` is
+  *     `{ kind: "user" }` or `{ kind: "threads", ids }`. A turn still running
+  *     ends at the time of the call. Pass them to [[Sessions.of]].
   *   - `status`: input `null`, output `{ gapMs, staleAfterMs, sources: { converse:
   *     { available, cursorSeq, cursorAt, lastSyncAt, stale, error } } }`.
   *
@@ -23,4 +28,5 @@ object ActivityRecorderRpc:
   val PluginId  = "activity-recorder"
   val Intervals = "intervals"
   val Signals   = "signals"
+  val AgentSpans = "agentSpans"
   val Status    = "status"

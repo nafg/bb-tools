@@ -1,5 +1,7 @@
 package billingcore
 
+import activitycore.{Window, Session}
+
 /** Whether time on a thread can be billed, as the user has set it. A thread never marked is not the same as one marked
   * not client work: the screen tells them apart.
   */
