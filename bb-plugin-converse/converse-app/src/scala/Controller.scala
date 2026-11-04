@@ -392,6 +392,7 @@ final class Controller(
   def configure(opts: js.Dynamic): Unit =
     startOptions = opts
     player.setTtsMode(opts.ttsMode.asInstanceOf[js.UndefOr[String]].getOrElse("browser"))
+    player.setTtsProvider(opts.ttsProvider.asInstanceOf[js.UndefOr[String]].getOrElse(""))
     val transport = CallTransport.fromSetting(opts.callAudioOutput.asInstanceOf[js.UndefOr[String]].getOrElse(""))
     player.callTransport = transport
     cues.callTransport = transport
@@ -491,6 +492,7 @@ final class Controller(
     rememberForRestore(VoiceSessionRestore.Intent(sess, Option(newThreadId), js.JSON.stringify(opts)))
     val ttsMode = opts.ttsMode.asInstanceOf[js.UndefOr[String]].getOrElse("browser")
     player.setTtsMode(ttsMode)
+    player.setTtsProvider(opts.ttsProvider.asInstanceOf[js.UndefOr[String]].getOrElse(""))
     speechProbabilityThreshold = opts.speechProbabilityThreshold
       .asInstanceOf[js.UndefOr[Double]]
       .filter(t => t > 0.05 && t <= 1.0)

@@ -11,14 +11,20 @@ package converse
   *
   * The model takes about 2.1 GB of the GPU, which the 8 GB card shares with
   * the desktop (about 3.1 to 3.6 GB) and which has frozen with about 1.45 GB
-  * free; so it loads on the GPU only when enough is free to keep 2 GB free,
-  * exits if free memory falls below that later, and Parakeet runs on the CPU
-  * beside it (see [[conversecore.GpuTtsProvider]]). When the GPU cannot take it
-  * at load time (no CUDA device, or too little free memory) it runs on the
-  * CPU instead, at low priority, as the first version of this service did:
-  * slower than the GPU but faster than real time, which beats a speech
-  * provider that fails to start while the desktop is busy. Once started on
-  * either device it stays there; it reports which in `/version`.
+  * free; so the script keeps 2 GB free (its comments say how), and Parakeet
+  * runs on the CPU beside it (see [[conversecore.GpuTtsProvider]]). A request
+  * takes more memory the longer it is (measured at 128 MiB for 10 words, 272
+  * for 30, about 750 for 70 or 80), so the player sends at most
+  * [[conversecore.GpuTtsProvider.ChatterboxNano]]'s `wordsPerRequest` words at
+  * a time. A request that would leave less than 2 GB free is answered 503.
+  *
+  * When the GPU cannot take it at load time (no CUDA device, or too little
+  * free memory) it runs on the CPU instead, at low priority, as the first
+  * version of this service did: slower than the GPU but faster than real
+  * time, which beats a speech provider that fails to start while the desktop
+  * is busy. Once started on either device it stays there, and reports which
+  * in `/version`; the speech route starts it afresh when it refuses a request
+  * for want of memory or exits during one.
   *
   * It has no streaming API: a request is spoken whole, which is why the
   * player's one-sentence requests suit it, each generated while the one
@@ -88,7 +94,8 @@ private object ChatterboxServer:
       |import time
       |
       |# Lets the allocator grow segments instead of reserving whole new blocks, which
-      |# keeps reserved-but-unused GPU memory down on this tight card.
+      |# keeps reserved-but-unused GPU memory down on this tight card, and lets
+      |# torch.cuda.empty_cache() give a request's memory back to the device.
       |os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
       |import torch
       |import uvicorn
@@ -104,13 +111,27 @@ private object ChatterboxServer:
       |args = parser.parse_args()
       |
       |# The desktop shares this GPU and has frozen with about 1.45 GB of its memory
-      |# free, so this process never lets free memory fall below the floor: it
-      |# loads on the GPU only if what it still has to take (about 2.1 GB beyond
-      |# the CUDA context it holds by the time it measures) leaves the floor, and
-      |# exits if free memory drops below the floor later. When the GPU cannot
-      |# take it, the CPU can: slower, but it still speaks.
+      |# free, so this process keeps free memory above the floor:
+      |# - it loads on the GPU only if what loading takes (measured at up to 1934 MiB
+      |#   beyond the CUDA context it holds by the time it measures) leaves the floor
+      |#   and room for a request of the most words the player sends at once (30);
+      |# - it starts a request only if what the request may take leaves the floor,
+      |#   and answers 503 otherwise;
+      |# - after each request it gives the memory the request took back to the
+      |#   device; PyTorch would otherwise keep it reserved, and free memory would
+      |#   stay as low as the longest request so far had taken it;
+      |# - it exits if free memory falls below the floor anyway, as the desktop
+      |#   growing can still make it do.
+      |# When the GPU cannot take it, the CPU can: slower, but it still speaks.
       |FLOOR_MIB = 2000
-      |NEEDED_TO_LOAD_MIB = 4200
+      |NEEDED_TO_LOAD_MIB = 4300
+      |
+      |
+      |def request_needs_mib(text):
+      |    # The most GPU memory a request for `text` takes beyond what the model
+      |    # holds between requests: a fit, with a margin, to the measured peaks of
+      |    # 128 MiB for 10 words, 272 for 30, 524 for 60 and 762 for 80.
+      |    return 60 + 10 * len(text.split())
       |
       |
       |def gpu_free_mib():
@@ -175,8 +196,18 @@ private object ChatterboxServer:
       |
       |def speak(text, voice):
       |    with generating:
+      |        if device == "cuda":
+      |            free = gpu_free_mib()
+      |            needs = request_needs_mib(text)
+      |            if free - needs < FLOOR_MIB:
+      |                raise HTTPException(503, f"{free} MiB of GPU memory free; this request may take {needs} MiB, "
+      |                                         f"which would leave less than the {FLOOR_MIB} MiB floor")
       |        model.conds = conditionals(voice)
-      |        wav = model.generate(text)
+      |        try:
+      |            wav = model.generate(text)
+      |        finally:
+      |            if device == "cuda":
+      |                torch.cuda.empty_cache()
       |    return (wav[0].clamp(-1, 1) * 32767).to(torch.int16).cpu().numpy().tobytes()
       |
       |

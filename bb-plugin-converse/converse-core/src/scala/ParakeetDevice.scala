@@ -3,10 +3,13 @@ package conversecore
 /** A speech synthesis provider whose local server holds GPU memory while it
   * runs. The 8 GB card is shared with the desktop (which has frozen with about
   * 1.45 GB free), so none of these fits beside Parakeet on the GPU.
+  * `wordsPerRequest` is the most words one request to it may hold, when the
+  * memory a request takes grows with its length; a longer chunk is sent in
+  * pieces (see [[Speech.withinWords]]).
   */
-enum GpuTtsProvider(val id: String):
-  case Qwen3Tts       extends GpuTtsProvider("qwen3-tts")
-  case ChatterboxNano extends GpuTtsProvider("chatterbox-nano")
+enum GpuTtsProvider(val id: String, val wordsPerRequest: Option[Int]):
+  case Qwen3Tts       extends GpuTtsProvider("qwen3-tts", None)
+  case ChatterboxNano extends GpuTtsProvider("chatterbox-nano", Some(30))
 
 object GpuTtsProvider:
   /** The provider the settings call `id`, if it runs on the local GPU. */

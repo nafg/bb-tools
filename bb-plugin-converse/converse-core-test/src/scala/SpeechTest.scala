@@ -99,3 +99,35 @@ class SpeechTest extends munit.FunSuite:
   test("last chunk always has no pause"):
     val chunks = Speech.splitSpeechChunks("A. B. C.")
     assertEquals(chunks.last.pauseSeconds, 0.0)
+
+  private def words(n: Int, from: Int = 1) = (from until from + n).map(i => s"w$i").mkString(" ")
+
+  test("leaves a chunk within the word limit whole"):
+    val chunk = SpeechChunk("A short sentence,  with two spaces.", 0.25)
+    assertEquals(Speech.withinWords(chunk, 6), List(chunk))
+
+  test("cuts a long chunk where a clause ends nearest its middle, and keeps its pause for the last piece"):
+    val text   = s"${words(4)}, ${words(9, 5)}; ${words(7, 14)} — ${words(4, 21)}."
+    val pieces = Speech.withinWords(SpeechChunk(text, 0.45), 15)
+    assertEquals(pieces.map(_.text), List(s"${words(4)}, ${words(9, 5)};", s"${words(7, 14)} — ${words(4, 21)}."))
+    assertEquals(pieces.map(_.pauseSeconds), List(0.0, 0.45))
+
+  test("cuts at a dash standing as a word"):
+    val pieces = Speech.withinWords(SpeechChunk(s"${words(6)} — ${words(6, 7)}", 0), 8)
+    assertEquals(pieces.map(_.text), List(words(6), s"— ${words(6, 7)}"))
+
+  test("cuts between words when no clause end leaves as few pieces"):
+    // The only comma would leave a piece of 2 words and one of 18, which needs cutting again.
+    val pieces = Speech.withinWords(SpeechChunk(s"${words(2)}, ${words(18, 3)}", 0), 12)
+    assertEquals(pieces.map(_.text), List(s"${words(2)}, ${words(8, 3)}", words(10, 11)))
+
+  test("cuts as few pieces as the limit allows, none over it"):
+    for n <- 1 to 90; limit <- List(1, 7, 25, 35) do
+      val pieces = Speech.withinWords(SpeechChunk(words(n), 0), limit)
+      assertEquals(pieces.length, (n + limit - 1) / limit, s"$n words, limit $limit")
+      assert(pieces.forall(_.text.split(" ").length <= limit), s"$n words, limit $limit")
+      assertEquals(pieces.map(_.text).mkString(" "), words(n))
+
+  test("does not cut between the asterisks of a stress mark"):
+    val pieces = Speech.withinWords(SpeechChunk("w1 w2 *w3 w4 w5* w6", 0), 4)
+    assertEquals(pieces.map(_.text), List("w1 w2", "*w3 w4 w5* w6"))

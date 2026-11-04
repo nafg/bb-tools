@@ -178,6 +178,47 @@ object Speech:
     if current.nonEmpty then sentences += current.mkString(" ")
     sentences.result()
 
+  /** `chunk` in pieces of at most `maxWords` words, for a provider that cannot
+    * take a longer request; a chunk within the limit is left whole. It is cut
+    * in as few pieces as the limit allows, each cut where a clause ends (after
+    * a word ending in a comma, semicolon or colon, or before or after a dash
+    * standing as a word) if such a place leaves no more pieces to cut, and
+    * otherwise between words; of the places that qualify, the one nearest the
+    * middle, so the pieces come out even. No cut falls between the asterisks
+    * of a stress mark. Every piece but the last is followed by no pause, as
+    * the voice ends each with its own silence; the last keeps the chunk's.
+    */
+  def withinWords(chunk: SpeechChunk, maxWords: Int): List[SpeechChunk] =
+    require(maxWords > 0, s"maxWords must be positive, not $maxWords")
+    val words = chunk.text.split("\\s+").toVector.filter(_.nonEmpty)
+    // How many asterisks come before each place between words, by the index
+    // of the word after it.
+    val asterisksBefore = words.scanLeft(0)(_ + _.count(_ == '*'))
+    def piecesFor(length: Int) = (length + maxWords - 1) / maxWords
+    def cut(from: Int, until: Int): List[(Int, Int)] =
+      if until - from <= maxWords then List((from, until))
+      else
+        val fewest = piecesFor(until - from)
+        val places = (from + 1 until until).filter { at =>
+          asterisksBefore(at) % 2 == 0 && piecesFor(at - from) + piecesFor(until - at) == fewest
+        }
+        val clauseEnds = places.filter(at => ClauseEnding.matches(words(at - 1)) || Dash.matches(words(at)))
+        val middle     = (from + until) / 2.0
+        val at =
+          if clauseEnds.nonEmpty then clauseEnds.minBy(at => math.abs(at - middle))
+          else if places.nonEmpty then places.minBy(at => math.abs(at - middle))
+          else from + maxWords
+        cut(from, at) ++ cut(at, until)
+    val pieces = cut(0, words.length)
+    if pieces.length == 1 then List(chunk)
+    else
+      pieces.zipWithIndex.map { case ((from, until), i) =>
+        SpeechChunk(words.slice(from, until).mkString(" "), if i == pieces.length - 1 then chunk.pauseSeconds else 0)
+      }
+
+  private val ClauseEnding = ".*[,;:]\\W*".r
+  private val Dash         = "[-–—]+".r
+
   /** `text` in the pieces it is spoken in. A bb thread it refers to is spoken
     * as its title from `threadTitles`, or as "a thread" when that has none.
     */

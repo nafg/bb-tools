@@ -77,6 +77,8 @@ export interface SoundCueSettings {
 
 export interface ConverseStartOptions {
   ttsMode: "browser" | "server";
+  /** The speech provider, as the settings name it. */
+  ttsProvider: string;
   speechProbabilityThreshold: number;
   endOfSpeechSilenceMs: number;
   soundCues?: SoundCueSettings;

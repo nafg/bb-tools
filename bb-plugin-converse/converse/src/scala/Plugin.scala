@@ -36,6 +36,7 @@ import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 import scala.scalajs.js.annotation.JSExportTopLevel
 import scala.util.chaining.*
+import scala.util.{Failure, Success}
 
 given ExecutionContext = ExecutionContext.parasitic
 
@@ -352,11 +353,13 @@ private def rejected(message: String): js.Promise[js.Dynamic] =
   js.Promise.reject(new js.Error(message)).asInstanceOf[js.Promise[js.Dynamic]]
 
 /** Why a speech request got no audio: the plugin's side is not set up for the
-  * provider (the browser's request was wrong for it), or the provider refused
-  * or failed (the plugin is a gateway that got a bad answer).
+  * provider (the browser's request was wrong for it), the provider cannot
+  * take the request now (it answered 503), or the provider refused or failed
+  * otherwise (the plugin is a gateway that got a bad answer).
   */
 private enum SpeechFailure(val message: String, val status: Int):
   case Unconfigured(reason: String) extends SpeechFailure(reason, 400)
+  case Unavailable(reason: String)  extends SpeechFailure(reason, 503)
   case Refused(reason: String)      extends SpeechFailure(reason, 502)
 
 private def jsonResponse(status: Int, message: String): js.Dynamic =
@@ -1526,14 +1529,18 @@ def plugin(bb: BbApi): Unit =
       }
     )
 
-  def ensureServiceNow(service: ManagedService): Future[Either[String, String]] =
-    val url = service.probeUrl
+  /** Stops `service` and waits, up to 30 s, until it no longer answers. */
+  def stopServiceAndAwaitDown(service: ManagedService): Future[Unit] =
     def awaitDown(attempt: Int): Future[Unit] =
       serviceState(service).flatMap {
         case ServiceState.Down => Future.unit
         case _ if attempt < 30 => delayMs(1000).flatMap(_ => awaitDown(attempt + 1))
         case _                 => Future.unit
       }
+    stopService(service).flatMap(_ => awaitDown(0))
+
+  def ensureServiceNow(service: ManagedService): Future[Either[String, String]] =
+    val url = service.probeUrl
     // Right(running): whether a usable instance is already up; Left: the port
     // is held by an instance this plugin cannot stop.
     val running: Future[Either[String, Boolean]] =
@@ -1545,7 +1552,7 @@ def plugin(bb: BbApi): Unit =
             if found == ServiceState.Stale then "the running instance is not the current version"
             else s"the running instance has not answered for over ${(ServiceHungAfterMs / 1000).toInt} s"
           bb.log.warn(s"replacing managed ${service.label}: $reason")
-          stopService(service).flatMap(_ => awaitDown(0)).flatMap(_ => serviceState(service)).map {
+          stopServiceAndAwaitDown(service).flatMap(_ => serviceState(service)).map {
             case ServiceState.Down => Right(false)
             case _                 => Left(s"the port of ${service.label} is held by an instance this plugin did not start")
           }
@@ -2534,12 +2541,16 @@ def plugin(bb: BbApi): Unit =
                       .fetch(url, init)
                       .asInstanceOf[js.Promise[js.Dynamic]]
                       .toFuture
-                      .map { upstream =>
-                        if !upstream.ok.asInstanceOf[Boolean] then
-                          Left(SpeechFailure.Refused(s"TTS provider returned ${str(upstream.status)}"))
+                      .flatMap { upstream =>
+                        if str(upstream.status) == "503" then
+                          upstream.text().asInstanceOf[js.Promise[String]].toFuture.map { detail =>
+                            Left(SpeechFailure.Unavailable(s"TTS provider returned 503: $detail"))
+                          }
+                        else if !upstream.ok.asInstanceOf[Boolean] then
+                          Future.successful(Left(SpeechFailure.Refused(s"TTS provider returned ${str(upstream.status)}")))
                         else
                           val contentType = upstream.headers.get("content-type")
-                          Right(
+                          Future.successful(Right(
                             js.Dynamic.newInstance(js.Dynamic.global.Response)(
                               upstream.body,
                               js.Dynamic.literal(
@@ -2549,7 +2560,7 @@ def plugin(bb: BbApi): Unit =
                                 )
                               )
                             )
-                          )
+                          ))
                       }
                 }
               val synthesized: Future[Either[SpeechFailure, js.Dynamic]] = provider match
@@ -2577,7 +2588,7 @@ def plugin(bb: BbApi): Unit =
                     )
                   }))
                 case ChatterboxNanoProvider =>
-                  passedOn(ensureGpuTts(s, ChatterboxService).map(_.map { url =>
+                  def synthesize() = passedOn(ensureGpuTts(s, ChatterboxService).map(_.map { url =>
                     val payload = js.Dynamic.literal(
                       "text"  -> text,
                       "voice" -> (if voice.nonEmpty then voice else ChatterboxServer.BuiltInVoice)
@@ -2591,6 +2602,20 @@ def plugin(bb: BbApi): Unit =
                       )
                     )
                   }))
+                  // On the GPU it refuses a request that would leave the card
+                  // short of memory, and exits when the desktop takes the card
+                  // below its floor during one, which drops the connection. Either
+                  // way it is started afresh (on the CPU while the GPU is short)
+                  // and asked once more.
+                  synthesize().transformWith {
+                    case Success(Left(SpeechFailure.Unavailable(reason))) =>
+                      bb.log.warn(s"Chatterbox Nano could not take a request ($reason); starting it afresh")
+                      stopServiceAndAwaitDown(ChatterboxService).flatMap(_ => synthesize())
+                    case Failure(e) =>
+                      bb.log.warn(s"Chatterbox Nano dropped a request (${e.getMessage}); asking again")
+                      synthesize()
+                    case answered => Future.fromTry(answered)
+                  }
                 case GoogleCloudTts.Provider =>
                   // Stresses a marked word with SSML's emphasis element.
                   synthesizeWithGoogle(s, Ssml.withEmphasis(markedText), voice)

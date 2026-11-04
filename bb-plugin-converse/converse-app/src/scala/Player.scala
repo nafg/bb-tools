@@ -58,6 +58,14 @@ final class Player(
 
   def setTtsMode(mode: String): Unit = ttsMode = mode
 
+  // The most words one request to the speech provider may hold, if it has a
+  // limit; a longer chunk is sent in pieces.
+  private var wordsPerRequest: Option[Int] = None
+
+  /** The speech provider in use, as the settings name it. */
+  def setTtsProvider(provider: String): Unit =
+    wordsPerRequest = GpuTtsProvider.named(provider).flatMap(_.wordsPerRequest)
+
   private var output: AudioOutput = null
 
   /** How call-style output reaches its audio element; used for outputs
@@ -175,7 +183,10 @@ final class Player(
           currentVoice = voice
           onChange()
           val chunks = Speech.splitSpeechChunks(item.text, titles)
-          if ttsMode == "server" then speakServer(gen, chunks, voice) else speakBrowser(gen, chunks, voice)
+          if ttsMode == "server" then
+            val requests = wordsPerRequest.fold(chunks)(limit => chunks.flatMap(Speech.withinWords(_, limit)))
+            speakServer(gen, requests, voice)
+          else speakBrowser(gen, chunks, voice)
       }
       done.onComplete {
         case Success(_) if generation == gen =>
