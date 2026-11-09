@@ -730,6 +730,12 @@ final class Service(
                            blocks    = shared.undecided.map(_ -> None) ++ shared.decided.map((b, a) => b -> Some(a))
                            others    = blocks.map(_._1).flatMap(_.threadIds).distinct.filterNot(coveredIds.contains)
                            otherSummaries     <- Future.traverse(others)(t => threadSummary(t).map(t -> _)).map(_.toMap)
+                           // Whether the other threads of the shared stretches are client work: a stretch shared with
+                           // another client thread has two client threads, not one.
+                           othersCtx          <- resolveWithContext(others)
+                           everyBillability   = (t: String) =>
+                                                  ctx.resolution.resolved.get(t).orElse(othersCtx.resolution.resolved.get(t))
+                                                    .map(_.billability).getOrElse(Billability.NotBillable)
                            otherConversations <- Future.traverse(others)(t => conversationOf(t).map(t -> _)).map(_.toMap)
                            everyConversation = messages ++ otherConversations
                            titles            = (ctx.summaries ++ otherSummaries).map((t, s) => t -> s.title)
@@ -797,7 +803,7 @@ final class Service(
                              summariesAvailable = available,
                              titles = titles,
                              recording = withSplit,
-                             billability = billability,
+                             billability = everyBillability,
                              projectId = ctx.summaries.get(root).map(_.projectId).getOrElse(""),
                              environmentId = ctx.summaries.get(root).flatMap(_.environmentId)
                            )
