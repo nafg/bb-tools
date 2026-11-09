@@ -43,6 +43,7 @@ type Served[R] = R match
   case Reply.Ok              => Unit
   case Reply.Overview        => OverviewReply
   case Reply.SessionScreen   => SessionScreenResult
+  case Reply.SessionShared   => Vector[(LedgerResult, Vector[OverlapBlock])]
   case Reply.Ledger          => LedgerResult
   case Reply.Plan            => PlanResult
   case Reply.Submission      => SubmissionRecord
@@ -90,6 +91,7 @@ final class Commands(
           result      <- service.overview(since)
         yield OverviewReply(result, since, status, missing, projectZoho, unbillable, catalog, available)
       case BillingRpc.SessionScreen(at)                     => service.sessionScreen(at).flatMap(orFail)
+      case BillingRpc.SessionShared(roots, period)          => service.sessionShared(roots, period).flatMap(orFail)
       case BillingRpc.Ledger(threadId, subthreads)          => service.ledger(threadId, subthreads).flatMap(orFail)
       case BillingRpc.Draft(threadId, subthreads, pick)     =>
         service.planOf(threadId, subthreads, pick).flatMap(orFail)
@@ -101,8 +103,8 @@ final class Commands(
       case BillingRpc.Decide(threadId, subthreads, key, a)       =>
         service.decide(key, a, threadId, subthreads).flatMap(orFail)
       case BillingRpc.Undecide(key)                              => Future.successful(service.undecide(key))
-      case BillingRpc.SettleAll(threadId, subthreads)            =>
-        service.decideSoleBillable(threadId, subthreads).flatMap(orFail)
+      case BillingRpc.SettleAll(threadId, subthreads, within)    =>
+        service.decideSoleBillable(threadId, subthreads, within).flatMap(orFail)
       case BillingRpc.Submit(threadId, subthreads, pick, billed) =>
         for
           outcome <- service.submit(threadId, subthreads, pick, billed).flatMap(orFail)

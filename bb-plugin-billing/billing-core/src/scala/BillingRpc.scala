@@ -15,9 +15,13 @@ object Reply:
   sealed trait Report
   sealed trait Audit
   sealed trait SessionScreen
+  sealed trait SessionShared
 
   /** How many shared stretches a one-click settle decided. */
   sealed trait Decided
+
+/** A stretch of clock time, `[start, end)` in epoch milliseconds. */
+final case class Period(start: Long, end: Long)
 
 /** Everything the page can ask the plugin: one case per method, carrying exactly the input that method needs. The wire
   * form is `(method, input)`; `encode` and `decode` are the only two places that know its field names.
@@ -30,6 +34,11 @@ enum BillingRpc[Reply]:
     * else the latest.
     */
   case SessionScreen(at: Option[Long]) extends BillingRpc[Reply.SessionScreen]
+
+  /** The undecided shared stretches reaching into `period` in the ledger of each of `roots` (with its subthreads): what
+    * must be decided before their time there can be sent, whatever is ticked.
+    */
+  case SessionShared(roots: Vector[String], period: Period) extends BillingRpc[Reply.SessionShared]
 
   /** The ledger of a thread and, when asked, of its subthreads that bill to the same place. */
   case Ledger(threadId: String, subthreads: Boolean) extends BillingRpc[Reply.Ledger]
@@ -54,8 +63,10 @@ enum BillingRpc[Reply]:
 
   case Undecide(key: BlockKey) extends BillingRpc[Reply.Ok]
 
-  /** Every undecided shared stretch of the ledger with exactly one client thread goes to that thread. */
-  case SettleAll(threadId: String, subthreads: Boolean) extends BillingRpc[Reply.Decided]
+  /** Every undecided shared stretch of the ledger with exactly one client thread goes to that thread: of those
+    * reaching into `within`, when given.
+    */
+  case SettleAll(threadId: String, subthreads: Boolean, within: Option[Period]) extends BillingRpc[Reply.Decided]
 
   /** Sends the draft to Zoho, or settles it without billing. */
   case Submit(threadId: String, subthreads: Boolean, pick: DraftPick, billed: Boolean)
@@ -83,6 +94,9 @@ enum BillingRpc[Reply]:
   case SetProjectNotClientWork(projectId: String, notClientWork: Boolean) extends BillingRpc[Reply.Ok]
   case Report(customerId: String, from: CivilDate, to: CivilDate)      extends BillingRpc[Reply.Report]
 
+  private def encodePeriod(p: Period): Wire =
+    Wire.obj("start" -> Wire.Num(p.start.toDouble), "end" -> Wire.Num(p.end.toDouble))
+
   /** The method name on the wire. */
   def method: String =
     val name = productPrefix
@@ -94,6 +108,7 @@ enum BillingRpc[Reply]:
     this match
       case Overview(since)                   => Wire.obj("since" -> Num(since.toDouble))
       case SessionScreen(at)                 => Wire.obj("at" -> Wire.opt(at.map(a => Num(a.toDouble))))
+      case SessionShared(roots, period)      => Wire.obj("roots" -> Wire.strings(roots), "period" -> encodePeriod(period))
       case Ledger(threadId, subthreads)      => Wire.obj("threadId" -> Str(threadId), "subthreads" -> Bool(subthreads))
       case Draft(threadId, subthreads, pick) =>
         Wire.obj("threadId" -> Str(threadId), "subthreads" -> Bool(subthreads), "pick" -> pick.encode)
@@ -110,8 +125,12 @@ enum BillingRpc[Reply]:
           "allocation" -> allocation.encode
         )
       case Undecide(key)                                 => Wire.obj("key" -> Str(key.text))
-      case SettleAll(threadId, subthreads)               =>
-        Wire.obj("threadId" -> Str(threadId), "subthreads" -> Bool(subthreads))
+      case SettleAll(threadId, subthreads, within)       =>
+        Wire.obj(
+          "threadId"   -> Str(threadId),
+          "subthreads" -> Bool(subthreads),
+          "within"     -> Wire.opt(within.map(encodePeriod))
+        )
       case Submit(threadId, subthreads, pick, billed)    =>
         Wire.obj(
           "threadId"   -> Str(threadId),
@@ -172,6 +191,7 @@ object BillingRpc:
   val methods: Vector[String] = Vector(
     "overview",
     "sessionScreen",
+    "sessionShared",
     "ledger",
     "draft",
     "summarize",
@@ -207,11 +227,19 @@ object BillingRpc:
     def blockKey: Either[String, BlockKey]             =
       required("key").flatMap(s => BlockKey.parse(s).toRight("key must name a shared stretch"))
     def subthreads: Boolean                            = flag("subthreads", default = true)
+    def period(value: Wire): Option[Period]            =
+      for s <- value.field("start").flatMap(_.asNum); e <- value.field("end").flatMap(_.asNum)
+      yield Period(s.toLong, e.toLong)
 
     method match
       case "overview"          =>
         input.field("since").flatMap(_.asNum).map(_.toLong).toRight("since is required").map(Overview.apply)
       case "sessionScreen"     => Right(SessionScreen(input.field("at").flatMap(_.asNum).map(_.toLong)))
+      case "sessionShared"     =>
+        for
+          roots <- input.field("roots").flatMap(_.asArr).map(_.flatMap(_.asStr)).toRight("roots is required")
+          p     <- input.field("period").flatMap(period).toRight("period must have a start and an end")
+        yield SessionShared(roots, p)
       case "ledger"            => required("threadId").map(Ledger(_, subthreads))
       case "draft"             => for threadId <- required("threadId"); p <- pick yield Draft(threadId, subthreads, p)
       case "summarize"         =>
@@ -228,7 +256,8 @@ object BillingRpc:
                           .toRight("allocation must be wholeTo, portions, or nobody")
         yield Decide(threadId, subthreads, key, allocation)
       case "undecide"          => blockKey.map(Undecide.apply)
-      case "settleAll"         => required("threadId").map(SettleAll(_, subthreads))
+      case "settleAll"         =>
+        required("threadId").map(SettleAll(_, subthreads, input.field("within").flatMap(period)))
       case "submit"            =>
         for threadId <- required("threadId"); p <- pick
         yield Submit(threadId, subthreads, p, flag("billed", default = false))

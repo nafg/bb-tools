@@ -129,6 +129,7 @@ object Json:
     rpc match
       case _: BillingRpc.Overview                       => overview(out)
       case _: BillingRpc.SessionScreen                  => sessionScreen(out)
+      case _: BillingRpc.SessionShared                  => sessionShared(out)
       case _: BillingRpc.Ledger                         => ledger(out)
       case _: (BillingRpc.Draft | BillingRpc.Summarize) =>
         out match
@@ -269,11 +270,24 @@ object Json:
       ).toJSArray
     )
 
+  /** Each root's undecided shared stretches, as the page decides them: in the root's own ledger. */
+  def sessionShared(roots: Vector[(LedgerResult, Vector[OverlapBlock])]): js.Dynamic =
+    js.Dynamic.literal(
+      "roots" -> roots.map((l, blocks) =>
+        js.Dynamic.literal(
+          "root"   -> l.root.threadId,
+          "blocks" -> blocks.map(b => block(b, None, billableIn(l), l.titles, l.blockThreads)).toJSArray
+        )
+      ).toJSArray
+    )
+
+  private def billableIn(l: LedgerResult): String => Boolean = t =>
+    l.billability(t) match
+      case Billability.Billable(_) => true
+      case Billability.NotBillable => false
+
   def ledger(l: LedgerResult): js.Dynamic =
-    val billable: String => Boolean = t =>
-      l.billability(t) match
-        case Billability.Billable(_) => true
-        case Billability.NotBillable => false
+    val billable = billableIn(l)
     js.Dynamic.literal(
       "root" -> thread(l.root),
       "covered"     -> l.covered.map(thread).toJSArray,

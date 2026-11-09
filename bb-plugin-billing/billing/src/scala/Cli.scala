@@ -285,7 +285,7 @@ object Cli:
         }
       case Some("settle-all")                =>
         orErr(rootArg) { root =>
-          commands.run(BillingRpc.SettleAll(root, subthreads)).map(n =>
+          commands.run(BillingRpc.SettleAll(root, subthreads, None)).map(n =>
             ok(s"Settled $n stretch(es) that had exactly one client thread.")
           )
         }

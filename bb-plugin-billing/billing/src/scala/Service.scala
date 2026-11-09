@@ -285,12 +285,33 @@ final class Service(
         case _                        => ThreadSummary(threadId, "", None, 0L, None, None, deleted = false)
       }
 
-  /** The recorded intervals from `from` to `to`, each thread's latest noted for [[conversationOf]]. */
+  /** How long a read of the recording answers narrower reads: one screen reads it for several ledgers at once. */
+  private val RecordingReuseMs = 5_000.0
+
+  /** A read of the recording: when it began, the range `[from, to)` asked for, and the intervals, clipped to it. */
+  private final case class RecordingRead(at: Double, from: Long, to: Long, intervals: Future[Either[String, Vector[Interval]]])
+  private var recordingRead: Option[RecordingRead] = None
+
+  /** The recorded intervals from `from` to `to`, clipped to it as the recorder clips them, each thread's latest noted
+    * for [[conversationOf]]. A read begun in the last [[RecordingReuseMs]] answers it when it reached as far back and
+    * as far on, or on to when it was made (nothing is recorded after then).
+    */
   private def recordedIntervals(from: Long, to: Long): Future[Either[String, Vector[Interval]]] =
-    recorder.intervals(from, to).map(_.map { all =>
-      all.foreach(i => noteActivity(i.threadId, i.end))
-      all
-    })
+    val now = js.Date.now()
+    recordingRead.filter(r => now - r.at < RecordingReuseMs && r.from <= from && (r.to >= to || r.to >= r.at)) match
+      case Some(wider) =>
+        wider.intervals.map(_.map(_.flatMap { i =>
+          val start = math.max(i.start, from)
+          val end   = math.min(i.end, to)
+          Option.when(start < end)(Interval(i.threadId, start, end))
+        }))
+      case None        =>
+        val read = recorder.intervals(from, to).map(_.map { all =>
+          all.foreach(i => noteActivity(i.threadId, i.end))
+          all
+        })
+        recordingRead = Some(RecordingRead(now, from, to, read))
+        read
 
   /** The threads among `ids` that were deleted. */
   private def deletedAmong(ids: Vector[String]): Future[Set[String]] =
@@ -1038,10 +1059,34 @@ final class Service(
 
   def undecide(key: BlockKey): Unit = store.deleteDecision(key)
 
-  /** Every undecided shared stretch of the ledger with exactly one client thread goes to that thread. */
-  def decideSoleBillable(root: String, subthreads: Boolean): Future[Either[String, Int]] =
+  /** The undecided shared stretches of the ledger reaching into `period`. */
+  private def undecidedWithin(l: LedgerResult, period: Option[Period]): Vector[OverlapBlock] =
+    l.blocks.collect { case (b, None) if period.forall(p => b.end > p.start && b.start < p.end) => b }
+
+  /** The ledger of each of `roots` with its subthreads, and its undecided shared stretches reaching into `period`. The
+    * stretches come from each root's own ledger, so a decision on one is one that ledger accepts.
+    */
+  def sessionShared(roots: Vector[String], period: Period): Future[Either[String, Vector[(LedgerResult, Vector[OverlapBlock])]]] =
+    val distinct = roots.distinct
+    for
+      (cal, _) <- calendar()
+      created  <- Future.traverse(distinct)(threadSummary).map(_.map(_.createdAt))
+      // One read of the recording as far back as the oldest root's ledger reaches serves every ledger.
+      _        <- created.minOption.fold(Future.unit)(oldest =>
+                    recordedIntervals(cal.dayStart(oldest - 24 * 3600_000L), cal.nextDayStart(js.Date.now().toLong))
+                      .map(_ => ())
+                  )
+      ledgers  <- Future.traverse(distinct)(root => ledger(root, subthreads = true))
+    yield ledgers.foldLeft(Right(Vector.empty): Either[String, Vector[(LedgerResult, Vector[OverlapBlock])]]) { (acc, l) =>
+      for done <- acc; one <- l yield done :+ (one -> undecidedWithin(one, Some(period)))
+    }
+
+  /** Every undecided shared stretch of the ledger with exactly one client thread goes to that thread: of those reaching
+    * into `within`, when given.
+    */
+  def decideSoleBillable(root: String, subthreads: Boolean, within: Option[Period]): Future[Either[String, Int]] =
     ledger(root, subthreads).map(_.map { l =>
-      val decisions = Submissions.soleBillableDecisions(l.blocks.collect { case (b, None) => b }, l.billability)
+      val decisions = Submissions.soleBillableDecisions(undecidedWithin(l, within), l.billability)
       decisions.foreach(d => store.saveDecision(d.key, d.allocation))
       decisions.size
     })
