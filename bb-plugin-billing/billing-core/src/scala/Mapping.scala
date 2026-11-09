@@ -87,10 +87,20 @@ object Resolved:
       case None    => Some(Resolved(Billability.NotBillable, source))
       case Some(t) => ZohoTarget.decode(t).map(z => Resolved(Billability.Billable(z), source))
 
-/** A bb project's Zoho projects, each with the task a thread is billed to unless it chooses another. */
+/** A Zoho project and task a bb project's threads may bill to. */
 final case class ProjectZoho(projectId: String, taskId: String)
 
 object ProjectMapping:
+  /** Whether a thread whose bb project bills to `mapped` may choose Zoho task `taskId` of project `projectId`: only
+    * one of those pairs; else why not, for the user.
+    */
+  def mayChoose(mapped: Seq[ProjectZoho], projectId: String, taskId: String): Either[String, Unit] =
+    if mapped.contains(ProjectZoho(projectId, taskId)) then Right(())
+    else if mapped.isEmpty then
+      Left("The thread's bb project bills to no Zoho project yet: add one to the bb project first (Billing > Projects, or bb billing project-zoho).")
+    else
+      Left("The thread's bb project does not bill to that Zoho project and task: a thread bills only to one its bb project bills to (Billing > Projects, or bb billing project-zoho, adds one).")
+
   /** The default for threads of a bb project: only when it maps to exactly one Zoho project. */
   def default(mapped: Seq[ProjectZoho], target: (String, String) => Option[ZohoTarget]): Option[ZohoTarget] =
     mapped match

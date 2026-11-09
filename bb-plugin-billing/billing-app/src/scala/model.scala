@@ -238,6 +238,9 @@ trait MappingResult extends js.Object:
   val own: OwnMapping
   val resolved: ResolvedMapping
 
+  /** The Zoho projects and tasks the thread's bb project bills to: the only ones it may choose. */
+  val choices: js.Array[Target]
+
 trait ReportLine extends js.Object:
   val threadId: String
   val title: String

@@ -100,7 +100,8 @@ object Json:
         case Right(MappingEntry.Absent)      => js.Dynamic.literal("kind" -> "inherit")
         case Left(problem)                   => js.Dynamic.literal("kind" -> "invalid", "problem" -> problem)
       ),
-      "resolved" -> resolved(m.resolved)
+      "resolved" -> resolved(m.resolved),
+      "choices"  -> m.choices.map(targetJs).toJSArray
     )
 
   def report(r: Service#Report): js.Dynamic =

@@ -55,6 +55,13 @@ class MappingTest extends munit.FunSuite:
       Resolved(Billability.NotBillable, None)
     )
 
+  test("a thread may choose only a Zoho project and task its bb project bills to"):
+    val mapped = Seq(ProjectZoho("p1", "t1"), ProjectZoho("p2", "t2"))
+    assertEquals(ProjectMapping.mayChoose(mapped, "p2", "t2"), Right(()))
+    assert(ProjectMapping.mayChoose(mapped, "p1", "t2").isLeft, "another task of a mapped Zoho project")
+    assert(ProjectMapping.mayChoose(mapped, "p9", "t9").isLeft, "a Zoho project the bb project does not bill to")
+    assert(ProjectMapping.mayChoose(Nil, "p1", "t1").isLeft, "a bb project that bills to nothing")
+
   test("a project default exists only for a bb project with exactly one Zoho project"):
     val lookup: (String, String) => Option[ZohoTarget] = (p, t) => Option.when(p == "p1" && t == "t1")(acme)
     assertEquals(ProjectMapping.default(Seq(ProjectZoho("p1", "t1")), lookup), Some(acme))

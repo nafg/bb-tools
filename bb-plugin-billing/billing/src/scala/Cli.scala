@@ -97,7 +97,7 @@ object Cli:
     ),
     (
       "assign",
-      "Bill a thread's time (and its descendants' without their own choice) to a Zoho project and task",
+      "Bill a thread's time (and its descendants' without their own choice) to a Zoho project and task its bb project bills to (see project-zoho)",
       "bb billing assign --project <name|id> --task <name|id> [--thread <id>]"
     ),
     (

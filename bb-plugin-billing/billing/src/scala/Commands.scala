@@ -20,8 +20,15 @@ final case class OverviewReply(
   catalog: Option[Catalog],
   summariesAvailable: Boolean)
 
-/** Where a thread bills: its own entry (or why it is unreadable) and the rule that decided. */
-final case class MappingReply(threadId: String, title: String, own: Either[String, MappingEntry], resolved: Resolved)
+/** Where a thread bills: its own entry (or why it is unreadable), the rule that decided, and the Zoho projects and
+  * tasks its bb project bills to, the only ones it may choose (those the cached catalog knows).
+  */
+final case class MappingReply(
+  threadId: String,
+  title: String,
+  own: Either[String, MappingEntry],
+  resolved: Resolved,
+  choices: Vector[ZohoTarget])
 
 final case class SubmissionsReply(timeZone: String, submissions: Vector[SubmissionRecord])
 
@@ -62,6 +69,13 @@ final class Commands(
 )(using ExecutionContext):
   private def orFail[A](either: Either[String, A]): Future[A] =
     either.fold(m => Future.failed(new RuntimeException(m)), Future.successful)
+
+  /** The Zoho projects and tasks the thread's bb project bills to. */
+  private def mappedOf(threadId: String): Future[Vector[ProjectZoho]] =
+    for
+      thread <- service.threadSummary(threadId)
+      all    <- projectMappings.all()
+    yield all.getOrElse(thread.projectId, Vector.empty)
 
   def run[R](rpc: BillingRpc[R]): Future[Served[R]] =
     rpc match
@@ -109,9 +123,19 @@ final class Commands(
           own      <- bb.sdk.threads.getPluginMetadata(js.Dynamic.literal("threadId" -> threadId)).toFuture
           resolved <- service.resolve(threadId)
           title    <- service.threadTitle(threadId)
-        yield MappingReply(threadId, title, mappings.entryOf(own), resolved)
+          mapped   <- mappedOf(threadId)
+          catalog  <- zoho.cachedCatalog()
+        yield MappingReply(
+          threadId,
+          title,
+          mappings.entryOf(own),
+          resolved,
+          mapped.flatMap(z => catalog.flatMap(_.target(z.projectId, z.taskId)))
+        )
       case BillingRpc.Assign(threadId, projectId, taskId)        =>
         for
+          mapped  <- mappedOf(threadId)
+          _       <- orFail(ProjectMapping.mayChoose(mapped, projectId, taskId))
           catalog <- zoho.catalog(refresh = false)
           target  <- orFail(catalog.target(projectId, taskId).toRight("unknown project or task; refresh the catalog"))
           _       <- mappings.assign(threadId, target)

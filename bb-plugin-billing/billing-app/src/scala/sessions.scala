@@ -8,7 +8,6 @@ import japgolly.scalajs.react.vdom.html_<^.*
 
 import org.scalajs.dom
 
-import scala.concurrent.Future
 import scala.scalajs.js
 
 /** The Sessions tab: one session of attention across every thread, drawn as thread boxes down a shared time axis, each
@@ -31,13 +30,20 @@ object SessionsView:
     hover: Option[Vector[String]],
     /** Where the hover card goes, in window pixels: inside the Sessions panel, on the side away from the pointer. */
     hoverAt: HoverAt,
-    /** The billing roots whose summaries are being written. */
-    writing: Set[String],
+    /** The billing roots whose summaries are being written, each with when this page first saw it being written. */
+    writing: Map[String, Double],
+    /** How many summary runs have ended since summaries last started being written, while others still run. */
+    written: Int,
+    /** How far the save under way has got, when it is made of steps that can be counted. */
+    saving: Option[Count],
+    /** When each `Busy` activity under way began, by its id. */
+    since: Map[String, Double],
+    /** The time the busy indicator's clocks read, advanced every second while anything is under way. */
+    now: Double,
     /** The thread whose bill-to picker is open under its box's name. */
     picking: Option[String],
-    /** The bb projects and the Zoho catalog the picker offers, read the first time a picker opens. */
+    /** The bb projects, with the Zoho projects each bills to, read the first time a picker opens. */
     projects: Option[Vector[ProjectInfo]],
-    catalog: Option[CatalogResult],
     /** The keys being left out or put back, until the screen that shows the change arrives. */
     leaving: Set[String],
     /** Columns folded or unfolded by hand, by the id of the column's first thread; true is folded. Any other column
@@ -47,6 +53,12 @@ object SessionsView:
 
   /** The hover card's horizontal place: its left edge and its width. */
   final case class HoverAt(left: Double, width: Double)
+
+  /** `done` of `of` things, `unit` naming one of them. */
+  final case class Count(done: Int, of: Int, unit: String)
+
+  /** Something the page is waiting on: `id` keys when it began; `count` is how far along it is, when that is known. */
+  final case class Busy(id: String, words: String, count: Option[Count])
 
   /** The ticks of each session, kept outside the component so a reload or a visit elsewhere does not lose them. */
   private val savedDrafts = scala.collection.mutable.Map.empty[Double, Set[String]]
@@ -73,18 +85,24 @@ object SessionsView:
   /** The width of a folded column: a strip that keeps the marks' colours and the button that unfolds it. */
   private val FoldedPx = 28
 
-  /** Where the columns sit across the page, after the axis: a folded column is a narrow strip. */
-  private final case class Columns(folded: Set[Int]):
+  /** Where the columns sit across the page, after an axis `axisPx` wide: a folded column is a narrow strip. */
+  private final case class Columns(folded: Set[Int], axisPx: Int):
     def width(c: Int): Int              = if folded(c) then FoldedPx else ColPx
-    def left(c: Int): Int               = AxisPx + (0 until c).map(width).sum
+    def left(c: Int): Int               = axisPx + (0 until c).map(width).sum
     def spanWidth(c: Int, n: Int): Int  = (c until c + n).map(width).sum
 
   /** Height of the sticky row naming every column; a box's own sticky name stops just under it. */
   private val HeaderPx = 50
-  /** The axis: the signal dots in its left part, the clock times right-aligned in the rest. */
-  private val AxisPx  = 92
+  /** The axis's clock times, right-aligned. */
+  private val ClockPx = 60
+  /** Lanes left of the clock times for the dots of threads with no box to sit on: one lane per signal kind. */
+  private val LanesPx = 32
+  /** A signal dot's diameter. */
+  private val DotPx   = 5
 
-  /** The signal kinds in their lanes down the axis, left to right, each with its dot's colour and what it means. */
+  /** The signal kinds, in their lanes left to right when they need lanes, each with its dot's colour and what it
+    * means.
+    */
   private val SignalLanes = Vector(
     ("speech", "bg-sky-500", "you spoke to the thread"),
     ("playback", "bg-violet-500", "a reply was read aloud to you"),
@@ -129,6 +147,15 @@ object SessionsView:
       case StretchState.Settled(_)      => "settled"
       case StretchState.InZohoByHand(_) => "in Zoho by hand"
 
+  /** A running time as `42s`, or `3:07` from a minute on. */
+  private def elapsed(ms: Double): String =
+    val secs = math.max(0, (ms / 1000).toInt)
+    if secs < 60 then s"${secs}s" else f"${secs / 60}:${secs % 60}%02d"
+
+  /** `n` of a noun given in the singular: `1 thread`, `3 stretches`. */
+  private def counted(n: Int, noun: String): String =
+    if n == 1 then s"$n $noun" else if noun.endsWith("ch") then s"$n ${noun}es" else s"$n ${noun}s"
+
   private def draftableKind(st: StretchState): Boolean =
     st match
       case StretchState.Unbilled | StretchState.InZohoByHand(_) => true
@@ -153,7 +180,16 @@ object SessionsView:
       val draftable = r.stretches.toVector.filter(l => th.bills(l.threadId) && draftableKind(stateOf(l.state))).map(_.key).toSet
       val saved     = if r.current >= 0 then savedDrafts.get(r.sessions(r.current).start) else None
       $.modState(
-        _.copy(screen = Some(r), loading = false, leaving = Set.empty, writing = r.summarizing.toSet, draft = saved.fold(Set.empty[String])(_.intersect(draftable))),
+        st =>
+          val writing = r.summarizing.toVector.map(root => root -> st.writing.getOrElse(root, js.Date.now())).toMap
+          st.copy(
+            screen = Some(r),
+            loading = false,
+            leaving = Set.empty,
+            writing = writing,
+            written = if writing.isEmpty then 0 else st.written,
+            draft = saved.fold(Set.empty[String])(_.intersect(draftable))
+          ),
         price
       )
 
@@ -217,32 +253,38 @@ object SessionsView:
       */
     private def summarize(root: String, keys: Vector[String]): Callback =
       $.props.flatMap { p =>
-        $.modState(st => st.copy(writing = st.writing + root, error = None)) >>
+        $.modState(st => st.copy(writing = st.writing + (root -> st.writing.getOrElse(root, js.Date.now())), error = None)) >>
           Callback.future(
             rpc(p.call, BillingRpc.Summarize(root, subthreads = true, DraftPick.Keys(keys.toSet)))
               .map(_ => Callback.empty)
-              .recover { case e => $.modState(st => st.copy(writing = st.writing - root, error = Some(errorMessage(e)))) }
+              .recover { case e => $.modState(st => ended(st, root).copy(error = Some(errorMessage(e)))) }
           )
       }
 
+    /** A summary run that ended: counted as done while others still run, the count starting over once none do. */
+    private def ended(st: State, root: String): State =
+      if !st.writing.contains(root) then st
+      else
+        val writing = st.writing - root
+        st.copy(writing = writing, written = if writing.isEmpty then 0 else st.written + 1)
+
     def onEvent(event: BillingEvent): Callback =
       event match
-        case BillingEvent.SummariesWritten(id)      => $.modState(st => st.copy(writing = st.writing - id)) >> reloadCurrent
+        case BillingEvent.SummariesWritten(id)      => $.modState(ended(_, id)) >> reloadCurrent
         case BillingEvent.SummariesFailed(id, why)  =>
-          $.modState(st => st.copy(writing = st.writing - id, error = Some(s"Summaries not written: $why")))
+          $.modState(st => ended(st, id).copy(error = Some(s"Summaries not written: $why")))
         case BillingEvent.Changed                   => reloadCurrent
 
-    /** Opens or closes a thread's bill-to picker, reading the projects and catalog it offers the first time. */
+    /** Opens or closes a thread's bill-to picker, reading the bb projects the first time. */
     private def togglePicker(id: String): Callback =
       $.props.zip($.state).flatMap { (p, s) =>
         val open = $.modState(_.copy(picking = Option.when(!s.picking.contains(id))(id)))
         if s.projects.nonEmpty then open
         else
           open >> Callback.future(
-            rpc(p.call, BillingRpc.Overview(js.Date.now().toLong)).flatMap(o =>
-              (if o.zoho.configured then rpc(p.call, BillingRpc.Catalog(refresh = false)).map(Some(_)) else Future.successful(None))
-                .map(c => $.modState(_.copy(projects = Some(o.projects.toVector), catalog = c)))
-            ).recover { case e => $.modState(_.copy(error = Some(errorMessage(e)))) }
+            rpc(p.call, BillingRpc.ProjectMappings)
+              .map(r => $.modState(_.copy(projects = Some(r.projects.toVector))))
+              .recover { case e => $.modState(_.copy(error = Some(errorMessage(e)))) }
           )
       }
 
@@ -268,16 +310,69 @@ object SessionsView:
         price
       )
 
+    /** Leaves out or puts back the stretches one at a time, counting them off as each is saved. */
     private def leaveOut(keys: Vector[String], out: Boolean): Callback =
-      $.props.flatMap(p =>
-        $.modState(s => s.copy(draft = if out then s.draft -- keys else s.draft ++ keys, busy = true, leaving = s.leaving ++ keys), saveDraft) >>
-          Callback.future(
-            keys.foldLeft(Future.unit)((done, key) =>
-              done.flatMap(_ => rpc(p.call, BillingRpc.SetExcluded(key, out)).map(_ => ()))
-            ).map(_ => $.modState(_.copy(busy = false)) >> reloadCurrent)
-              .recover { case e => $.modState(st => st.copy(busy = false, leaving = st.leaving -- keys, error = Some(errorMessage(e)))) }
-          )
-      )
+      $.props.flatMap { p =>
+        def from(i: Int): Callback =
+          if i == keys.length then $.modState(_.copy(busy = false, saving = None)) >> reloadCurrent
+          else
+            Callback.future(
+              rpc(p.call, BillingRpc.SetExcluded(keys(i), out))
+                .map(_ => $.modState(st => st.copy(saving = st.saving.map(_.copy(done = i + 1)))) >> from(i + 1))
+                .recover { case e =>
+                  $.modState(st => st.copy(busy = false, saving = None, leaving = st.leaving -- keys, error = Some(errorMessage(e))))
+                }
+            )
+        $.modState(
+          s =>
+            s.copy(
+              draft = if out then s.draft -- keys else s.draft ++ keys,
+              busy = true,
+              saving = Some(Count(0, keys.length, "stretch")),
+              leaving = s.leaving ++ keys
+            ),
+          saveDraft
+        ) >> from(0)
+      }
+
+    /** What the page is waiting on now, in the order the indicator lists them. */
+    def busyNow(s: State): Vector[Busy] =
+      val byRoot  = s.screen.fold(Map.empty[String, Vector[String]])(keysByRoot(_, s.draft))
+      // Ticked roots without a plan yet are being priced, unless pricing failed and said so.
+      val pricing = s.error.isEmpty && byRoot.keys.exists(r => !s.plans.contains(r))
+      Vector(
+        Option.when(s.loading)(Busy("loading", "Loading", None)),
+        Option.when(s.busy)(Busy("saving", "Saving", s.saving)),
+        Option.when(pricing)(
+          Busy("pricing", "Pricing ticked time", Some(Count(byRoot.keys.count(s.plans.contains), byRoot.size, "thread")))
+        ),
+        Option.when(s.writing.nonEmpty)(
+          Busy("writing", "Writing summaries", Some(Count(s.written, s.written + s.writing.size, "thread")))
+        )
+      ).flatten
+
+    /** Keeps `since` to the activities under way: one that has just begun begins now; one that has ended is dropped. */
+    def trackBusy: Callback =
+      $.state.flatMap { s =>
+        val ids = busyNow(s).map(_.id).toSet
+        if ids == s.since.keySet then Callback.empty
+        else
+          val now = js.Date.now()
+          $.modState(st => st.copy(since = ids.map(id => id -> st.since.getOrElse(id, now)).toMap, now = now))
+      }
+
+    private var clockTimer: Option[Int] = None
+
+    /** Advances `now` every second, re-drawing the running times, while anything is under way. */
+    def startClock: Callback =
+      Callback {
+        clockTimer = Some(dom.window.setInterval(
+          () => $.state.flatMap(s => $.modState(_.copy(now = js.Date.now())).when_(s.since.nonEmpty)).runNow(),
+          1000
+        ))
+      }
+
+    def stopClock: Callback = Callback(clockTimer.foreach(dom.window.clearInterval))
 
     /** Keeps the ticks of the open session where the next reload will find them. */
     private def saveDraft: Callback =
@@ -356,14 +451,19 @@ object SessionsView:
     private def legend: VdomNode =
       <.div(
         ^.className := "grid gap-x-6 gap-y-1 text-xs text-muted-foreground sm:grid-cols-2 lg:grid-cols-3",
-        SignalLanes.map((kind, colour, meaning) =>
-          <.div(
-            ^.key       := s"signal-$kind",
-            ^.className := "flex items-center gap-2",
-            <.span(^.className := s"inline-block h-[7px] w-[7px] shrink-0 rounded-full $colour"),
-            <.span(s"Dot down the time axis: $meaning ($kind).")
-          )
-        ).toVdomArray,
+        <.div(
+          ^.className := "flex flex-wrap items-center gap-x-3 gap-y-1 sm:col-span-2 lg:col-span-3",
+          <.span("Dots on a thread's left edge, when:"),
+          SignalLanes.map((kind, colour, meaning) =>
+            <.span(
+              ^.key       := kind,
+              ^.title     := kind,
+              ^.className := "flex items-center gap-1",
+              <.span(^.className := s"inline-block h-[7px] w-[7px] shrink-0 rounded-full $colour"),
+              meaning
+            )
+          ).toVdomArray
+        ),
         sample("☑ 5m 22:28 · unbilled", StretchState.Unbilled, ticked = true, "Click to untick. Goes into the next send."),
         sample("☐ 5m 22:28 · unbilled", StretchState.Unbilled, ticked = false, "Click to tick it."),
         sample("3 short · 1m · unbilled", StretchState.Unbilled, ticked = true, "Several tiny stretches of one thread as one mark. One click ticks or unticks all of them.", dotted = true),
@@ -547,9 +647,18 @@ object SessionsView:
       val byColumn = layout.roots.flatMap(allBoxes).groupBy(_.column).toVector.sortBy(_._1)
       val needs    = byColumn.map((column, boxes) => column -> needOf(th, boxes)).toMap
       def columnId(boxes: Vector[PlacedBox]): String = boxes.minBy(_.yTop).box.info.id
-      val cols     = Columns(byColumn.collect {
-        case (column, boxes) if s.folding.getOrElse(columnId(boxes), needs(column) == ColumnNeed.Nothing) => column
-      }.toSet)
+      val boxOf    = byColumn.flatMap(_._2).map(b => b.box.info.id -> b).toMap
+      // A signal sits on the left edge of its thread's box; one whose thread has no box goes in a lane of the axis,
+      // which is widened for the lanes only when some signal needs one.
+      val (onBoxes, inLanes) = screen.signals.toVector.zipWithIndex
+        .flatMap((g, i) => SignalLanes.indexWhere(_._1 == g.kind) match { case -1 => None; case lane => Some((g, i, lane)) })
+        .partition((g, _, _) => boxOf.contains(g.threadId))
+      val cols     = Columns(
+        byColumn.collect {
+          case (column, boxes) if s.folding.getOrElse(columnId(boxes), needs(column) == ColumnNeed.Nothing) => column
+        }.toSet,
+        ClockPx + (if inLanes.nonEmpty then LanesPx else 0)
+      )
       val width    = cols.left(layout.columns) + 20
       val header   = <.div(
         ^.className := "sticky top-0 z-40 border-b border-border bg-background",
@@ -605,10 +714,9 @@ object SessionsView:
               ^.className := "absolute z-50 w-72 rounded border border-border bg-background p-1 text-xs shadow-md",
               ^.style     := js.Dynamic.literal("left" -> cols.left(column), "top" -> HeaderPx),
               s.projects.fold[VdomNode](<.div(^.className := "p-1 text-muted-foreground", "Loading…"))(projects =>
-                BillToSelect.Component.withKey(a.threadId)(BillToSelect.Props(
+                BillToSelect.Component.withKey(a.threadId)(BillToSelect.forAccount(
                   a,
                   projects.find(_.projectId == a.projectId),
-                  s.catalog,
                   p.call,
                   $.modState(_.copy(picking = None)) >> reloadCurrent
                 ))
@@ -639,23 +747,28 @@ object SessionsView:
             s"${hoursMinutes(q.durationMs.toDouble)} with no attention on any thread"
           )
         }.toVdomArray,
-        screen.signals.toVector.zipWithIndex.flatMap { (g, i) =>
-          val lane = SignalLanes.indexWhere(_._1 == g.kind)
-          Option.when(lane >= 0) {
-            val title = infos.find(_.id == g.threadId).fold(g.threadId)(_.title)
-            <.div(
-              ^.key       := s"sig-$i",
-              ^.className := s"absolute h-[5px] w-[5px] rounded-full ${SignalLanes(lane)._2}",
-              ^.style     := js.Dynamic.literal("top" -> (layout.yAt(g.at.toLong) - 2), "left" -> (2 + lane * 6)),
-              ^.title     := s"${g.kind} · ${clock(g.at, tz)} · $title"
-            )
-          }
+        (onBoxes ++ inLanes).map { (g, i, lane) =>
+          val title = infos.find(_.id == g.threadId).fold(g.threadId)(_.title)
+          val left  = boxOf.get(g.threadId).fold(2.0 + lane * 6)(b => cols.left(b.column) - DotPx / 2.0)
+          <.div(
+            ^.key       := s"sig-$i",
+            // The ring parts dots that overlap, and a dot from the box's border.
+            ^.className := s"absolute rounded-full ring-1 ring-background ${SignalLanes(lane)._2}",
+            ^.style     := js.Dynamic.literal(
+              "top"    -> (layout.yAt(g.at.toLong) - DotPx / 2.0),
+              "left"   -> left,
+              "width"  -> DotPx,
+              "height" -> DotPx
+            ),
+            ^.title     := s"${g.kind} · ${clock(g.at, tz)} · $title" +
+              (if boxOf.contains(g.threadId) then "" else " (a thread with no box in this session)")
+          )
         }.toVdomArray,
         layout.axis.zipWithIndex.map { (a, i) =>
           <.div(
             ^.key       := s"ax-$i",
             ^.className := "absolute left-0 text-right text-[10px] text-muted-foreground",
-            ^.style     := js.Dynamic.literal("top" -> a._1, "width" -> (AxisPx - 6)),
+            ^.style     := js.Dynamic.literal("top" -> a._1, "width" -> (cols.axisPx - 6)),
             clock(a._2.toDouble, tz)
           )
         }.toVdomArray
@@ -793,19 +906,19 @@ object SessionsView:
                   ^.`type`    := "button",
                   ^.className := buttonClass,
                   ^.title     := "Asks a model to write a one-line summary of each ticked stretch that has none, and the notes for each day's entry.",
-                  ^.disabled  := (s.busy || s.writing(root)),
+                  ^.disabled  := (s.busy || s.writing.contains(root)),
                   ^.onClick --> writeSummaries(root),
-                  if s.writing(root) then "Writing summaries…" else s"Write summaries ($missing without one)"
-                ).when(missing > 0 || s.writing(root))
+                  s.writing.get(root).fold(s"Write summaries ($missing without one)")(since =>
+                    s"Writing summaries… ${elapsed(s.now - since)}"
+                  )
+                ).when(missing > 0 || s.writing.contains(root))
               )
             )
           }.toVdomArray
         )
 
     def render(p: Props, s: State): VdomElement =
-      // Ticked roots without a plan yet are being priced, unless pricing failed and said so.
-      val pricing = s.error.isEmpty && s.screen.exists(sc => keysByRoot(sc, s.draft).keys.exists(r => !s.plans.contains(r)))
-      val working = s.loading || s.busy || pricing || s.writing.nonEmpty
+      val busy = busyNow(s)
       <.div(
         VdomAttr("data-sessions-panel") := "",
         ^.className := "space-y-3",
@@ -813,14 +926,22 @@ object SessionsView:
         <.div(
           ^.className := "sticky top-0 z-[60] flex h-0 justify-end",
           <.div(
-            ^.className := "mt-1 mr-1 flex h-fit items-center gap-2 rounded-md border border-border bg-background px-3 py-1 text-xs shadow-md",
-            <.span(^.className := "inline-block h-3 w-3 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent"),
-            if s.loading then "Loading…"
-            else if s.busy then "Saving…"
-            else if pricing then "Pricing ticked time…"
-            else "Writing summaries…"
+            ^.className := "mt-1 mr-1 h-fit space-y-1 rounded-md border border-border bg-background px-3 py-1 text-xs shadow-md",
+            busy.map { b =>
+              // A count shows only when there is more than one thing to count; the running time always shows.
+              val count = b.count.filter(_.of > 1)
+              <.div(
+                ^.key       := b.id,
+                ^.className := "flex items-center gap-2",
+                <.span(^.className := "inline-block h-3 w-3 animate-spin rounded-full border-2 border-muted-foreground border-t-transparent"),
+                <.span(b.words + "…"),
+                count.map(c => <.progress(^.className := "h-1.5 w-16", VdomAttr("max") := c.of, ^.value := c.done.toString)),
+                count.map(c => <.span(^.className := "tabular-nums text-muted-foreground", s"${c.done} of ${counted(c.of, c.unit)}")),
+                <.span(^.className := "tabular-nums text-muted-foreground", elapsed(s.now - s.since.getOrElse(b.id, s.now)))
+              )
+            }.toVdomArray
           )
-        ).when(working),
+        ).when(busy.nonEmpty),
         s.error.map(e => banner("error", e)),
         s.screen.map { screen =>
           val tz = screen.timeZone
@@ -893,13 +1014,14 @@ object SessionsView:
               {
                 val waiting = unsummarized(screen)
                 val count   = waiting.values.map(_.size).sum
+                val since   = waiting.keys.flatMap(s.writing.get).minOption
                 <.button(
                   ^.`type`    := "button",
                   ^.className := buttonClass,
                   ^.title     := "Asks a model to write a one-line summary of each unbilled stretch in this session that has none, ticked or not.",
-                  ^.disabled  := (s.busy || waiting.keys.exists(s.writing)),
+                  ^.disabled  := (s.busy || since.nonEmpty),
                   ^.onClick --> summarizeSession,
-                  if waiting.keys.exists(s.writing) then "Writing summaries…" else s"Write summaries for this session ($count without one)"
+                  since.fold(s"Write summaries for this session ($count without one)")(t => s"Writing summaries… ${elapsed(s.now - t)}")
                 ).when(count > 0)
               },
               s.hover.map(keys => detailCard(s, tz, screen, th, keys)),
@@ -924,13 +1046,14 @@ object SessionsView:
 
   val Component = ScalaComponent
     .builder[Props]("SessionsView")
-    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Set.empty, picking = None, projects = None, catalog = None, leaving = Set.empty, folding = Map.empty))
+    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, Map.empty, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Map.empty, written = 0, saving = None, since = Map.empty, now = js.Date.now(), picking = None, projects = None, leaving = Set.empty, folding = Map.empty))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))
-    .componentDidMount(_.backend.load(None))
+    .componentDidMount(x => x.backend.load(None) >> x.backend.startClock)
     .componentDidUpdate(x =>
-      arrived(x.prevProps.event, x.currentProps.event) match
+      x.backend.trackBusy >> (arrived(x.prevProps.event, x.currentProps.event) match
         case Some(event) => x.backend.onEvent(event)
-        case None        => Callback.empty
+        case None        => Callback.empty)
     )
+    .componentWillUnmount(_.backend.stopClock)
     .build

@@ -282,24 +282,13 @@ object BillTo:
 
   def value(projectId: String, taskId: String): String = s"$projectId|$taskId"
 
-  /** Every project and task in the catalog. */
-  def allOptions(catalog: CatalogResult): Vector[BillToOption] =
-    catalog.projects.toVector.flatMap { pr =>
-      pr.tasks.toVector.map(t =>
-        BillToOption(value(pr.projectId, t.taskId), s"${pr.customerName}: ${pr.projectName} / ${t.taskName}")
-      )
-    }
+  def label(t: Target): String = s"${t.customerName}: ${t.projectName} / ${t.taskName}"
 
-  /** The bb project's Zoho projects: every task of each, the chosen default task first. */
-  def projectOptions(project: ProjectInfo, catalog: Option[CatalogResult]): Vector[BillToOption] =
-    project.zoho.toVector.flatMap { z =>
-      val tasks =
-        catalog.flatMap(_.projects.find(_.projectId == z.projectId)).map(_.tasks.toVector).getOrElse(Vector.empty)
-      val label = (taskName: String) => s"${z.customerName}: ${z.projectName} / $taskName"
-      val rest  =
-        tasks.filter(_.taskId != z.taskId).map(t => BillToOption(value(z.projectId, t.taskId), label(t.taskName)))
-      BillToOption(value(z.projectId, z.taskId), label(z.taskName)) +: rest
-    }
+  /** The Zoho projects and tasks a bb project bills to: the only ones its threads may choose. */
+  def projectOptions(project: ProjectInfo): Vector[BillToOption] =
+    project.zoho.toVector.map(z =>
+      BillToOption(value(z.projectId, z.taskId), s"${z.customerName}: ${z.projectName} / ${z.taskName}")
+    )
 
   /** True when the thread's own entry decided where it bills. */
   def own(a: ThreadAccount): Boolean = a.resolved.source.contains(MappingSource.Thread(a.threadId))
@@ -319,14 +308,44 @@ object BillTo:
           case _                        => Left(s"not a project and task: $other")
     request.fold(m => Future.failed(IllegalArgumentException(m)), r => rpc(call, r).map(_ => ()))
 
-/** A "Bill to" select for one thread; saving reloads the week. */
+/** A "Bill to" select for one thread: follow what is above it, not client work, or one of the Zoho projects and
+  * tasks its bb project bills to. Choosing saves at once, then `reload`.
+  */
 object BillToSelect:
   final case class Props(
-    thread: ThreadAccount,
-    project: Option[ProjectInfo],
-    catalog: Option[CatalogResult],
+    threadId: String,
+    /** The thread's own choice as a select value: `BillTo.Inherit`, `BillTo.Unbillable`, or a project and task. */
+    current: String,
+    /** How the current project and task reads, shown when its bb project does not bill to it (any more). */
+    currentLabel: String,
+    inheritLabel: String,
+    /** The thread's bb project, by name, and the Zoho projects and tasks it bills to. */
+    projectName: String,
+    choices: Vector[BillToOption],
+    /** Where the thread bills when it has no choice of its own, and why. */
+    note: Option[String],
     call: RpcCall,
     reload: Callback)
+
+  /** The select for a row of the thread tree or a column of the Sessions tab. */
+  def forAccount(t: ThreadAccount, project: Option[ProjectInfo], call: RpcCall, reload: Callback): Props =
+    val projectDefault = project.map(_.zoho.toVector).filter(_.length == 1).map(_.head)
+    Props(
+      t.threadId,
+      BillTo.current(t),
+      t.billsTo.fold("")(Words.target),
+      if t.parentThreadId.nonEmpty then "Same as parent thread"
+      else projectDefault.fold("Not chosen")(z => s"Project default: ${z.projectName} / ${z.taskName}"),
+      project.fold("This bb project")(_.name),
+      project.fold(Vector.empty[BillToOption])(BillTo.projectOptions),
+      Option.when(!BillTo.own(t))(t.resolved.source match
+        case Some(MappingSource.Thread(_)) => s"Follows its parent: ${Words.billsTo(t.resolved)}"
+        case Some(MappingSource.Project)   => s"Follows a bb project's rule: ${Words.billsTo(t.resolved)}"
+        case None                          => "Nothing on it, above it, or in its bb project says whether this is client work: choose."),
+      call,
+      reload
+    )
+
   final case class State(busy: Boolean, error: Option[String])
 
   final class Backend($ : BackendScope[Props, State]):
@@ -335,51 +354,37 @@ object BillToSelect:
       $.props.flatMap { p =>
         $.modState(_.copy(busy = true, error = None)) >>
           Callback.future(
-            BillTo.save(p.call, p.thread.threadId, value)
+            BillTo.save(p.call, p.threadId, value)
               .map(_ => $.modState(_.copy(busy = false)) >> p.reload)
               .recover { case err => $.modState(_.copy(busy = false, error = Some(errorMessage(err)))) }
           )
       }
 
     def render(p: Props, s: State): VdomElement =
-      val t              = p.thread
-      val hasParent      = t.parentThreadId.nonEmpty
-      val own            = BillTo.own(t)
-      val projectDefault = p.project.map(_.zoho.toVector).filter(_.length == 1).map(_.head)
-      val fromProject    = p.project.map(BillTo.projectOptions(_, p.catalog)).getOrElse(Vector.empty)
-      val fromProjectIds = fromProject.map(_.value).toSet
-      val inheritLabel   =
-        if hasParent then "Same as parent thread"
-        else projectDefault.fold("Not chosen")(z => s"Project default: ${z.projectName} / ${z.taskName}")
+      // A choice made before its bb project stopped billing there: shown as it is, never offered again.
+      val stray = Option.when(
+        p.current != BillTo.Inherit && p.current != BillTo.Unbillable && !p.choices.exists(_.value == p.current)
+      )(p.current)
       <.div(
         ^.className := "space-y-0.5",
         <.select(
           ^.className := inputClass + " w-full",
-          ^.value     := BillTo.current(t),
+          ^.value     := p.current,
           ^.disabled  := s.busy,
           ^.onChange ==> change,
-          <.option(^.value := BillTo.Inherit, inheritLabel),
+          <.option(^.value := BillTo.Inherit, p.inheritLabel),
           <.option(^.value := BillTo.Unbillable, "Not client work"),
           <.optgroup(
-            VdomAttr("label") := s"${p.project.fold("This bb project")(_.name)}'s Zoho projects",
-            fromProject.map(o => <.option(^.key := o.value, ^.value := o.value, o.label)).toVdomArray
-          ).when(fromProject.nonEmpty),
-          p.catalog.fold(EmptyVdom: VdomNode)(c =>
-            <.optgroup(
-              VdomAttr("label") := "Any Zoho project",
-              BillTo.allOptions(c).filterNot(o => fromProjectIds(o.value)).map(o =>
-                <.option(^.key := o.value, ^.value := o.value, o.label)
-              ).toVdomArray
-            )
-          )
+            VdomAttr("label") := s"${p.projectName}'s Zoho projects",
+            p.choices.map(o => <.option(^.key := o.value, ^.value := o.value, o.label)).toVdomArray
+          ).when(p.choices.nonEmpty),
+          stray.map(v => <.option(^.value := v, ^.disabled := true, s"${p.currentLabel} (its bb project does not bill here)"))
         ),
         <.div(
           ^.className := "text-xs text-muted-foreground",
-          t.resolved.source match
-            case Some(MappingSource.Thread(_)) => s"Follows its parent: ${Words.billsTo(t.resolved)}"
-            case Some(MappingSource.Project)   => s"Follows a bb project's rule: ${Words.billsTo(t.resolved)}"
-            case None                          => "Nothing on it, above it, or in its bb project says whether this is client work: choose."
-        ).when(!own),
+          s"${p.projectName} bills to no Zoho project; add one under Projects to bill this thread."
+        ).when(p.choices.isEmpty),
+        p.note.map(n => <.div(^.className := "text-xs text-muted-foreground", n)),
         s.error.map(m => <.div(^.className := "text-xs text-destructive", m))
       )
 
@@ -402,7 +407,6 @@ private def standingChip(standing: Standing): VdomElement =
 object ThreadTree:
   final case class Props(
     o: OverviewResult,
-    catalog: Option[CatalogResult],
     call: RpcCall,
     reload: Callback,
     openThread: String => Callback,
@@ -454,13 +458,9 @@ object ThreadTree:
         ),
         <.td(
           ^.className := "py-1 pr-2",
-          BillToSelect.Component.withKey(t.threadId)(BillToSelect.Props(
-            t,
-            projectsById.get(t.projectId),
-            p.catalog,
-            p.call,
-            p.reload
-          ))
+          BillToSelect.Component.withKey(t.threadId)(
+            BillToSelect.forAccount(t, projectsById.get(t.projectId), p.call, p.reload)
+          )
         ),
         <.td(
           ^.className := "py-1 text-xs",
@@ -572,7 +572,6 @@ object ToBillView:
     event: RealtimeEventJs | Null)
   final case class State(
     o: Option[OverviewResult],
-    catalog: Option[CatalogResult],
     loading: Boolean,
     error: Option[String],
     showOthers: Boolean,
@@ -587,18 +586,9 @@ object ToBillView:
         $.modState(st => st.copy(loading = true, error = None, loads = st.loads + 1)) >>
           Callback.future(
             rpc(p.call, BillingRpc.Overview((js.Date.now() - s.sinceDays.toDouble * 24 * 3600_000).toLong))
-              .map(o => $.modState(_.copy(o = Some(o), loading = false)) >> loadCatalog(o))
+              .map(o => $.modState(_.copy(o = Some(o), loading = false)))
               .recover { case e => $.modState(_.copy(loading = false, error = Some(errorMessage(e)))) }
           )
-      }
-
-    private def loadCatalog(o: OverviewResult): Callback =
-      $.props.zip($.state).flatMap { (p, s) =>
-        if !o.zoho.configured || s.catalog.nonEmpty then Callback.empty
-        else
-          Callback.future(rpc(p.call, BillingRpc.Catalog(refresh = false)).map(c =>
-            $.modState(_.copy(catalog = Some(c)))
-          ).recover { case _ => Callback.empty })
       }
 
     def setSince(days: Int): Callback = $.modState(_.copy(sinceDays = days)) >> load
@@ -719,7 +709,6 @@ object ToBillView:
             ),
             ThreadTree.render(ThreadTree.Props(
               o,
-              s.catalog,
               p.call,
               load,
               p.openThread,
@@ -738,7 +727,6 @@ object ToBillView:
     .builder[Props]("ToBillView")
     .initialState(State(
       o = None,
-      catalog = None,
       loading = false,
       error = None,
       showOthers = false,
@@ -1168,60 +1156,19 @@ object ReviewPage:
 
 /** The thread panel: where this thread's time is billed, and controls to change it. */
 object AssignPanel:
-  final case class State(
-    mapping: Option[MappingResult],
-    catalog: Option[CatalogResult],
-    projectId: String,
-    taskId: String,
-    busy: Boolean,
-    error: Option[String])
+  final case class State(mapping: Option[MappingResult], error: Option[String])
 
   final class Backend($ : BackendScope[AssignPanelProps, State]):
     def load: Callback =
       $.props.flatMap { p =>
         Callback.future(
-          (for
-            mapping <- rpc(p.call, BillingRpc.Mapping(p.threadId))
-            catalog <- rpc(p.call, BillingRpc.Catalog(refresh = false)).map(Some(_)).recover { case _ => None }
-          yield $.modState { s =>
-            val current = mapping.own.target.toOption
-            s.copy(
-              mapping = Some(mapping),
-              catalog = catalog,
-              projectId = current.map(_.projectId).orElse(Option(s.projectId).filter(_.nonEmpty)).getOrElse(
-                catalog.flatMap(_.projects.headOption).fold("")(_.projectId)
-              ),
-              taskId = current.map(_.taskId).getOrElse(s.taskId),
-              error = None
-            )
-          }).recover { case e => $.modState(_.copy(error = Some(errorMessage(e)))) }
+          rpc(p.call, BillingRpc.Mapping(p.threadId))
+            .map(mapping => $.modState(_.copy(mapping = Some(mapping), error = None)))
+            .recover { case e => $.modState(_.copy(error = Some(errorMessage(e)))) }
         )
       }
 
-    private def act(request: BillingRpc[Reply.Ok]): Callback =
-      $.props.flatMap { p =>
-        $.modState(_.copy(busy = true, error = None)) >>
-          Callback.future(
-            rpc(p.call, request)
-              .map(_ => $.modState(_.copy(busy = false)) >> load)
-              .recover { case e => $.modState(_.copy(busy = false, error = Some(errorMessage(e)))) }
-          )
-      }
-
-    def refreshCatalog: Callback =
-      $.props.flatMap { p =>
-        $.modState(_.copy(busy = true, error = None)) >>
-          Callback.future(
-            rpc(p.call, BillingRpc.Catalog(refresh = true))
-              .map(c => $.modState(_.copy(busy = false, catalog = Some(c))))
-              .recover { case e => $.modState(_.copy(busy = false, error = Some(errorMessage(e)))) }
-          )
-      }
-
     def render(p: AssignPanelProps, s: State): VdomElement =
-      val project = s.catalog.flatMap(_.projects.find(_.projectId == s.projectId))
-      val tasks   = project.fold(Vector.empty[CatalogTask])(_.tasks.toVector)
-      val taskId  = if tasks.exists(_.taskId == s.taskId) then s.taskId else tasks.headOption.fold("")(_.taskId)
       <.div(
         ^.className := "space-y-4 text-sm",
         s.error.map(m => banner("error", m)),
@@ -1255,76 +1202,32 @@ object AssignPanel:
             )
           )
         },
-        <.div(
-          ^.className := "space-y-2",
-          <.div(^.className := "text-xs font-medium text-muted-foreground", "Bill this thread to"),
-          s.catalog match
-            case None    => <.div(
-                ^.className := "text-xs text-muted-foreground",
-                "Zoho projects are unavailable; connect Zoho in the Billing plugin settings to choose a project."
-              )
-            case Some(c) =>
-              React.Fragment(
-                <.select(
-                  ^.className := inputClass + " w-full",
-                  ^.value     := s.projectId,
-                  ^.onChange ==> ((e: ReactEventFromInput) => {
-                    val v = e.target.value; $.modState(_.copy(projectId = v, taskId = ""))
-                  }),
-                  c.projects.map(pr =>
-                    <.option(^.key := pr.projectId, ^.value := pr.projectId, s"${pr.customerName}: ${pr.projectName}")
-                  ).toVdomArray
-                ),
-                <.select(
-                  ^.className := inputClass + " w-full",
-                  ^.value     := taskId,
-                  ^.onChange ==> ((e: ReactEventFromInput) => {
-                    val v = e.target.value; $.modState(_.copy(taskId = v))
-                  }),
-                  tasks.map(t => <.option(^.key := t.taskId, ^.value := t.taskId, t.taskName)).toVdomArray
-                ),
-                <.div(
-                  ^.className := "flex flex-wrap gap-2",
-                  <.button(
-                    ^.`type`    := "button",
-                    ^.className := primaryButtonClass,
-                    ^.disabled  := (s.busy || s.projectId.isEmpty || taskId.isEmpty),
-                    ^.onClick --> act(BillingRpc.Assign(p.threadId, s.projectId, taskId)),
-                    "Choose"
-                  ),
-                  <.button(
-                    ^.`type`    := "button",
-                    ^.className := buttonClass,
-                    ^.disabled  := s.busy,
-                    ^.onClick --> refreshCatalog,
-                    "Refresh projects from Zoho"
-                  )
-                )
-              )
-          ,
+        s.mapping.map { m =>
+          val own = m.own.target.toOption
           <.div(
-            ^.className     := "flex flex-wrap gap-2",
-            <.button(
-              ^.`type`    := "button",
-              ^.className := buttonClass,
-              ^.disabled  := s.busy,
-              ^.onClick --> act(BillingRpc.MarkUnbillable(p.threadId)),
-              "Not client work"
-            ),
-            <.button(
-              ^.`type`    := "button",
-              ^.className := buttonClass,
-              ^.disabled  := s.busy,
-              ^.onClick --> act(BillingRpc.ClearMapping(p.threadId)),
-              "Follow parent or project again"
-            )
+            ^.className := "space-y-1",
+            <.div(^.className := "text-xs font-medium text-muted-foreground", "Bill this thread to"),
+            BillToSelect.Component.withKey(m.threadId)(BillToSelect.Props(
+              m.threadId,
+              m.own.kind match
+                case "assigned"   => own.fold(BillTo.Inherit)(t => BillTo.value(t.projectId, t.taskId))
+                case "unbillable" => BillTo.Unbillable
+                case _            => BillTo.Inherit,
+              own.fold("")(BillTo.label),
+              "Its parent's choice, else its bb project's default",
+              "This bb project",
+              m.choices.toVector.map(t => BillToOption(BillTo.value(t.projectId, t.taskId), BillTo.label(t))),
+              None,
+              p.call,
+              load
+            ))
           )
-        )
+        }
       )
 
   val Component = ScalaComponent
     .builder[AssignPanelProps]("AssignPanel")
-    .initialState(State(mapping = None, catalog = None, projectId = "", taskId = "", busy = false, error = None))
+    .initialState(State(mapping = None, error = None))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))
     .componentDidMount(_.backend.load)
