@@ -17,7 +17,6 @@ final case class ThreadSummary(
   parentThreadId: Option[String],
   createdAt: Long,
   archivedAt: Option[Long],
-  environmentId: Option[String],
   deleted: Boolean)
 
 /** Whether a bb SDK failure is bb answering that the thread does not exist (it was deleted). */
@@ -131,8 +130,7 @@ final case class LedgerResult(
   /** The day-split recording of every thread involved, for the shared-time arithmetic of a draft. */
   recording: Vector[DayInterval],
   billability: String => Billability,
-  projectId: String,
-  environmentId: Option[String]):
+  projectId: String):
   def coveredIds: Vector[String] = covered.map(_.threadId)
 
 final class Service(
@@ -252,7 +250,6 @@ final class Service(
       Option(str(thread.parentThreadId)).filter(_.nonEmpty),
       number(thread.createdAt).fold(0L)(_.toLong),
       number(thread.archivedAt).map(_.toLong),
-      Option(str(thread.environmentId)).filter(_.nonEmpty),
       deleted = false
     )
 
@@ -279,10 +276,10 @@ final class Service(
       }
       .recover {
         case e if isThreadNotFound(e) =>
-          val deleted = ThreadSummary(threadId, "", None, 0L, None, None, deleted = true)
+          val deleted = ThreadSummary(threadId, "", None, 0L, None, deleted = true)
           cache.update(threadId, deleted)
           deleted
-        case _                        => ThreadSummary(threadId, "", None, 0L, None, None, deleted = false)
+        case _                        => ThreadSummary(threadId, "", None, 0L, None, deleted = false)
       }
 
   /** How long a read of the recording answers narrower reads: one screen reads it for several ledgers at once. */
@@ -433,7 +430,7 @@ final class Service(
     totals: Totals,
     submissions: Int,
     recording: Seq[Interval]): ThreadAccount =
-    val summary = ctx.summaries.getOrElse(threadId, ThreadSummary(threadId, "", None, 0L, None, None, deleted = false))
+    val summary = ctx.summaries.getOrElse(threadId, ThreadSummary(threadId, "", None, 0L, None, deleted = false))
     ThreadAccount(
       threadId = threadId,
       title = summary.title,
@@ -825,8 +822,7 @@ final class Service(
                              titles = titles,
                              recording = withSplit,
                              billability = everyBillability,
-                             projectId = ctx.summaries.get(root).map(_.projectId).getOrElse(""),
-                             environmentId = ctx.summaries.get(root).flatMap(_.environmentId)
+                             projectId = ctx.summaries.get(root).map(_.projectId).getOrElse("")
                            )
                          )
                        }
@@ -854,7 +850,7 @@ final class Service(
       case Left(e)  => Future.successful(Left(e))
       case Right(l) =>
         val (stretches, days) = toDescribe(l, pick.keysOn(l.stretches.map(_.stretch)))
-        summaries.describe(l.projectId, l.environmentId, stretches, days, Text.stamp(l.calendar)).map(Right(_))
+        summaries.describe(l.projectId, stretches, days, Text.stamp(l.calendar)).map(Right(_))
           .recover { case e => Left(errorMessage(e)) }
     }
 

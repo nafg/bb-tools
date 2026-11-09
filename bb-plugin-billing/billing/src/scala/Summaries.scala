@@ -212,7 +212,6 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
     */
   def describe(
     projectId: String,
-    environmentId: Option[String],
     stretches: Vector[Stretch],
     days: Vector[DayToNote],
     clock: Long => String): Future[Unit] =
@@ -229,7 +228,7 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
       selection().flatMap {
         case None      => Future.failed(new RuntimeException("bb offers no model to write summaries with."))
         case Some(sel) =>
-          runWorker(projectId, environmentId, sel, prompt(pending, daysPending, known, clock)).map { output =>
+          runWorker(projectId, sel, prompt(pending, daysPending, known, clock)).map { output =>
             val (lines, notes) = parse(output, pending.size, daysPending.map(_.day))
             if pending.nonEmpty && lines.isEmpty then
               throw new RuntimeException(s"The model's answer had no summaries in it: ${output.take(200)}")
@@ -291,7 +290,7 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
            |
            |${dayItems.mkString("\n\n")}
            |""".stripMargin
-    s"""You are writing the lines of a client's invoice. Do not run any tool or read any file.
+    s"""You are writing the lines of a client's invoice. This is the client's project: when the conversation leaves unclear what a piece of work means for the client or their users, you may read its files (read, grep, glob) to find out, briefly. Do not change, create or delete any file, and do not run commands that change anything.
        |
        |$stretchPart
        |$dayPart
@@ -337,22 +336,24 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
       }
       .recover { case _ => None }
 
-  /** Run the prompt in a hidden thread and return its output; the thread is stopped and deleted on every path. */
-  private def runWorker(
-    projectId: String,
-    environmentId: Option[String],
-    sel: ModelSelection,
-    text: String): Future[String] =
-    val threads                                                         = bb.sdk.threads.asInstanceOf[js.Dynamic]
-    def environment(reuse: Boolean)                                     =
-      environmentId.filter(_ => reuse) match
-        case Some(id) => js.Dynamic.literal("type" -> "reuse", "environmentId" -> id)
-        case None     => js.Dynamic.literal("type" -> "project-default")
-    def spawn(mode: Option[String], reuse: Boolean): Future[js.Dynamic] =
+  /** Run the prompt in a hidden thread in a worktree of its own on the project's default branch, so that reading the
+    * project cannot touch any checkout of the user's, and return its output. On every path the thread is stopped and
+    * deleted and its worktree removed (see [[removeWorktree]]).
+    */
+  private def runWorker(projectId: String, sel: ModelSelection, text: String): Future[String] =
+    val threads                          = bb.sdk.threads.asInstanceOf[js.Dynamic]
+    def spawn(mode: Option[String], hostId: String): Future[js.Dynamic] =
       val sources = js.Dynamic.literal("providerId" -> "explicit", "model" -> "explicit")
       val args    = js.Dynamic.literal(
         "projectId"             -> projectId,
-        "environment"           -> environment(reuse),
+        "environment"           -> js.Dynamic.literal(
+          "type"      -> "host",
+          "hostId"    -> hostId,
+          "workspace" -> js.Dynamic.literal(
+            "type"       -> "managed-worktree",
+            "baseBranch" -> js.Dynamic.literal("kind" -> "default")
+          )
+        ),
         "prompt"                -> text,
         "title"                 -> "Billing summaries",
         "visibility"            -> "hidden",
@@ -369,22 +370,24 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
         sources.updateDynamic("permissionMode")("explicit")
       }
       threads.spawn(args).asInstanceOf[js.Promise[js.Dynamic]].toFuture
-    def dispose(id: String): Future[Unit]                               =
-      threads.stop(js.Dynamic.literal("threadId" -> id)).asInstanceOf[js.Promise[js.Dynamic]].toFuture
-        .recover { case _ => () }
-        .flatMap(_ =>
-          threads.delete(js.Dynamic.literal("threadId" -> id, "childThreadsConfirmed" -> true))
-            .asInstanceOf[js.Promise[js.Dynamic]].toFuture.map(_ => ())
-            .recoverWith { case _ =>
-              threads.archive(js.Dynamic.literal("threadId" -> id)).asInstanceOf[js.Promise[js.Dynamic]].toFuture
-                .map(_ => ()).recover { case _ => () }
-            }
-        )
+    def dispose(id: String): Future[Unit] =
+      for
+        _           <- threads.stop(js.Dynamic.literal("threadId" -> id)).asInstanceOf[js.Promise[js.Dynamic]].toFuture
+                         .map(_ => ()).recover { case _ => () }
+        environment <- threads.get(js.Dynamic.literal("threadId" -> id)).asInstanceOf[js.Promise[js.Dynamic]].toFuture
+                         .map(t => Option(str(t.environmentId)).filter(_.nonEmpty)).recover { case _ => None }
+        _           <- threads.delete(js.Dynamic.literal("threadId" -> id, "childThreadsConfirmed" -> true))
+                         .asInstanceOf[js.Promise[js.Dynamic]].toFuture.map(_ => ())
+                         .recoverWith { case _ =>
+                           threads.archive(js.Dynamic.literal("threadId" -> id)).asInstanceOf[js.Promise[js.Dynamic]]
+                             .toFuture.map(_ => ()).recover { case _ => () }
+                         }
+        _           <- environment.fold(Future.unit)(removeWorktree)
+      yield ()
     for
       mode   <- permissionMode(sel.providerId)
-      // An archived thread's environment may be gone; then the project's default serves.
-      worker <-
-        spawn(mode, reuse = true).recoverWith { case _ if environmentId.isDefined => spawn(mode, reuse = false) }
+      host   <- hostOf(projectId)
+      worker <- spawn(mode, host)
       id = str(worker.id)
       output <- (for
                   done <- threads.applyDynamic("wait")(js.Dynamic.literal(
@@ -410,3 +413,73 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
                 yield Option(str(out.output)).getOrElse(""))
                   .transformWith(result => dispose(id).flatMap(_ => Future.fromTry(result)))
     yield output
+
+  /** The machine the project's default source is on, where its worktrees are made. */
+  private def hostOf(projectId: String): Future[String] =
+    bb.sdk.projects.asInstanceOf[js.Dynamic].get(js.Dynamic.literal("projectId" -> projectId))
+      .asInstanceOf[js.Promise[js.Dynamic]].toFuture.flatMap { p =>
+      val project = if isDefined(p.project) then p.project else p
+      val sources = Option(project.sources).filter(isDefined).fold(Vector.empty[js.Dynamic])(
+        _.asInstanceOf[js.Array[js.Dynamic]].toVector
+      )
+      sources.find(s => bool(s.isDefault)).orElse(sources.headOption).map(s => str(s.hostId)).filter(_.nonEmpty) match
+        case Some(host) => Future.successful(host)
+        case None       => Future.failed(new RuntimeException(s"project $projectId has no source on a machine to run summaries in"))
+    }
+
+  /** How long the removal of a worker's worktree is waited for before its branch is deleted. */
+  private val TeardownWaitMs = 30_000
+
+  /** Removes a worker's worktree, then the branch bb made for it when the worker left no commits on it: bb's removal
+    * keeps the branch, and one per summary run would pile up in the client's repository. A branch with commits of its
+    * own, a repository this machine cannot reach, or a removal that does not finish in [[TeardownWaitMs]] leaves the
+    * branch as it is, and says so in the log.
+    */
+  private def removeWorktree(environmentId: String): Future[Unit] =
+    val environments = bb.sdk.environments.asInstanceOf[js.Dynamic]
+    def read(): Future[js.Dynamic] =
+      environments.get(js.Dynamic.literal("environmentId" -> environmentId)).asInstanceOf[js.Promise[js.Dynamic]]
+        .toFuture.map(r => if isDefined(r.environment) then r.environment else r)
+    def removed(waitedMs: Int): Future[Boolean] =
+      read().flatMap { e =>
+        if str(e.status) == "destroyed" then Future.successful(true)
+        else if waitedMs >= TeardownWaitMs then Future.successful(false)
+        else after(1000).flatMap(_ => removed(waitedMs + 1000))
+      }
+    def keep(why: String): Unit = bb.log.info(s"kept the branch of summary worktree $environmentId: $why")
+    (for
+      env    <- read()
+      branch  = str(env.branchName)
+      // bb starts the branch from the default branch, or from its remote one when the local one has nothing newer.
+      bases   = Vector(str(env.defaultBranch), str(env.mergeBaseBranch)).filter(_.nonEmpty).distinct
+      gitDir <- Option(str(env.path)).filter(_.nonEmpty)
+                  .fold(Future.successful(Option.empty[String]))(path =>
+                    Git("-C", path, "rev-parse", "--path-format=absolute", "--git-common-dir").map(Some(_))
+                      .recover { case _ => None }
+                  )
+      _      <- environments.delete(js.Dynamic.literal("environmentId" -> environmentId))
+                  .asInstanceOf[js.Promise[js.Dynamic]].toFuture
+      gone   <- removed(0)
+      _      <- (gitDir, Option(branch).filter(_.nonEmpty)) match
+                  case (Some(dir), Some(name)) if gone =>
+                    val ref = s"refs/heads/$name"
+                    (for
+                      tip <- Git("--git-dir", dir, "rev-parse", ref)
+                      _   <- bases.foldLeft(Future.failed[Unit](new RuntimeException(s"it has commits of its own")))(
+                               (found, base) =>
+                                 found.recoverWith { case _ =>
+                                   Git("--git-dir", dir, "merge-base", "--is-ancestor", tip, base).map(_ => ())
+                                 }
+                             ).recoverWith { case _ => Future.failed(new RuntimeException("it has commits of its own")) }
+                      // Deleted only if it still points where it was read: nothing moved it meanwhile.
+                      _   <- Git("--git-dir", dir, "update-ref", "-d", ref, tip)
+                    yield ()).recover { case e => keep(errorMessage(e)) }
+                  case (None, _)                    => Future.successful(keep("its repository is not on this machine"))
+                  case (_, None)                    => Future.unit
+                  case _                            => Future.successful(keep("its worktree was not removed in time"))
+    yield ()).recover { case e => keep(errorMessage(e)) }
+
+  private def after(ms: Int): Future[Unit] =
+    val promise = scala.concurrent.Promise[Unit]()
+    val _       = js.timers.setTimeout(ms.toDouble)(promise.success(()))
+    promise.future
