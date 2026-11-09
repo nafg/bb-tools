@@ -345,6 +345,18 @@ trait SignalMarkJs extends js.Object:
   val kind: String
   val at: Double
 
+/** One billing root's undecided shared stretches in a session, from the root's own ledger. */
+trait RootSharedJs extends js.Object:
+  val root: String
+  val blocks: js.Array[Block]
+
+trait SessionSharedJs extends js.Object:
+  val roots: js.Array[RootSharedJs]
+
+trait DecidedJs extends js.Object:
+  /** How many shared stretches were decided. */
+  val decided: Double
+
 trait SessionScreenJs extends js.Object:
   val timeZone: String
   val now: Double

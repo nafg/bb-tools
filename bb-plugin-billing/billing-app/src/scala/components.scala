@@ -50,6 +50,8 @@ object ReplyView:
   given Aux[Reply.Ok, js.Any]                             = as
   given Aux[Reply.Overview, OverviewResult]               = as
   given Aux[Reply.SessionScreen, SessionScreenJs]         = as
+  given Aux[Reply.SessionShared, SessionSharedJs]         = as
+  given Aux[Reply.Decided, DecidedJs]                     = as
   given Aux[Reply.Ledger, LedgerJs]                       = as
   given Aux[Reply.Plan, PlanJs]                           = as
   given Aux[Reply.Submission, js.Any]                     = as
