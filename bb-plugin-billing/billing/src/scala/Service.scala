@@ -148,19 +148,34 @@ final class Service(
 )(using ExecutionContext):
   private val cache = mutable.Map.empty[String, ThreadSummary]
 
-  /** A thread's conversation is read from bb's timeline once and kept for a couple of minutes, so that ticking a
-    * stretch or striking one out does not refetch every covered thread. An archived thread's is kept until a thread is
-    * unarchived (see [[forgetArchived]]): nothing is said in an archived thread.
+  /** A thread's conversation is read from bb's timeline once and kept while nothing new can be in it: until the thread
+    * has recorded activity (attention, or an agent turn the user set going) that ended after the read, or at most
+    * [[ConversationTtlMs]], which bounds what the recorder does not see. A stretch is cut on recorded activity, so a
+    * conversation read after the thread's last activity ended already holds everything said inside any stretch. An
+    * archived thread's is kept until a thread is unarchived (see [[forgetArchived]]): nothing is said in an archived
+    * thread.
     */
-  private val conversations     = mutable.Map.empty[String, (Double, Future[Vector[Message]])]
+  private val conversations         = mutable.Map.empty[String, (Double, Future[Vector[Message]])]
   private val archivedConversations = mutable.Map.empty[String, Future[Vector[Message]]]
-  private val ConversationTtlMs = 120_000.0
+  private val ConversationTtlMs     = 10 * 60_000.0
+
+  /** How long after recorded activity ends its rows may still be written: the recorder's lag. */
+  private val ActivitySettleMs = 60_000.0
+
+  /** When each thread's latest recorded activity ended, as far as the recordings read so far tell. */
+  private val activityEnd = mutable.Map.empty[String, Double]
+
+  private def noteActivity(threadId: String, end: Long): Unit =
+    if activityEnd.get(threadId).forall(_ < end) then activityEnd.update(threadId, end.toDouble)
+
   private def conversationOf(threadId: String): Future[Vector[Message]] =
     archivedConversations.get(threadId) match
       case Some(f) => f
       case None    =>
         val now = js.Date.now()
-        conversations.get(threadId).filter((at, _) => now - at < ConversationTtlMs) match
+        conversations.get(threadId).filter((at, _) =>
+          now - at < ConversationTtlMs && activityEnd.get(threadId).forall(end => at >= end + ActivitySettleMs)
+        ) match
           case Some((_, f)) => f
           case None         =>
             val f = threadSummary(threadId).flatMap { summary =>
@@ -200,58 +215,131 @@ final class Service(
 
   def summariesAvailable(): Future[Boolean] = summaries.available()
 
-  /** A thread's title, project, parent, and dates, cached for the plugin's lifetime once it has a title and is archived
-    * (an open thread's title and archive state can still change).
+  /** How long one listing of the open threads answers for all of them. */
+  private val OpenThreadsTtlMs = 5_000.0
+  private val OpenThreadsPage  = 500
+  private var openThreadsRead: Option[(Double, Future[Map[String, ThreadSummary]])] = None
+
+  /** Every thread that is not archived, hidden ones included, by id: one listing, kept a few seconds. A screen looks up
+    * hundreds of threads at once, and bb has no lookup of many threads by id. A failed listing is an empty map, so each
+    * thread is then looked up alone.
+    */
+  private def openThreads(): Future[Map[String, ThreadSummary]] =
+    val now = js.Date.now()
+    openThreadsRead.filter((at, _) => now - at < OpenThreadsTtlMs) match
+      case Some((_, f)) => f
+      case None         =>
+        def page(offset: Int, acc: Vector[js.Dynamic]): Future[Vector[js.Dynamic]] =
+          bb.sdk.threads
+            .list(js.Dynamic.literal("includeHidden" -> true, "limit" -> OpenThreadsPage, "offset" -> offset))
+            .toFuture
+            .flatMap { rows =>
+              val got = rows.asInstanceOf[js.Array[js.Dynamic]].toVector
+              if got.size < OpenThreadsPage then Future.successful(acc ++ got) else page(offset + got.size, acc ++ got)
+            }
+        val f = page(0, Vector.empty)
+          .map(_.map(t => str(t.id) -> summaryOf(str(t.id), t)).toMap)
+          .recover { case _ => Map.empty }
+        openThreadsRead = Some((now, f))
+        f
+
+  private def summaryOf(threadId: String, thread: js.Dynamic): ThreadSummary =
+    val title =
+      Option(str(thread.title)).filter(_.nonEmpty).orElse(Option(str(thread.titleFallback)).filter(_.nonEmpty))
+    ThreadSummary(
+      title.getOrElse(threadId),
+      str(thread.projectId),
+      Option(str(thread.parentThreadId)).filter(_.nonEmpty),
+      number(thread.createdAt).fold(0L)(_.toLong),
+      number(thread.archivedAt).map(_.toLong),
+      Option(str(thread.environmentId)).filter(_.nonEmpty),
+      deleted = false
+    )
+
+  /** A thread's title, project, parent, and dates. An open thread's come from [[openThreads]]; an archived thread's
+    * are cached for the plugin's lifetime once it has a title (an open thread's title and archive state can still
+    * change).
     */
   def threadSummary(threadId: String): Future[ThreadSummary] =
     cache.get(threadId) match
       case Some(t) => Future.successful(t)
       case None    =>
-        bb.sdk.threads
-          .get(js.Dynamic.literal("threadId" -> threadId))
-          .toFuture
-          .map { thread =>
-            val title   =
-              Option(str(thread.title)).filter(_.nonEmpty).orElse(Option(str(thread.titleFallback)).filter(_.nonEmpty))
-            val summary = ThreadSummary(
-              title.getOrElse(threadId),
-              str(thread.projectId),
-              Option(str(thread.parentThreadId)).filter(_.nonEmpty),
-              number(thread.createdAt).fold(0L)(_.toLong),
-              number(thread.archivedAt).map(_.toLong),
-              Option(str(thread.environmentId)).filter(_.nonEmpty),
-              deleted = false
-            )
-            if title.isDefined && summary.archivedAt.isDefined then cache.update(threadId, summary)
-            summary
-          }
-          .recover {
-            case e if isThreadNotFound(e) =>
-              val deleted = ThreadSummary(threadId, "", None, 0L, None, None, deleted = true)
-              cache.update(threadId, deleted)
-              deleted
-            case _                        => ThreadSummary(threadId, "", None, 0L, None, None, deleted = false)
-          }
+        openThreads().flatMap { open =>
+          open.get(threadId).fold(readThreadSummary(threadId))(Future.successful)
+        }
+
+  private def readThreadSummary(threadId: String): Future[ThreadSummary] =
+    bb.sdk.threads
+      .get(js.Dynamic.literal("threadId" -> threadId))
+      .toFuture
+      .map { thread =>
+        val summary = summaryOf(threadId, thread)
+        if summary.title != threadId && summary.archivedAt.isDefined then cache.update(threadId, summary)
+        summary
+      }
+      .recover {
+        case e if isThreadNotFound(e) =>
+          val deleted = ThreadSummary(threadId, "", None, 0L, None, None, deleted = true)
+          cache.update(threadId, deleted)
+          deleted
+        case _                        => ThreadSummary(threadId, "", None, 0L, None, None, deleted = false)
+      }
+
+  /** The recorded intervals from `from` to `to`, each thread's latest noted for [[conversationOf]]. */
+  private def recordedIntervals(from: Long, to: Long): Future[Either[String, Vector[Interval]]] =
+    recorder.intervals(from, to).map(_.map { all =>
+      all.foreach(i => noteActivity(i.threadId, i.end))
+      all
+    })
+
+  /** The threads among `ids` that were deleted. */
+  private def deletedAmong(ids: Vector[String]): Future[Set[String]] =
+    Future.traverse(ids.distinct)(t => threadSummary(t).map(sm => Option.when(sm.deleted)(t))).map(_.flatten.toSet)
 
   /** The recorded intervals from `from` to `to`, without those of deleted threads. */
   private def intervalsOfLiveThreads(from: Long, to: Long): Future[Either[String, Vector[Interval]]] =
-    recorder.intervals(from, to).flatMap {
+    recordedIntervals(from, to).flatMap {
       case Left(error) => Future.successful(Left(error))
-      case Right(all)  =>
-        Future.traverse(all.map(_.threadId).distinct)(t => threadSummary(t).map(sm => Option.when(sm.deleted)(t)))
-          .map(deleted => Right(all.filterNot(i => deleted.flatten.contains(i.threadId))))
+      case Right(all)  => deletedAmong(all.map(_.threadId)).map(deleted => Right(all.filterNot(i => deleted(i.threadId))))
     }
 
   /** The agent turns the user set going from `from` to `to`, without those of deleted threads. They only decide how
     * sessions group stretches, so a recorder that cannot list them leaves them out rather than failing the screen.
     */
   private def agentSpansOfLiveThreads(from: Long, to: Long): Future[Vector[AgentSpan]] =
-    recorder.agentSpans(from, to).flatMap {
+    agentSpans(from, to).flatMap {
       case Left(_)      => Future.successful(Vector.empty)
       case Right(spans) =>
-        Future.traverse(spans.map(_.threadId).distinct)(t => threadSummary(t).map(sm => Option.when(sm.deleted)(t)))
-          .map(deleted => spans.filterNot(s => deleted.flatten.contains(s.threadId)))
+        spans.foreach(s => noteActivity(s.threadId, s.end))
+        deletedAmong(spans.map(_.threadId)).map(deleted => spans.filterNot(s => deleted(s.threadId)))
     }
+
+  /** How far before the last read agent turns are read again: a turn that ended before then no longer changes. */
+  private val AgentSpansTailMs     = 10 * 60_000L
+  /** How often the agent turns are read whole anyway, for what the recorder learns about past turns later. */
+  private val AgentSpansFullReadMs = 10 * 60_000L
+  /** A read of agent turns: when they were last read whole, the range `[from, to)` they cover, and the turns. */
+  private final case class AgentSpansRead(wholeAt: Long, from: Long, to: Long, spans: Vector[AgentSpan])
+  private var agentSpansRead: Option[AgentSpansRead] = None
+
+  /** The agent turns reaching into `[from, to)`. Thirty days of them are many thousands, so after a whole read only the
+    * turns reaching past [[AgentSpansTailMs]] before the last read are asked for, and the rest kept from it.
+    */
+  private def agentSpans(from: Long, to: Long): Future[Either[String, Vector[AgentSpan]]] =
+    def within(spans: Vector[AgentSpan]) = spans.filter(s => s.end > from && s.start < to)
+    agentSpansRead match
+      case Some(last) if from >= last.from && to - last.wholeAt < AgentSpansFullReadMs =>
+        val cut = last.to - AgentSpansTailMs
+        recorder.agentSpans(cut, to).map(_.map { tail =>
+          val all = last.spans.filter(_.end <= cut) ++ tail
+          agentSpansRead = Some(last.copy(to = to, spans = all))
+          within(all)
+        })
+      case _                                                                            =>
+        recorder.agentSpans(from, to).map(_.map { spans =>
+          agentSpansRead = Some(AgentSpansRead(wholeAt = to, from = from, to = to, spans = spans))
+          spans
+        })
 
   def threadTitle(threadId: String): Future[String] = threadSummary(threadId).map(_.title)
 
@@ -400,6 +488,23 @@ final class Service(
     }
 
   private val SessionHistoryMs = 30L * 24 * 3600_000L
+
+  /** How many conversations [[warm]] reads at once. */
+  private val WarmBatch = 6
+
+  /** Reads ahead what opening a session needs, so the first screens after a start do not wait for it: the session
+    * screen's own inputs, then the conversations of the threads of every session with time still to bill, a few at a
+    * time. Failures are ignored; a screen reads what it is missing.
+    */
+  def warm(): Future[Unit] =
+    sessionScreen(None).flatMap {
+      case Left(_)       => Future.unit
+      case Right(screen) =>
+        val ids = screen.sessions.filter(s => screen.unbilledMs.getOrElse(s.start, 0L) > 0).flatMap(_.threadIds).distinct
+        ids.grouped(WarmBatch).foldLeft(Future.unit)((done, batch) =>
+          done.flatMap(_ => Future.traverse(batch)(t => conversationOf(t).recover { case _ => Vector.empty }).map(_ => ()))
+        )
+    }.recover { case _ => () }
 
   /** The sessions of the last month over all recorded attention, and the session starting at `at` (else the latest)
     * with every thread's stretches in it. A stretch is a recorded interval cut at local midnight, in the ledger's
@@ -578,7 +683,7 @@ final class Service(
       // and shared-stretch keys are cut on the recording itself, so a submission's edge or a cut inside a day never
       // moves a boundary, and cached lines and decisions keep matching.
       from = coveredIds.flatMap(t => ctx.summaries.get(t).map(_.createdAt - 24 * 3600_000L)).minOption.getOrElse(0L)
-      intervals <- recorder.intervals(cal.dayStart(from), cal.nextDayStart(js.Date.now().toLong))
+      intervals <- recordedIntervals(cal.dayStart(from), cal.nextDayStart(js.Date.now().toLong))
       result    <- intervals match
                      case Left(error) => Future.successful(Left(error))
                      case Right(raw)  =>
@@ -867,19 +972,38 @@ final class Service(
           record   <- records(Vector(s)).map(_.head)
         yield Right(Audit(record, cal, titles, inside, existing._1, existing._2))
 
-  /** Zoho entries on the plan's dates for the same project that this plugin did not create. */
-  /** A Zoho project's time entries from one day to another, kept for half a minute, so that one screen asking twice
-    * reads Zoho once.
+  /** How long a read of Zoho entries answers without being read again. */
+  private val ZohoEntriesFreshMs = 30_000.0
+
+  /** A Zoho project's time entries from one day to another. A read answers at once from the last one: within
+    * [[ZohoEntriesFreshMs]] as it is, later while Zoho is read again behind it, and when that read differs, pages are
+    * told [[BillingEvent.Changed]] so they ask again. Reading Zoho takes seconds, and entries made in Zoho by hand are
+    * rare.
     */
-  private val zohoEntryReads = mutable.Map.empty[(String, String, String), (Double, Future[Vector[ZohoExistingEntry]])]
+  private val zohoEntryReads   = mutable.Map.empty[(String, String, String), (Double, Future[Vector[ZohoExistingEntry]])]
+  /** The reads under way behind an answer already given. */
+  private val zohoEntryRereads = mutable.Set.empty[(String, String, String)]
   private def zohoEntries(projectId: String, from: String, to: String): Future[Vector[ZohoExistingEntry]] =
-    val now = js.Date.now()
-    zohoEntryReads.get((projectId, from, to)).filter((at, _) => now - at < 30_000.0) match
-      case Some((_, f)) => f
-      case None         =>
-        val f = zoho.clientOrFail().flatMap(_.timeEntries(from, to, projectId))
-        zohoEntryReads.update((projectId, from, to), (now, f))
-        f.failed.foreach(_ => zohoEntryReads.remove((projectId, from, to)))
+    val key = (projectId, from, to)
+    def read(): Future[Vector[ZohoExistingEntry]] = zoho.clientOrFail().flatMap(_.timeEntries(from, to, projectId))
+    zohoEntryReads.get(key) match
+      case Some((at, last)) if js.Date.now() - at < ZohoEntriesFreshMs => last
+      // The last read is done: answer with it, and read again behind it.
+      case Some((_, last)) if last.value.exists(_.isSuccess)           =>
+        val previous = last.value.get.get
+        if zohoEntryRereads.add(key) then
+          read().onComplete { result =>
+            zohoEntryRereads.remove(key)
+            result.foreach { fresh =>
+              zohoEntryReads.update(key, (js.Date.now(), Future.successful(fresh)))
+              if fresh.toSet != previous.toSet then publish(BillingEvent.Changed)
+            }
+          }
+        last
+      case _                                                           =>
+        val f = read()
+        zohoEntryReads.update(key, (js.Date.now(), f))
+        f.failed.foreach(_ => zohoEntryReads.remove(key))
         f
 
   private def handEntered(

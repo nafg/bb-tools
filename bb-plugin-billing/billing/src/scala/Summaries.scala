@@ -29,8 +29,13 @@ final class Conversation(bb: BbApi)(using ExecutionContext):
     */
   private val MaxPages = 600
 
+  /** A timeline row as it is kept between reads: its id, and the messages it and its nested rows hold. The rows
+    * themselves are not kept: they carry far more than the messages (tool arguments and output), for every thread read.
+    */
+  private final case class Row(id: String, messages: Vector[Message])
+
   /** Each thread's timeline rows from its last read, oldest first, back to the thread's start. */
-  private val known = scala.collection.mutable.Map.empty[String, Vector[js.Dynamic]]
+  private val known = scala.collection.mutable.Map.empty[String, Vector[Row]]
 
   /** The thread's conversation. A thread read before is read again only from its newest page back to the first page
     * that meets the rows kept from then: the rows of the pages read come fresh (a turn that was running has changed),
@@ -38,7 +43,7 @@ final class Conversation(bb: BbApi)(using ExecutionContext):
     */
   def of(threadId: String): Future[Vector[Message]] =
     val before   = known.getOrElse(threadId, Vector.empty)
-    val beforeAt = before.zipWithIndex.map((r, i) => str(r.id) -> i).toMap
+    val beforeAt = before.zipWithIndex.map((r, i) => r.id -> i).toMap
     def page(cursor: Option[(String, Double)], acc: Vector[js.Dynamic], n: Int): Future[(Vector[js.Dynamic], Boolean)] =
       val request = js.Dynamic.literal("threadId" -> threadId, "includeNestedRows" -> "true")
       cursor.foreach { (id, seq) =>
@@ -56,13 +61,15 @@ final class Conversation(bb: BbApi)(using ExecutionContext):
           case _                                                          =>
             Future.successful((rows ++ acc, older.isEmpty || rows.isEmpty))
       }
-    page(None, Vector.empty, 0).map { (fresh, reachedStart) =>
-      val oldestMet = fresh.flatMap(r => beforeAt.get(str(r.id))).minOption
+    page(None, Vector.empty, 0).map { (freshRows, reachedStart) =>
+      val fresh     = freshRows.map(r => Row(str(r.id), flatten(Vector(r)).flatMap(message)))
+      val freshIds  = fresh.map(_.id).toSet
+      val oldestMet = fresh.flatMap(r => beforeAt.get(r.id)).minOption
       val rows      = oldestMet match
-        case Some(i) if !reachedStart => before.take(i).filterNot(r => fresh.exists(f => str(f.id) == str(r.id))) ++ fresh
+        case Some(i) if !reachedStart => before.take(i).filterNot(r => freshIds(r.id)) ++ fresh
         case _                        => fresh
       known.update(threadId, rows)
-      flatten(rows).flatMap(message).sortBy(_.at)
+      rows.flatMap(_.messages).sortBy(_.at)
     }.recover {
       // A deleted thread (bb answers `thread_not_found`) has no conversation left; its recorded time remains.
       case e if isThreadNotFound(e) => Vector.empty

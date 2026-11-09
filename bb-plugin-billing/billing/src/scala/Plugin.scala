@@ -67,6 +67,7 @@ def plugin(bb: BbApi): Unit =
 
   // A page open across a reload refreshes, so it stops waiting on summary runs the old plugin took with it.
   service.publish(BillingEvent.Changed)
+  service.warm()
 
   // An archived thread must get a billing decision; the page refreshes its must-decide list.
   bb.events.on("thread.archived", (_: js.Dynamic) => service.publish(BillingEvent.Changed))
