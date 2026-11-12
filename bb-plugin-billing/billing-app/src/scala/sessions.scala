@@ -1319,7 +1319,8 @@ object SessionsView:
       <.div(
         VdomAttr("data-sessions-panel") := "",
         ^.className := "space-y-3",
-        // Sticks to the top of the Sessions panel, wherever the panel sits in the window; takes no height.
+        // Sticks to the top of the Sessions panel, wherever the panel sits in the window; takes no height. It is always
+        // there, empty when nothing is under way, so the gap the panel puts between its children does not come and go.
         <.div(
           ^.className := "sticky top-0 z-[60] flex h-0 justify-end",
           <.div(
@@ -1337,8 +1338,8 @@ object SessionsView:
                 <.span(^.className := "tabular-nums text-muted-foreground", elapsed(s.now - s.since.getOrElse(b.id, s.now)))
               )
             }.toVdomArray
-          )
-        ).when(busy.nonEmpty),
+          ).when(busy.nonEmpty)
+        ),
         s.error.map(e => banner("error", e)),
         s.screen.map { screen =>
           val tz = screen.timeZone
