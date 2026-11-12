@@ -52,7 +52,9 @@ object SessionsView:
       */
     folding: Map[String, Boolean],
     /** The shared stretches whose decision panel is open, by their keys, and where it was asked for. */
-    deciding: Option[Deciding])
+    deciding: Option[Deciding],
+    /** The last send or settle made here, as the server recorded it, until dismissed. */
+    sent: Option[SubmissionRecord])
 
   /** A decision panel asked for at a point of the window, for the shared stretches with these keys. */
   final case class Deciding(keys: Vector[String], x: Double, y: Double)
@@ -514,16 +516,21 @@ object SessionsView:
           case (Some(screen), Some(plan)) =>
             val keys     = keysByRoot(screen, s.draft).getOrElse(root, Vector.empty)
             val title    = threadsOf(screen).title(root)
+            val entries  = plan.entries.toVector.map(e =>
+              s"${Words.dayLabel(e.day)}  ${e.logTime}  ${ZohoEntries.notes(e.notes)}"
+            ).mkString("\n\n")
             val question =
               if billed then
-                s"Send ${hoursMinutes(plan.totalMs)} for \"$title\" as ${plan.entries.length} Zoho entries (${plan.entries.map(e => Words.dayLabel(e.day)).mkString(", ")})? The ${keys.length} ticked stretches count as billed from then on."
+                s"Send ${hoursMinutes(plan.totalMs)} for \"$title\" to ${targetText(plan)} as these ${plan.entries.length} Zoho entries?\n\n$entries\n\nThe ${keys.length} ticked stretches count as billed from then on."
               else s"Mark the ${keys.length} ticked stretches of \"$title\" (${hoursMinutes(plan.totalMs)}) as settled without billing?"
             if !dom.window.confirm(question) then Callback.empty
             else
               $.modState(_.copy(busy = true)) >>
                 Callback.future(
                   rpc(p.call, BillingRpc.Submit(root, subthreads = true, DraftPick.Keys(keys.toSet), billed))
-                    .map(_ => $.modState(st => st.copy(busy = false, draft = st.draft -- keys)) >> reloadCurrent)
+                    .map(r =>
+                      $.modState(st => st.copy(busy = false, draft = st.draft -- keys, sent = recordOf(r))) >> reloadCurrent
+                    )
                     .recover { case e => $.modState(_.copy(busy = false, error = Some(errorMessage(e)))) }
                 )
           case _                          => Callback.empty
@@ -1107,6 +1114,81 @@ object SessionsView:
           )
         }
 
+    /** Where a plan's entries go in Zoho, in words. */
+    private def targetText(plan: PlanJs): String =
+      if plan.target == null then "no Zoho project yet"
+      else
+        val t = plan.target.asInstanceOf[Target]
+        s"${t.customerName}: ${t.projectName} / ${t.taskName}"
+
+    /** Every Zoho entry the plan would create, exactly as it would be sent: date, time, and notes. */
+    private def entriesPreview(plan: PlanJs): VdomNode =
+      <.div(
+        ^.className := "space-y-1 text-xs",
+        <.div(
+          ^.className := "text-muted-foreground",
+          s"Send to Zoho creates ${counted(plan.entries.length, "entry")} in ${targetText(plan)}:"
+        ),
+        plan.entries.toVector.map { e =>
+          val notes = ZohoEntries.notes(e.notes)
+          <.div(
+            ^.key       := e.day,
+            ^.className := "rounded border border-border px-2 py-1",
+            <.div(
+              ^.className := "flex flex-wrap gap-2",
+              <.span(^.className := "font-medium", Words.dayLabel(e.day)),
+              <.span(^.className := "font-medium tabular-nums", e.logTime),
+              <.span(^.className := "text-muted-foreground", s"(${hoursMinutes(e.exactMs)} recorded)"),
+              <.span(
+                ^.className := "text-muted-foreground",
+                if e.notesEdited then "notes edited by you"
+                else if e.notesFromModel then "notes written by the model"
+                else "notes are the stretches' lines joined"
+              ),
+              <.span(^.className := "text-amber-600", s"notes cut to ${notes.length} characters").when(notes != e.notes)
+            ),
+            <.div(^.className := "whitespace-pre-wrap", notes)
+          )
+        }.toVdomArray
+      )
+
+    /** What the last send or settle made, as the server recorded it. */
+    private def sentCard(s: State, tz: String): VdomNode =
+      s.sent.fold(EmptyVdom: VdomNode) { r =>
+        <.div(
+          ^.className := "space-y-1 rounded-md border border-green-500/50 bg-green-500/10 px-3 py-2 text-xs",
+          <.div(
+            ^.className := "flex flex-wrap items-center gap-2",
+            <.span(
+              ^.className := "font-medium",
+              if r.billed then
+                s"Sent to Zoho ${stamp(r.createdAt.toDouble, tz)}: \"${r.rootTitle}\" to ${r.target.customerName}: ${r.target.projectName} / ${r.target.taskName}"
+              else
+                s"Settled without billing ${stamp(r.createdAt.toDouble, tz)}: \"${r.rootTitle}\", ${counted(r.spans.length, "stretch")}, ${hoursMinutes(r.spans.map(sp => sp.end - sp.start).sum.toDouble)}"
+            ),
+            <.button(
+              ^.`type`    := "button",
+              ^.className := "ml-auto rounded px-1 text-muted-foreground hover:bg-muted",
+              ^.onClick --> $.modState(_.copy(sent = None)),
+              "✕"
+            )
+          ),
+          r.entries.map(e =>
+            <.div(
+              ^.key       := e.timeEntryId,
+              ^.className := "rounded border border-border bg-background px-2 py-1",
+              <.div(
+                ^.className := "flex flex-wrap gap-2",
+                <.span(^.className := "font-medium", Words.dayLabel(e.day)),
+                <.span(^.className := "font-medium tabular-nums", ZohoEntries.logTime(e.minutes)),
+                <.span(^.className := "text-muted-foreground", s"Zoho entry ${e.timeEntryId}")
+              ),
+              <.div(^.className := "whitespace-pre-wrap", e.notes)
+            )
+          ).toVdomArray
+        )
+      }
+
     private def sendPanel(p: Props, s: State, tz: String, screen: SessionScreenJs, th: Threads): VdomNode =
       val byRoot = keysByRoot(screen, s.draft)
       if byRoot.isEmpty then
@@ -1132,6 +1214,7 @@ object SessionsView:
                   )
                 )
               ),
+              plan.filter(_.entries.length > 0).map(entriesPreview),
               plan.filter(_.handEntered.length > 0).map(pl =>
                 <.div(
                   ^.className := "space-y-0.5 rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-xs",
@@ -1301,6 +1384,7 @@ object SessionsView:
                   ).when(tickable.nonEmpty)
                 },
                 sharedLine(s),
+                sentCard(s, tz),
                 sendPanel(p, s, tz, screen, th)
               ),
               <.div(^.className := "rounded-md border border-border p-2", timeline(p, s, tz, screen, th))
@@ -1310,7 +1394,7 @@ object SessionsView:
 
   val Component = ScalaComponent
     .builder[Props]("SessionsView")
-    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, shared = None, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Map.empty, written = 0, saving = None, since = Map.empty, now = js.Date.now(), picking = None, projects = None, leaving = Set.empty, folding = Map.empty, deciding = None))
+    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, shared = None, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Map.empty, written = 0, saving = None, since = Map.empty, now = js.Date.now(), picking = None, projects = None, leaving = Set.empty, folding = Map.empty, deciding = None, sent = None))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))
     .componentDidMount(x => x.backend.load(None) >> x.backend.startClock)
