@@ -150,10 +150,12 @@ trait PlanJs extends js.Object:
   val blockers: js.Array[String]
 
 trait StretchStateJs extends js.Object:
-  /** "unbilled", "leftOut", "inZohoByHand", "sent", "settled". */
+  /** "unbilled", "leftOut", "inZohoByHand", "sent", "settled", "givenAway". */
   val kind: String
   val submissionId: js.UndefOr[String]
   val trace: js.UndefOr[ZohoTraceJs]
+  /** For "givenAway": the threads that got the time; none when nobody did. */
+  val to: js.UndefOr[js.Array[String]]
 
 trait LedgerStretchJs extends js.Object:
   val key: String

@@ -411,6 +411,12 @@ object SubmissionPanel:
         case "sent"         => Some(chip("bg-green-500/20", s"sent ${on(st.state.submissionId)}"))
         case "settled"      => Some(chip("bg-muted text-muted-foreground", s"settled ${on(st.state.submissionId)}"))
         case "leftOut"      => Some(chip("bg-muted text-muted-foreground", "left out"))
+        case "givenAway"    =>
+          Some(chip(
+            "bg-muted text-muted-foreground",
+            "given away",
+            "All of it is shared time a decision gave to another thread or to nobody."
+          ))
         case "inZohoByHand" =>
           Some(chip(
             "bg-amber-500/20",

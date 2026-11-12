@@ -16,7 +16,8 @@ import scala.scalajs.js
 object SessionsView:
   final case class Props(call: RpcCall, openThread: String => Callback, event: RealtimeEventJs | Null)
   /** `draft` is the set of ticked stretch keys; `plans` the server's pricing of the ticked stretches per billing root;
-    * `shared` the undecided shared stretches of the session by billing root, read whatever is ticked (None until read).
+    * `shared` the session's shared stretches, decided or not, by billing root, read whatever is ticked (None until
+    * read).
     */
   final case class State(
     screen: Option[SessionScreenJs],
@@ -49,7 +50,60 @@ object SessionsView:
     /** Columns folded or unfolded by hand, by the id of the column's first thread; true is folded. Any other column
       * is folded when it has nothing left to review.
       */
-    folding: Map[String, Boolean])
+    folding: Map[String, Boolean],
+    /** The shared stretches whose decision panel is open, by their keys, and where it was asked for. */
+    deciding: Option[Deciding])
+
+  /** A decision panel asked for at a point of the window, for the shared stretches with these keys. */
+  final case class Deciding(keys: Vector[String], x: Double, y: Double)
+
+  /** Back-to-back shared stretches of the same threads, decided alike, in the ledger of `root`: one strip on the
+    * timeline, decided with one click.
+    */
+  private final case class SharedRun(root: String, blocks: Vector[Block]):
+    def keys: Vector[String]     = blocks.map(_.key)
+    def start: Double            = blocks.head.start
+    def end: Double              = blocks.last.end
+    def durationMs: Double       = blocks.map(_.durationMs).sum
+    def threadIds: Vector[String] = blocks.head.threadIds.toVector
+    def toDecide: Boolean        = blocks.exists(b => b.decision == null && b.billableThreadIds.nonEmpty)
+
+  /** The decision as text, so stretches decided alike can be told apart from ones decided otherwise. */
+  private def decisionText(b: Block): String =
+    if b.decision == null then "" else js.JSON.stringify(b.decision.asInstanceOf[js.Any])
+
+  private def keyOf(b: Block): BlockKey =
+    BlockKey.parse(b.key).getOrElse(BlockKey(b.day, b.start.toLong, b.end.toLong, b.threadIds.toSet))
+
+  /** The session's shared stretches, each once, run together where they follow one another with the same threads and
+    * the same decision.
+    */
+  private def sharedRuns(shared: Vector[(String, Vector[Block])]): Vector[SharedRun] =
+    shared.flatMap((root, blocks) => blocks.map(root -> _)).distinctBy(_._2.key).sortBy(_._2.start)
+      .foldLeft(Vector.empty[SharedRun]) { case (runs, (root, b)) =>
+        runs.lastOption match
+          case Some(last)
+              if last.root == root && last.end == b.start && last.threadIds.toSet == b.threadIds.toSet &&
+                decisionText(last.blocks.last) == decisionText(b) =>
+            runs.init :+ last.copy(blocks = last.blocks :+ b)
+          case _ => runs :+ SharedRun(root, Vector(b))
+      }
+
+  /** How much of a shared stretch a thread got from its decision: all, part, none, or not decided yet. */
+  private enum Share:
+    case All, Part, NoneOfIt, Undecided
+
+  private def shareOf(b: Block, threadId: String): Share =
+    if b.decision == null then Share.Undecided
+    else
+      val d = b.decision.asInstanceOf[billingapp.Decision]
+      d.kind match
+        case "wholeTo"  => if d.threadId.contains(threadId) then Share.All else Share.NoneOfIt
+        case "portions" =>
+          d.ms.toOption.flatMap(_.get(threadId)).filter(_ > 0) match
+            case Some(ms) => if ms >= b.durationMs then Share.All else Share.Part
+            case None     => Share.NoneOfIt
+        case _          => Share.NoneOfIt
 
   /** The hover card's horizontal place: its left edge and its width. */
   final case class HoverAt(left: Double, width: Double)
@@ -121,6 +175,7 @@ object SessionsView:
       case "leftOut"      => StretchState.LeftOut
       case "sent"         => StretchState.Sent(s.submissionId.getOrElse(""))
       case "settled"      => StretchState.Settled(s.submissionId.getOrElse(""))
+      case "givenAway"    => StretchState.GivenAway(s.to.toOption.fold(Set.empty[String])(_.toSet))
       case "inZohoByHand" =>
         val t = s.trace.toOption
         StretchState.InZohoByHand(
@@ -146,6 +201,11 @@ object SessionsView:
       case StretchState.Sent(_)         => "sent"
       case StretchState.Settled(_)      => "settled"
       case StretchState.InZohoByHand(_) => "in Zoho by hand"
+      case StretchState.GivenAway(_)    => "given away"
+
+  /** Who a decision gave a thread's time to, in words: `to Manage requests`, `to nobody`. */
+  private def givenTo(to: Iterable[String], title: String => String): String =
+    if to.isEmpty then "to nobody" else to.map(title).toVector.sorted.mkString("to ", " + ", "")
 
   /** A running time as `42s`, or `3:07` from a minute on. */
   private def elapsed(ms: Double): String =
@@ -249,14 +309,18 @@ object SessionsView:
             )
       }
 
-    /** A decision changes what is shared and what the ticked stretches cost, not the stretches themselves. */
-    private def afterDecision: Callback = loadShared >> price
-
-    /** One stretch decided: its card goes, from every ledger that listed it, and the ticked stretches are priced again.
+    /** Saves decisions one after another, then reads the session again: a decision changes the state of the
+      * stretches it gives away, what is shared, and what the ticked stretches cost.
       */
-    private def decided(key: BlockKey): Callback =
-      $.modState(st => st.copy(shared = st.shared.map(_.map((root, blocks) => root -> blocks.filterNot(_.key == key.text))))) >>
-        price
+    private def saveDecisions(calls: Vector[RpcCall => scala.concurrent.Future[Any]]): Callback =
+      $.props.flatMap { p =>
+        val all = calls.foldLeft(scala.concurrent.Future.unit)((done, call) => done.flatMap(_ => call(p.call).map(_ => ())))
+        $.modState(_.copy(busy = true)) >>
+          Callback.future(
+            all.map(_ => $.modState(_.copy(busy = false, deciding = None)) >> reloadCurrent)
+              .recover { case e => $.modState(_.copy(busy = false, error = Some(errorMessage(e)))) }
+          )
+      }
 
     /** Starts the existing summary run for the ticked stretches of a billing root that have no line yet. */
     private def writeSummaries(root: String): Callback =
@@ -421,38 +485,28 @@ object SessionsView:
       )
 
     private def decide(root: String)(key: BlockKey, allocation: Allocation): Callback =
-      $.props.flatMap(p =>
-        Callback.future(
-          rpc(p.call, BillingRpc.Decide(root, subthreads = true, key, allocation)).map(_ => decided(key))
-            .recover { case e => $.modState(_.copy(error = Some(errorMessage(e)))) }
-        )
-      )
+      decideRun(root, Vector(key), allocation)
+
+    /** The same decision for each of the stretches, in the ledger of `root`. */
+    private def decideRun(root: String, keys: Vector[BlockKey], allocation: Allocation): Callback =
+      saveDecisions(keys.map(key => call => rpc(call, BillingRpc.Decide(root, subthreads = true, key, allocation))))
 
     /** Gives every undecided shared stretch of the open session that has exactly one client thread to that thread. */
     private def settleSole: Callback =
       $.props.zip($.state).flatMap { (p, s) =>
         (s.screen.flatMap(sessionRoots), s.shared) match
           case (Some((_, period)), Some(shared)) =>
-            val roots = shared.collect { case (root, blocks) if blocks.exists(_.billableThreadIds.length == 1) => root }
-            def from(i: Int): Callback =
-              if i == roots.length then $.modState(_.copy(busy = false)) >> afterDecision
-              else
-                Callback.future(
-                  rpc(p.call, BillingRpc.SettleAll(roots(i), subthreads = true, Some(period)))
-                    .map(_ => from(i + 1))
-                    .recover { case e => $.modState(_.copy(busy = false, error = Some(errorMessage(e)))) }
-                )
-            $.modState(_.copy(busy = true)) >> from(0)
+            val roots = shared.collect {
+              case (root, blocks) if blocks.exists(b => b.decision == null && b.billableThreadIds.length == 1) => root
+            }
+            saveDecisions(roots.map(root => call => rpc(call, BillingRpc.SettleAll(root, subthreads = true, Some(period)))))
           case _                                => Callback.empty
       }
 
-    private def undecide(key: BlockKey): Callback =
-      $.props.flatMap(p =>
-        Callback.future(
-          rpc(p.call, BillingRpc.Undecide(key)).map(_ => afterDecision)
-            .recover { case e => $.modState(_.copy(error = Some(errorMessage(e)))) }
-        )
-      )
+    private def undecide(key: BlockKey): Callback = undecideRun(Vector(key))
+
+    private def undecideRun(keys: Vector[BlockKey]): Callback =
+      saveDecisions(keys.map(key => call => rpc(call, BillingRpc.Undecide(key))))
 
     private def send(root: String, billed: Boolean): Callback =
       $.props.zip($.state).flatMap { (p, s) =>
@@ -482,7 +536,17 @@ object SessionsView:
         case StretchState.Sent(_)         => "border-green-500 bg-green-200/70 dark:bg-green-500/30"
         case StretchState.Settled(_)      => "border-border bg-muted text-muted-foreground"
         case StretchState.InZohoByHand(_) => "border-amber-500 bg-amber-200/70 dark:bg-amber-500/30"
+        case StretchState.GivenAway(_)    => "border-dashed border-border bg-muted/40 text-muted-foreground"
       if ticked then base + " ring-2 ring-primary" else base
+
+    /** A shared-stretch strip's fill for a thread: striped while undecided, green for what it got, grey for none. */
+    private def sharedStyle(share: Share): js.Object & js.Dynamic =
+      share match
+        case Share.Undecided =>
+          js.Dynamic.literal("backgroundImage" -> "repeating-linear-gradient(45deg, rgb(245 158 11) 0 3px, transparent 3px 6px)")
+        case Share.All       => js.Dynamic.literal("backgroundColor" -> "rgb(34 197 94)")
+        case Share.Part      => js.Dynamic.literal("backgroundColor" -> "rgb(34 197 94 / 0.45)")
+        case Share.NoneOfIt  => js.Dynamic.literal("backgroundColor" -> "rgb(161 161 170 / 0.7)")
 
     /** One swatch drawn like a real mark, and what it means or does. */
     private def sample(
@@ -533,6 +597,18 @@ object SessionsView:
         sample("5m 22:28 · sent", StretchState.Sent(""), ticked = false, "Already in Zoho."),
         sample("5m 22:28 · settled", StretchState.Settled(""), ticked = false, "Marked done without billing."),
         sample("5m 22:28 · in Zoho by hand", StretchState.InZohoByHand(ZohoTrace.TimerLeftRunning(0L, "")), ticked = false, "Entered in Zoho yourself. Click to include it anyway."),
+        sample("5m 22:28 · to Other thread", StretchState.GivenAway(Set.empty), ticked = false, "Shared time you gave wholly to another thread, or to nobody. Nothing to bill here."),
+        <.div(
+          ^.key       := "shared-strip",
+          ^.className := "flex items-center gap-2 sm:col-span-2 lg:col-span-3",
+          <.div(^.className := "flex w-40 shrink-0 gap-1",
+            <.div(^.className := "h-5 w-[6px] rounded-sm border border-amber-500", ^.style := sharedStyle(Share.Undecided)),
+            <.div(^.className := "h-5 w-[6px] rounded-sm", ^.style := sharedStyle(Share.All)),
+            <.div(^.className := "h-5 w-[6px] rounded-sm", ^.style := sharedStyle(Share.Part)),
+            <.div(^.className := "h-5 w-[6px] rounded-sm", ^.style := sharedStyle(Share.NoneOfIt))
+          ),
+          <.span("A strip at a thread's right edge: time it shared with another thread. Striped: still to decide; green: this thread got it (paler: part of it); grey: another thread or nobody did. Click a strip to decide or change it.")
+        ),
         <.div(
           ^.className := "flex items-center gap-2",
           <.div(^.className := "h-5 w-40 shrink-0 rounded border border-dashed border-amber-500/70 bg-amber-500/5"),
@@ -566,7 +642,12 @@ object SessionsView:
       val tiny     = members.forall(_.durationMs < SessionView.TinyMs)
       // Time on a thread that does not bill is shown, never decided: hollow, and "not billable" in place of "unbilled".
       val hollow = !th.bills(members.head.window.threadId) && members.forall(_.state == StretchState.Unbilled)
-      def word(st: StretchState): String = if hollow then "not billable" else stateWord(st)
+      def word(st: StretchState): String =
+        if hollow then "not billable"
+        else
+          st match
+            case StretchState.GivenAway(to) => givenTo(to, th.title)
+            case other                      => stateWord(other)
       def look(st: StretchState): String =
         if hollow then "border-border/60 bg-background font-normal text-muted-foreground/60" else stateClass(st, ticked)
       val (cls, head, body) = pm.mark match
@@ -668,15 +749,17 @@ object SessionsView:
     private enum ColumnNeed(val headerClass: String, val words: String):
       case Settle   extends ColumnNeed("border-t-4 border-amber-500", "Has time already in Zoho by hand to settle.")
       case Decide   extends ColumnNeed("border-t-4 border-dashed border-amber-500", "Has a thread never marked as client work or not.")
+      case Share    extends ColumnNeed("border-t-4 border-dotted border-amber-500", "Has shared time still to decide.")
       case Bill     extends ColumnNeed("border-t-4 border-blue-500", "Has unbilled time.")
       case Nothing  extends ColumnNeed("border-t-4 border-transparent opacity-60", "Nothing left to review.")
 
     /** The most urgent need of the threads whose own strips are in one column. */
-    private def needOf(th: Threads, boxes: Vector[PlacedBox]): ColumnNeed =
+    private def needOf(th: Threads, boxes: Vector[PlacedBox], toDecide: Set[String]): ColumnNeed =
       val stretches = boxes.flatMap(_.own).flatMap(_.mark.members)
       val billing   = stretches.filter(m => th.bills(m.window.threadId)).map(_.state)
       if billing.exists { case StretchState.InZohoByHand(_) => true; case _ => false } then ColumnNeed.Settle
       else if boxes.exists(b => b.box.info.billing == Billing.Unmarked && b.own.nonEmpty) then ColumnNeed.Decide
+      else if boxes.exists(b => toDecide(b.box.info.id)) then ColumnNeed.Share
       else if billing.contains(StretchState.Unbilled) then ColumnNeed.Bill
       else ColumnNeed.Nothing
 
@@ -698,7 +781,9 @@ object SessionsView:
       val layout    = SessionGeometry.place(session, SessionView.forest(session, infos, stretches))
       // Every thread in column order, so any thread can be found by name without scrolling the diagram.
       val byColumn = layout.roots.flatMap(allBoxes).groupBy(_.column).toVector.sortBy(_._1)
-      val needs    = byColumn.map((column, boxes) => column -> needOf(th, boxes)).toMap
+      val runs     = sharedRuns(s.shared.getOrElse(Vector.empty))
+      val toDecide = runs.filter(_.toDecide).flatMap(_.threadIds).toSet
+      val needs    = byColumn.map((column, boxes) => column -> needOf(th, boxes, toDecide)).toMap
       def columnId(boxes: Vector[PlacedBox]): String = boxes.minBy(_.yTop).box.info.id
       val boxOf    = byColumn.flatMap(_._2).map(b => b.box.info.id -> b).toMap
       // A signal sits on the left edge of its thread's box; one whose thread has no box goes in a lane of the axis,
@@ -788,6 +873,42 @@ object SessionsView:
         ),
         layout.roots.flatMap(boxView(p, cols, _)).toVdomArray,
         layout.roots.flatMap(allMarks).map((pm, c, t) => markView(s, th, tz, pm, cols, c, t)).toVdomArray,
+        // Each shared stretch as a strip down the right edge of every thread in it that has a box here.
+        runs.filter(r => r.toDecide || r.blocks.forall(_.decision != null)).flatMap { run =>
+          run.threadIds.flatMap(boxOf.get).map { box =>
+            val t      = box.box.info.id
+            val share  = shareOf(run.blocks.head, t)
+            val top    = layout.yAt(run.start.toLong)
+            val bottom = math.max(layout.yAt(run.end.toLong), top + 4)
+            val others = run.threadIds.filterNot(_ == t).map(th.title).mkString(" + ")
+            val status = share match
+              case Share.Undecided => "who gets it? Click to decide."
+              case Share.All       => "this thread got it. Click to change."
+              case Share.Part      => "this thread got part of it. Click to change."
+              case Share.NoneOfIt  =>
+                givenTo(run.blocks.head.threadIds.filter(o => shareOf(run.blocks.head, o) != Share.NoneOfIt), th.title) +
+                  ". Click to change."
+            <.div(
+              ^.key       := s"shared-${run.keys.head}-$t",
+              ^.title     := s"${clock(run.start, tz)}–${clock(run.end, tz)} · ${hoursMinutes(run.durationMs)} shared with $others" +
+                (if run.blocks.length > 1 then s" (${run.blocks.length} stretches)" else "") + s" · $status",
+              ^.className := "absolute z-20 cursor-pointer rounded-sm hover:ring-2 hover:ring-primary " +
+                (if share == Share.Undecided then "border border-amber-500 " else "") +
+                (if s.deciding.exists(_.keys == run.keys) then "ring-2 ring-primary" else ""),
+              ^.style     := {
+                val st = sharedStyle(share)
+                st.updateDynamic("left")(cols.left(box.column) + cols.width(box.column) - 7)
+                st.updateDynamic("top")(top)
+                st.updateDynamic("width")(6)
+                st.updateDynamic("height")(bottom - top)
+                st
+              },
+              ^.onClick ==> ((e: ReactMouseEvent) =>
+                e.stopPropagationCB >> $.modState(_.copy(deciding = Some(Deciding(run.keys, e.clientX, e.clientY))))
+              )
+            ): VdomNode
+          }
+        }.toVdomArray,
         layout.quiet.zipWithIndex.map { (q, i) =>
           <.div(
             ^.key       := s"quiet-$i",
@@ -848,6 +969,8 @@ object SessionsView:
               case "sent"         => s"Sent to Zoho${on(first.state.submissionId)}"
               case "settled"      => s"Settled without billing${on(first.state.submissionId)}"
               case "leftOut"      => "Left out: in no send until put back"
+              case "givenAway"    =>
+                s"Given away: all of it is shared time decided ${givenTo(first.state.to.toOption.fold(Vector.empty[String])(_.toVector), th.title)}. Click the strip at its right edge to change that."
               case "inZohoByHand" =>
                 "In Zoho by hand: " + first.state.trace.toOption.fold("")(t => traceText(t, tz)) +
                   ". Tick it to include it anyway."
@@ -882,60 +1005,107 @@ object SessionsView:
         )
       }
 
-    /** How many shared stretches the panel lists open; more are folded under their count. */
-    private val SharedShownOpen = 10
-
-    /** The session's undecided shared stretches, whatever is ticked, each once, under the first client thread whose
-      * ledger holds it (a stretch of two client threads is in both ledgers, and either accepts its decision).
+    /** How many shared stretches of the session are still to decide, and the one click that gives each with a single
+      * client thread to it. The stretches themselves are the striped strips on the timeline.
       */
-    private def sharedPanel(p: Props, s: State, tz: String, th: Threads): VdomNode =
-      val each  = s.shared.getOrElse(Vector.empty).flatMap((root, blocks) => blocks.map(root -> _)).distinctBy(_._2.key)
-      val roots = each.groupMap(_._1)(_._2).toVector.sortBy((root, _) => each.indexWhere(_._1 == root))
-      val sole  = each.count(_._2.billableThreadIds.length == 1)
-      if each.isEmpty then EmptyVdom
+    private def sharedLine(s: State): VdomNode =
+      val runs  = sharedRuns(s.shared.getOrElse(Vector.empty)).filter(_.toDecide)
+      val sole  = runs.flatMap(_.blocks).count(b => b.decision == null && b.billableThreadIds.length == 1)
+      if runs.isEmpty then EmptyVdom
       else
         <.div(
-          ^.className := cardClass + " space-y-2",
-          <.div(
-            ^.className := "flex flex-wrap items-center gap-2",
-            <.span(^.className := "font-medium", s"${counted(each.length, "shared stretch")} to decide"),
-            <.span(
-              ^.className := "text-xs text-muted-foreground",
-              "Time when two or more threads were open at once, at least one of them client work. Each needs a decision before it can be sent."
-            ),
-            <.button(
-              ^.`type`    := "button",
-              ^.className := buttonClass,
-              ^.title     := "Each stretch that has exactly one client thread in it goes wholly to that thread. The others stay for you to decide.",
-              ^.disabled  := s.busy,
-              ^.onClick --> settleSole,
-              s"Give each to its only client thread ($sole)"
-            ).when(sole > 0)
+          ^.className := "flex flex-wrap items-center gap-2 text-xs",
+          <.span(
+            ^.className := "font-medium",
+            s"${counted(runs.length, "shared stretch")} still to decide: the striped strips at the right edge of the threads. Click one to decide it."
           ),
-          <.details(
-            ^.open := each.length <= SharedShownOpen,
-            <.summary(^.className := "cursor-pointer select-none text-xs text-muted-foreground", "The stretches"),
-            roots.map { (root, blocks) =>
-              <.div(
-                ^.key       := root,
-                ^.className := "space-y-1",
-                <.div(^.className := "text-xs text-muted-foreground", s"In the ledger of ${th.title(root)}"),
-                blocks.map { b =>
-                  BlockCard.Component.withKey(b.key)(BlockCard.Props(
-                    b,
-                    tz,
-                    b.titles.toMap,
-                    busy = s.busy,
-                    key = BlockKey.parse(b.key).getOrElse(BlockKey(b.day, b.start.toLong, b.end.toLong, b.threadIds.toSet)),
-                    decide = decide(root),
-                    undecide = undecide,
-                    openThread = p.openThread
-                  )): VdomNode
-                }.toVdomArray
-              )
-            }.toVdomArray
-          )
+          <.button(
+            ^.`type`    := "button",
+            ^.className := buttonClass,
+            ^.title     := "Each stretch that has exactly one client thread in it goes wholly to that thread. The others stay for you to decide.",
+            ^.disabled  := s.busy,
+            ^.onClick --> settleSole,
+            s"Give each to its only client thread ($sole)"
+          ).when(sole > 0)
         )
+
+    /** The decision panel of the shared stretches asked for, next to where it was asked for: one stretch with every
+      * way to decide it, or a run of them decided together, each still open to its own decision below.
+      */
+    private def decisionPanel(p: Props, s: State, tz: String, th: Threads): VdomNode =
+      val runs = sharedRuns(s.shared.getOrElse(Vector.empty))
+      s.deciding.flatMap(d => runs.find(_.keys == d.keys).orElse(runs.find(_.keys.exists(d.keys.contains))).map(d -> _))
+        .fold(EmptyVdom: VdomNode) { (d, run) =>
+          val width = 440.0
+          val left  = math.max(8.0, math.min(d.x + 12, dom.window.innerWidth - width - 8))
+          val top   = math.max(8.0, math.min(d.y - 20, dom.window.innerHeight * 0.3))
+          def card(b: Block): VdomNode =
+            BlockCard.Component.withKey(b.key)(BlockCard.Props(
+              b,
+              tz,
+              b.titles.toMap,
+              busy = s.busy,
+              key = keyOf(b),
+              decide = decide(run.root),
+              undecide = undecide,
+              openThread = p.openThread,
+              foldDecided = false
+            ))
+          val keys  = run.blocks.map(keyOf)
+          <.div(
+            ^.className := "fixed z-[80] max-h-[70vh] space-y-2 overflow-auto rounded-md border border-border bg-card p-3 text-xs shadow-lg",
+            ^.style     := js.Dynamic.literal("left" -> left, "top" -> top, "width" -> width),
+            <.div(
+              ^.className := "flex items-center gap-2",
+              <.span(
+                ^.className := "font-medium",
+                s"Shared ${clock(run.start, tz)}–${clock(run.end, tz)} · ${hoursMinutes(run.durationMs)}"
+              ),
+              <.span(^.className := "text-muted-foreground", s"${run.blocks.length} stretches back to back").when(run.blocks.length > 1),
+              <.button(
+                ^.`type`    := "button",
+                ^.className := "ml-auto rounded px-1 text-muted-foreground hover:bg-muted",
+                ^.onClick --> $.modState(_.copy(deciding = None)),
+                "✕"
+              )
+            ),
+            if run.blocks.length == 1 then card(run.blocks.head)
+            else
+              TagMod(
+                <.div(
+                  ^.className := "flex flex-wrap items-center gap-2",
+                  run.threadIds.map(t =>
+                    <.button(
+                      ^.key       := t,
+                      ^.`type`    := "button",
+                      ^.className := buttonClass,
+                      ^.disabled  := s.busy,
+                      ^.onClick --> decideRun(run.root, keys, Allocation.WholeTo(t)),
+                      s"All to ${th.title(t).take(30)}"
+                    )
+                  ).toVdomArray,
+                  <.button(
+                    ^.`type`    := "button",
+                    ^.className := buttonClass,
+                    ^.disabled  := s.busy,
+                    ^.onClick --> decideRun(run.root, keys, Allocation.Nobody),
+                    "Nobody gets it"
+                  ),
+                  <.button(
+                    ^.`type`    := "button",
+                    ^.className := buttonClass,
+                    ^.disabled  := s.busy,
+                    ^.onClick --> undecideRun(run.blocks.filter(_.decision != null).map(keyOf)),
+                    "Undo decisions"
+                  ).when(run.blocks.exists(_.decision != null))
+                ),
+                <.details(
+                  <.summary(^.className := "cursor-pointer select-none text-muted-foreground", "Each stretch on its own, with what went on in it"),
+                  <.div(^.className := "space-y-1", run.blocks.map(card).toVdomArray)
+                )
+              )
+          )
+        }
 
     private def sendPanel(p: Props, s: State, tz: String, screen: SessionScreenJs, th: Threads): VdomNode =
       val byRoot = keysByRoot(screen, s.draft)
@@ -1117,6 +1287,7 @@ object SessionsView:
                 ).when(count > 0)
               },
               s.hover.map(keys => detailCard(s, tz, screen, th, keys)),
+              decisionPanel(p, s, tz, th),
               // Above the timeline header's opaque strip, which reaches 40px above the header to hide what scrolls under it.
               <.div(
                 ^.className := "relative z-50 space-y-1",
@@ -1129,7 +1300,7 @@ object SessionsView:
                     s"$ticked of ${tickable.length} tickable stretches ticked"
                   ).when(tickable.nonEmpty)
                 },
-                sharedPanel(p, s, tz, th),
+                sharedLine(s),
                 sendPanel(p, s, tz, screen, th)
               ),
               <.div(^.className := "rounded-md border border-border p-2", timeline(p, s, tz, screen, th))
@@ -1139,7 +1310,7 @@ object SessionsView:
 
   val Component = ScalaComponent
     .builder[Props]("SessionsView")
-    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, shared = None, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Map.empty, written = 0, saving = None, since = Map.empty, now = js.Date.now(), picking = None, projects = None, leaving = Set.empty, folding = Map.empty))
+    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, shared = None, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Map.empty, written = 0, saving = None, since = Map.empty, now = js.Date.now(), picking = None, projects = None, leaving = Set.empty, folding = Map.empty, deciding = None))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))
     .componentDidMount(x => x.backend.load(None) >> x.backend.startClock)

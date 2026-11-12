@@ -113,7 +113,9 @@ object BlockCard:
     key: BlockKey,
     decide: (BlockKey, Allocation) => Callback,
     undecide: BlockKey => Callback,
-    openThread: String => Callback)
+    openThread: String => Callback,
+    /** A decided stretch folds to its header, its controls a click away; off, they show at once. */
+    foldDecided: Boolean = true)
 
   final case class State(splitting: Boolean, portions: Map[String, String], error: Option[String])
 
@@ -259,7 +261,7 @@ object BlockCard:
         ).when(s.splitting)
       )
       // A decided stretch folds to its header; opening it brings the controls back, to change the decision.
-      if b.decision != null then
+      if b.decision != null && p.foldDecided then
         <.details(
           ^.className := "rounded-md border border-border px-3 py-2",
           <.summary(^.className := "cursor-pointer select-none", header),

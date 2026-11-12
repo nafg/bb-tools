@@ -74,7 +74,7 @@ class LedgerTest extends munit.FunSuite:
 
   test("a sent span cuts a stretch into pieces with one state each; undoing it brings one unbilled stretch back"):
     val sent   = Seq(CoveredBy("s1", billed = true, Span("a", at(10), at(20))))
-    val pieces = Ledger.of(Seq(win("a", 0, 50)), sent, Coverage.empty, Map.empty)
+    val pieces = Ledger.of(Seq(win("a", 0, 50)), sent, Coverage.empty, GivenAway.none, Map.empty)
     assertEquals(
       pieces.map(l => (l.window.start, l.window.end, l.state)),
       Vector(
@@ -84,7 +84,7 @@ class LedgerTest extends munit.FunSuite:
       )
     )
     assertEquals(
-      Ledger.of(Seq(win("a", 0, 50)), Nil, Coverage.empty, Map.empty).map(_.state),
+      Ledger.of(Seq(win("a", 0, 50)), Nil, Coverage.empty, GivenAway.none, Map.empty).map(_.state),
       Vector(StretchState.Unbilled)
     )
 
@@ -95,6 +95,7 @@ class LedgerTest extends munit.FunSuite:
       Seq(win("a", 0, 10), win("a", 10, 20), win("a", 20, 30), win("a", 30, 40)),
       settled,
       Coverage.of(Vector(Span("a", at(10), at(20)))),
+      GivenAway.none,
       Map("a" -> Seq(trace))
     )
     assertEquals(
@@ -108,11 +109,33 @@ class LedgerTest extends munit.FunSuite:
 
   test("a strike-out cuts a stretch like a submission does, so totals do not depend on how windows were cut"):
     val struck = Coverage.of(Vector(Span("a", at(10), at(20))))
-    val whole  = Ledger.of(Seq(win("a", 0, 50)), Nil, struck, Map.empty)
-    val pieces = Ledger.of(Seq(win("a", 0, 10), win("a", 10, 20), win("a", 20, 50)), Nil, struck, Map.empty)
+    val whole  = Ledger.of(Seq(win("a", 0, 50)), Nil, struck, GivenAway.none, Map.empty)
+    val pieces = Ledger.of(Seq(win("a", 0, 10), win("a", 10, 20), win("a", 20, 50)), Nil, struck, GivenAway.none, Map.empty)
     assertEquals(whole.map(_.state), Vector(StretchState.Unbilled, StretchState.LeftOut, StretchState.Unbilled))
     assertEquals(Ledger.totals(whole), Ledger.totals(pieces))
     assertEquals(Ledger.totals(whole).leftOutMs, 10 * 60_000L)
+
+  test("a stretch all of whose time went to other threads is given away, not unbilled; one that kept some is unbilled"):
+    // a's 0-10 is shared with b in two stretches, both given to b; a's 10-20 is shared with b and split.
+    val decisions = Map(
+      BlockKey(Day, at(0), at(4), Set("a", "b"))   -> Allocation.WholeTo("b"),
+      BlockKey(Day, at(4), at(10), Set("a", "b"))  -> Allocation.Nobody,
+      BlockKey(Day, at(10), at(20), Set("a", "b")) -> Allocation.Portions(Map("a" -> 60_000L, "b" -> 60_000L))
+    )
+    val pieces    = Ledger.of(
+      Seq(win("a", 0, 10), win("a", 10, 20), win("a", 20, 30)),
+      Nil,
+      Coverage.empty,
+      GivenAway.of(decisions),
+      Map.empty
+    )
+    assertEquals(
+      pieces.map(_.state),
+      Vector(StretchState.GivenAway(Set("b")), StretchState.Unbilled, StretchState.Unbilled)
+    )
+    assert(!pieces.head.state.draftable)
+    assertEquals(Ledger.totals(pieces).givenAwayMs, 10 * 60_000L)
+    assertEquals(Ledger.totals(pieces).unbilledMs, 20 * 60_000L)
 
 class WindowsTest extends munit.FunSuite:
   private val Day                    = "2026-10-19"

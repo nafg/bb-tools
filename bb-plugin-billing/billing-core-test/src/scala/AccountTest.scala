@@ -16,7 +16,7 @@ class AccountTest extends FunSuite:
       LedgerStretch(win(240_000, 300_000), StretchState.Sent("s1")),
       LedgerStretch(win(300_000, 420_000), StretchState.Settled("s2"))
     ))
-    assertEquals(t, Totals(180_000, 120_000, 60_000, 60_000, 120_000))
+    assertEquals(t, Totals(180_000, 120_000, 60_000, 60_000, 120_000, 0))
     assertEquals(t.recordedMs, 420_000L)
 
   test("an account survives the wire and knows its standing"):
@@ -29,7 +29,7 @@ class AccountTest extends FunSuite:
       1000L,
       Some(2000L),
       Resolved(Billability.Billable(target), Some(MappingSource.Project)),
-      Totals(60_000, 0, 0, 120_000, 0),
+      Totals(60_000, 0, 0, 120_000, 0, 0),
       1,
       Some(1000L),
       Some(3000L)
@@ -74,8 +74,8 @@ class AccountTest extends FunSuite:
     )
 
   test("totals in words"):
-    assertEquals(Words.totals(Totals(0, 0, 0, 0, 0), 0), "nothing unbilled, nothing sent before")
+    assertEquals(Words.totals(Totals(0, 0, 0, 0, 0, 0), 0), "nothing unbilled, nothing sent before")
     assertEquals(
-      Words.totals(Totals(2_820_000, 720_000, 60_000, 8_700_000, 0), 2),
+      Words.totals(Totals(2_820_000, 720_000, 60_000, 8_700_000, 0, 0), 2),
       "47m unbilled (12m in Zoho by hand), 2h 25m sent or settled in 2 submissions, 1m left out"
     )

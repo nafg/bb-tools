@@ -395,9 +395,13 @@ final class Service(
     ))
 
   /** What the store says about every thread's recording: the submissions' spans and the struck-out stretches, as the
-    * ledger cuts with them, and how many submissions touch each thread.
+    * ledger cuts with them, the time decisions gave to other threads, and how many submissions touch each thread.
     */
-  private final case class Covered(covering: Vector[CoveredBy], struck: Coverage, submissionsOf: String => Int)
+  private final case class Covered(
+    covering: Vector[CoveredBy],
+    struck: Coverage,
+    givenAway: GivenAway,
+    submissionsOf: String => Int)
 
   private def ledgerOf(): Covered =
     val struck = Coverage.of(store.excludedWindows().toVector.flatMap { key =>
@@ -410,6 +414,7 @@ final class Service(
     Covered(
       subs.flatMap(sub => sub.spans.map(sp => CoveredBy(sub.id, sub.billed, sp))),
       struck,
+      GivenAway.of(store.decisions()),
       t => counts.getOrElse(t, 0)
     )
 
@@ -421,6 +426,7 @@ final class Service(
       split.filter(_.threadId == threadId).map(i => Window(i.threadId, i.day, i.start, i.end)),
       led.covering,
       led.struck,
+      led.givenAway,
       Map.empty
     ))
 
@@ -547,7 +553,7 @@ final class Service(
             // bills (their conversations are read once and kept for a couple of minutes).
             msgs0     <- Future.traverse(billing)(t => conversationOf(t).map(t -> _)).map(_.toMap)
             traces0   <- timerTraces(everyone, cal, all, billing, windows.map(_.day).distinct.sorted, msgs0)
-            unbilledMs = Ledger.of(windows, led0.covering, led0.struck, traces0)
+            unbilledMs = Ledger.of(windows, led0.covering, led0.struck, led0.givenAway, traces0)
                            .filter(l => l.state == StretchState.Unbilled && billable(l.window.threadId))
                            .flatMap(l => Sessions.containing(sessions, l.window).map(_.start -> l.window.durationMs))
                            .groupMapReduce(_._1)(_._2)(_ + _)
@@ -637,7 +643,7 @@ final class Service(
           WindowMaxMs
         )
       )
-      val stretches = Ledger.of(inSession, led.covering, led.struck, traces)
+      val stretches = Ledger.of(inSession, led.covering, led.struck, led.givenAway, traces)
       val titles    = ctx.summaries.map((t, sm) => t -> sm.title)
       val cached    = summaries.cached(stretches.map(_.window))
       val lines     = stretches.map { st =>
@@ -741,10 +747,13 @@ final class Service(
                                            cal.nextDayStart
                                          )
                                        ).withDefaultValue(Vector.empty)
-                           stretches = Ledger.of(windows, led.covering, led.struck, traces)
-                           // Shared stretches that touch anything a draft could hold, for the overlay and the cards.
-                           draftable = stretches.filter(_.state.draftable).map(_.window)
-                           shared    = Submissions.plan(coveredIds, draftable, withSplit, store.decisions(), billability)
+                           stretches = Ledger.of(windows, led.covering, led.struck, led.givenAway, traces)
+                           // Shared stretches that touch anything a draft could hold or a decision gave away, so every
+                           // decision on the thread's open time can be seen and changed.
+                           open      = stretches.filter(l =>
+                                         l.state.draftable || l.state.isInstanceOf[StretchState.GivenAway]
+                                       ).map(_.window)
+                           shared    = Submissions.plan(coveredIds, open, withSplit, store.decisions(), billability)
                            blocks    = shared.undecided.map(_ -> None) ++ shared.decided.map((b, a) => b -> Some(a))
                            others    = blocks.map(_._1).flatMap(_.threadIds).distinct.filterNot(coveredIds.contains)
                            otherSummaries     <- Future.traverse(others)(t => threadSummary(t).map(t -> _)).map(_.toMap)
@@ -1055,14 +1064,20 @@ final class Service(
 
   def undecide(key: BlockKey): Unit = store.deleteDecision(key)
 
+  /** The shared stretches of the ledger reaching into `period`, decided or not. */
+  private def sharedWithin(l: LedgerResult, period: Option[Period]): Vector[(OverlapBlock, Option[Allocation])] =
+    l.blocks.filter((b, _) => period.forall(p => b.end > p.start && b.start < p.end))
+
   /** The undecided shared stretches of the ledger reaching into `period`. */
   private def undecidedWithin(l: LedgerResult, period: Option[Period]): Vector[OverlapBlock] =
-    l.blocks.collect { case (b, None) if period.forall(p => b.end > p.start && b.start < p.end) => b }
+    sharedWithin(l, period).collect { case (b, None) => b }
 
-  /** The ledger of each of `roots` with its subthreads, and its undecided shared stretches reaching into `period`. The
-    * stretches come from each root's own ledger, so a decision on one is one that ledger accepts.
+  /** The ledger of each of `roots` with its subthreads, and its shared stretches reaching into `period`, decided or
+    * not. The stretches come from each root's own ledger, so a decision on one is one that ledger accepts.
     */
-  def sessionShared(roots: Vector[String], period: Period): Future[Either[String, Vector[(LedgerResult, Vector[OverlapBlock])]]] =
+  def sessionShared(
+    roots: Vector[String],
+    period: Period): Future[Either[String, Vector[(LedgerResult, Vector[(OverlapBlock, Option[Allocation])])]]] =
     val distinct = roots.distinct
     for
       (cal, _) <- calendar()
@@ -1073,8 +1088,10 @@ final class Service(
                       .map(_ => ())
                   )
       ledgers  <- Future.traverse(distinct)(root => ledger(root, subthreads = true))
-    yield ledgers.foldLeft(Right(Vector.empty): Either[String, Vector[(LedgerResult, Vector[OverlapBlock])]]) { (acc, l) =>
-      for done <- acc; one <- l yield done :+ (one -> undecidedWithin(one, Some(period)))
+    yield ledgers.foldLeft(
+      Right(Vector.empty): Either[String, Vector[(LedgerResult, Vector[(OverlapBlock, Option[Allocation])])]]
+    ) { (acc, l) =>
+      for done <- acc; one <- l yield done :+ (one -> sharedWithin(one, Some(period)))
     }
 
   /** Every undecided shared stretch of the ledger with exactly one client thread goes to that thread: of those reaching

@@ -231,6 +231,7 @@ object Json:
       case StretchState.InZohoByHand(t) => js.Dynamic.literal("kind" -> "inZohoByHand", "trace" -> trace(t))
       case StretchState.Sent(id)        => js.Dynamic.literal("kind" -> "sent", "submissionId" -> id)
       case StretchState.Settled(id)     => js.Dynamic.literal("kind" -> "settled", "submissionId" -> id)
+      case StretchState.GivenAway(to)   => js.Dynamic.literal("kind" -> "givenAway", "to" -> to.toSeq.sorted.toJSArray)
 
   def stretchLine(ln: LedgerLine, titles: Map[String, String]): js.Dynamic =
     val w = ln.stretch.window
@@ -271,12 +272,12 @@ object Json:
     )
 
   /** Each root's undecided shared stretches, as the page decides them: in the root's own ledger. */
-  def sessionShared(roots: Vector[(LedgerResult, Vector[OverlapBlock])]): js.Dynamic =
+  def sessionShared(roots: Vector[(LedgerResult, Vector[(OverlapBlock, Option[Allocation])])]): js.Dynamic =
     js.Dynamic.literal(
       "roots" -> roots.map((l, blocks) =>
         js.Dynamic.literal(
           "root"   -> l.root.threadId,
-          "blocks" -> blocks.map(b => block(b, None, billableIn(l), l.titles, l.blockThreads)).toJSArray
+          "blocks" -> blocks.map((b, a) => block(b, a, billableIn(l), l.titles, l.blockThreads)).toJSArray
         )
       ).toJSArray
     )

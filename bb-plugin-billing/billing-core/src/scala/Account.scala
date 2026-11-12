@@ -1,11 +1,18 @@
 package billingcore
 
 /** A thread's recording by state, as the ledger shows it and as every list counts it. `unbilledMs` is everything no
-  * submission covers and no strike-out leaves out; `inZohoByHandMs` is the part of it a Zoho timer in the thread
-  * already logged, which only a ledger (with the thread's conversation in hand) can tell apart.
+  * submission covers, no strike-out leaves out and no decision gives to other threads; `inZohoByHandMs` is the part of
+  * it a Zoho timer in the thread already logged, which only a ledger (with the thread's conversation in hand) can tell
+  * apart. `givenAwayMs` is the time shared-stretch decisions gave wholly to other threads or to nobody.
   */
-final case class Totals(unbilledMs: Long, inZohoByHandMs: Long, leftOutMs: Long, sentMs: Long, settledMs: Long):
-  def recordedMs: Long      = unbilledMs + leftOutMs + sentMs + settledMs
+final case class Totals(
+  unbilledMs: Long,
+  inZohoByHandMs: Long,
+  leftOutMs: Long,
+  sentMs: Long,
+  settledMs: Long,
+  givenAwayMs: Long):
+  def recordedMs: Long      = unbilledMs + leftOutMs + sentMs + settledMs + givenAwayMs
   def coveredMs: Long       = sentMs + settledMs
   def billedBefore: Boolean = coveredMs > 0
 
@@ -15,18 +22,19 @@ final case class Totals(unbilledMs: Long, inZohoByHandMs: Long, leftOutMs: Long,
       "inZohoByHandMs" -> Wire.Num(inZohoByHandMs.toDouble),
       "leftOutMs"      -> Wire.Num(leftOutMs.toDouble),
       "sentMs"         -> Wire.Num(sentMs.toDouble),
-      "settledMs"      -> Wire.Num(settledMs.toDouble)
+      "settledMs"      -> Wire.Num(settledMs.toDouble),
+      "givenAwayMs"    -> Wire.Num(givenAwayMs.toDouble)
     )
 
 object Totals:
-  val zero: Totals = Totals(0, 0, 0, 0, 0)
+  val zero: Totals = Totals(0, 0, 0, 0, 0, 0)
 
   def decode(value: Wire): Option[Totals] =
     def ms(name: String) = value.field(name).flatMap(_.asNum).map(_.toLong)
     for
       unbilled <- ms("unbilledMs"); inZoho <- ms("inZohoByHandMs"); leftOut <- ms("leftOutMs")
-      sent     <- ms("sentMs"); settled    <- ms("settledMs")
-    yield Totals(unbilled, inZoho, leftOut, sent, settled)
+      sent     <- ms("sentMs"); settled    <- ms("settledMs"); givenAway <- ms("givenAwayMs")
+    yield Totals(unbilled, inZoho, leftOut, sent, settled, givenAway)
 
 /** One thread's account with billing: where it bills, what is recorded in each state, and what was sent before. The one
   * answer every list, the ledger, the CLI and the agent render.
@@ -208,7 +216,8 @@ object Words:
       else
         s"${hm(t.coveredMs)} sent or settled in $submissions ${if submissions == 1 then "submission" else "submissions"}"
     val leftOut  = if t.leftOutMs > 0 then s", ${hm(t.leftOutMs)} left out" else ""
-    s"$unbilled, $before$leftOut"
+    val toOthers = if t.givenAwayMs > 0 then s", ${hm(t.givenAwayMs)} given to other threads" else ""
+    s"$unbilled, $before$leftOut$toOthers"
 
   /** When the work was recorded and when the thread was archived: `recorded Sep 15 – Oct 7 · archived Oct 7`. `day`
     * writes an instant as a short date.

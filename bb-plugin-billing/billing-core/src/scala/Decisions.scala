@@ -53,6 +53,30 @@ object Allocation:
 
 final case class Decision(key: BlockKey, allocation: Allocation)
 
+/** A span of one thread's recording that a shared-stretch decision gave to `to` (nobody when empty). */
+final case class GivenSpan(span: Span, to: Set[String])
+
+/** The time each thread gave up in decided shared stretches: every thread of a decided stretch that gets none of it. */
+final case class GivenAway(spans: Vector[GivenSpan]):
+  private val coverage = Coverage.of(spans.map(_.span))
+
+  /** True when the whole of `[start, end)` of `threadId` was given away. */
+  def coversAll(threadId: String, start: Long, end: Long): Boolean = coverage.coversAll(threadId, start, end)
+
+  /** Every thread that got some of `[start, end)` of `threadId`. */
+  def recipients(threadId: String, start: Long, end: Long): Set[String] =
+    spans.iterator.filter(g => g.span.threadId == threadId && g.span.start < end && g.span.end > start)
+      .flatMap(_.to).toSet
+
+object GivenAway:
+  val none: GivenAway = GivenAway(Vector.empty)
+
+  def of(decisions: Map[BlockKey, Allocation]): GivenAway =
+    GivenAway(decisions.toVector.flatMap { (k, a) =>
+      val to = a.share(k.end - k.start).filter(_._2 > 0).keySet
+      (k.threadIds -- to).toVector.map(t => GivenSpan(Span(t, k.start, k.end), to))
+    })
+
 /** Whether a thread's time is billable, and to what. */
 enum Billability:
   case Billable(target: ZohoTarget)

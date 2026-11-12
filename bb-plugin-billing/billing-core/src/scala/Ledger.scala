@@ -21,11 +21,16 @@ enum StretchState:
   /** Covered by a submission that settled it without billing. */
   case Settled(submissionId: String)
 
+  /** Nothing covers it, but all of it lies in shared stretches decided against its thread: `to` got the time (empty
+    * when nobody did), so none of it is this thread's to bill.
+    */
+  case GivenAway(to: Set[String])
+
   /** True when a draft may include this stretch. */
   def draftable: Boolean =
     this match
-      case Unbilled | InZohoByHand(_)     => true
-      case LeftOut | Sent(_) | Settled(_) => false
+      case Unbilled | InZohoByHand(_)                    => true
+      case LeftOut | Sent(_) | Settled(_) | GivenAway(_) => false
 
   /** True when "everything unbilled" takes it without being asked. */
   def unbilledByDefault: Boolean = this == Unbilled
@@ -39,13 +44,15 @@ final case class LedgerStretch(window: Window, state: StretchState):
 
 object Ledger:
   /** The ledger's stretches for the given stretches of recording: each is cut where a submission's coverage or a
-    * strike-out begins or ends, so every piece has exactly one state whatever the windows were cut into. `traces` is
-    * the Zoho timer evidence per thread.
+    * strike-out begins or ends, so every piece has exactly one state whatever the windows were cut into. A piece is
+    * not cut where time given away begins or ends: it is given away only when all of it is. `traces` is the Zoho timer
+    * evidence per thread.
     */
   def of(
     windows: Seq[Window],
     covering: Seq[CoveredBy],
     struck: Coverage,
+    givenAway: GivenAway,
     traces: Map[String, Seq[ZohoTrace]]): Vector[LedgerStretch] =
     windows.toVector.flatMap { w =>
       val spans = covering.filter(c => c.span.threadId == w.threadId && c.span.start < w.end && c.span.end > w.start)
@@ -59,6 +66,7 @@ object Ledger:
           case Some(c)             => StretchState.Settled(c.submissionId)
           case None                =>
             if struck.coversAll(w.threadId, s, e) then StretchState.LeftOut
+            else if givenAway.coversAll(w.threadId, s, e) then StretchState.GivenAway(givenAway.recipients(w.threadId, s, e))
             else
               traces.getOrElse(w.threadId, Nil).find(_.touches(s, e)) match
                 case Some(t) => StretchState.InZohoByHand(t)
@@ -78,6 +86,7 @@ object Ledger:
         case StretchState.LeftOut         => t.copy(leftOutMs = t.leftOutMs + ms)
         case StretchState.Sent(_)         => t.copy(sentMs = t.sentMs + ms)
         case StretchState.Settled(_)      => t.copy(settledMs = t.settledMs + ms)
+        case StretchState.GivenAway(_)    => t.copy(givenAwayMs = t.givenAwayMs + ms)
     }
 
   /** The keys of every stretch "everything unbilled" takes: the default draft. */
