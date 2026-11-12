@@ -322,6 +322,12 @@ object Json:
       ).toJSArray
     )
 
+  /** A plan as the send confirmation shows it: the stretches without their conversations, which the form does not show
+    * and which take a long thread's request past bb's 64 KiB limit on a request for input.
+    */
+  def sendConfirmation(p: PlanResult): js.Dynamic =
+    planResult(p.copy(lines = p.lines.map(_.copy(messages = Vector.empty))), Vector.empty)
+
   def planResult(p: PlanResult, blockers: Vector[String]): js.Dynamic =
     val coveredIds = p.covered.map(_.threadId).toSet
     js.Dynamic.literal(

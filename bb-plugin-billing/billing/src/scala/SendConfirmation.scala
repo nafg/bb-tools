@@ -42,7 +42,7 @@ object SendConfirmation:
             "threadId"     -> threadId,
             "rendererId"   -> RendererId,
             "title"        -> s"Send ${p.root.title} to Zoho Books",
-            "payload"      -> Json.planResult(p, Vector.empty),
+            "payload"      -> Json.sendConfirmation(p),
             "presentation" -> js.Dynamic.literal(
               "label" -> js.Dynamic.literal(
                 "pending"   -> "Waiting for you to confirm sending time to Zoho Books",
