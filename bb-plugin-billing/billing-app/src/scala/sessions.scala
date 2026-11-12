@@ -153,6 +153,10 @@ object SessionsView:
   private val ClockPx = 60
   /** Lanes left of the clock times for the dots of threads with no box to sit on: one lane per signal kind. */
   private val LanesPx = 32
+  /** A shared-stretch strip's width, over the right edge of the marks; and its least height. */
+  private val StripPx    = 9
+  private val StripMinPx = 14
+
   /** A signal dot's diameter. */
   private val DotPx   = 5
 
@@ -635,10 +639,17 @@ object SessionsView:
       pm: PlacedMark,
       cols: Columns,
       column: Int,
-      title: Option[String]): VdomNode =
+      title: Option[String],
+      runs: Vector[SharedRun]): VdomNode =
       val folded   = cols.folded(column)
       val members  = pm.mark.members
       val keys     = members.map(_.window.key)
+      // The shared stretches still to decide that this mark's time is in: a tag on the mark opens the first of them.
+      val toDecide = runs.filter(r =>
+        r.toDecide && members.exists(m =>
+          r.threadIds.contains(m.window.threadId) && r.start < m.window.end && r.end > m.window.start
+        )
+      )
       val canTick  = th.bills(members.head.window.threadId) && members.forall(m => draftableKind(m.state))
       val ticked   = canTick && keys.forall(s.draft)
       val canOut   = th.bills(members.head.window.threadId) &&
@@ -689,6 +700,17 @@ object SessionsView:
         <.div(
           ^.className := (if hollow then "flex items-center gap-1 whitespace-nowrap" else "flex items-center gap-1 font-medium whitespace-nowrap"),
           if canTick then <.span(if ticked then "☑" else "☐") else EmptyVdom,
+          toDecide.headOption.map(run =>
+            <.button(
+              ^.`type`    := "button",
+              ^.title     := s"Part of this time was shared with other threads and is still to decide (${counted(toDecide.length, "shared stretch")}). Click to decide.",
+              ^.className := "shrink-0 rounded bg-amber-500 px-1 text-[9px] font-semibold leading-[13px] text-white hover:bg-amber-600",
+              ^.onClick ==> ((e: ReactMouseEvent) =>
+                e.stopPropagationCB >> $.modState(_.copy(deciding = Some(Deciding(run.keys, e.clientX, e.clientY))))
+              ),
+              if toDecide.length == 1 then "shared: decide" else s"${toDecide.length} shared: decide"
+            )
+          ),
           <.span(^.className := "truncate", head)
         ).when(!folded),
         <.div(^.className := (if hollow then "break-words text-muted-foreground/60" else "break-words text-muted-foreground"), body.take(160)).when(!folded && body.nonEmpty && height > 44),
@@ -879,14 +901,16 @@ object SessionsView:
           "width"  -> width
         ),
         layout.roots.flatMap(boxView(p, cols, _)).toVdomArray,
-        layout.roots.flatMap(allMarks).map((pm, c, t) => markView(s, th, tz, pm, cols, c, t)).toVdomArray,
+        layout.roots.flatMap(allMarks).map((pm, c, t) => markView(s, th, tz, pm, cols, c, t, runs)).toVdomArray,
         // Each shared stretch as a strip down the right edge of every thread in it that has a box here.
         runs.filter(r => r.toDecide || r.blocks.forall(_.decision != null)).flatMap { run =>
           run.threadIds.flatMap(boxOf.get).map { box =>
             val t      = box.box.info.id
             val share  = shareOf(run.blocks.head, t)
-            val top    = layout.yAt(run.start.toLong)
-            val bottom = math.max(layout.yAt(run.end.toLong), top + 4)
+            // A strip is never shorter than StripMinPx, centred on its time, so a stretch of seconds can be found.
+            val (top, bottom) =
+              val (a, b) = (layout.yAt(run.start.toLong), layout.yAt(run.end.toLong))
+              if b - a >= StripMinPx then (a, b) else ((a + b - StripMinPx) / 2, (a + b + StripMinPx) / 2)
             val others = run.threadIds.filterNot(_ == t).map(th.title).mkString(" + ")
             val status = share match
               case Share.Undecided => "who gets it? Click to decide."
@@ -904,9 +928,9 @@ object SessionsView:
                 (if s.deciding.exists(_.keys == run.keys) then "ring-2 ring-primary" else ""),
               ^.style     := {
                 val st = sharedStyle(share)
-                st.updateDynamic("left")(cols.left(box.column) + cols.width(box.column) - 7)
+                st.updateDynamic("left")(cols.left(box.column) + cols.width(box.column) - StripPx - 1)
                 st.updateDynamic("top")(top)
-                st.updateDynamic("width")(6)
+                st.updateDynamic("width")(StripPx)
                 st.updateDynamic("height")(bottom - top)
                 st
               },
