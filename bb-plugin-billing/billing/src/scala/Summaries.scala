@@ -8,7 +8,13 @@ import billingcore.ToolCall
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.js
+import scala.scalajs.js.annotation.JSImport
 import scala.util.Try
+
+@js.native
+@JSImport("node:fs", JSImport.Namespace)
+private object NodeFs extends js.Object:
+  def existsSync(path: String): Boolean = js.native
 
 /** Who said or did a thing in a thread. */
 enum Speaker:
@@ -228,7 +234,7 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
       selection().flatMap {
         case None      => Future.failed(new RuntimeException("bb offers no model to write summaries with."))
         case Some(sel) =>
-          runWorker(projectId, sel, prompt(pending, daysPending, known, clock)).map { output =>
+          runWorker(projectId, sel, prompt(pending, daysPending, known, clock, _)).map { output =>
             val (lines, notes) = parse(output, pending.size, daysPending.map(_.day))
             if pending.nonEmpty && lines.isEmpty then
               throw new RuntimeException(s"The model's answer had no summaries in it: ${output.take(200)}")
@@ -244,11 +250,13 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
           }
       }
 
+  /** `readsProject`: the worker runs in a checkout of the client's project and may read it. */
   private def prompt(
     pending: Vector[Stretch],
     days: Vector[DayToNote],
     known: Map[String, String],
-    clock: Long => String): String =
+    clock: Long => String,
+    readsProject: Boolean): String =
     val index       = pending.zipWithIndex.map((s, i) => s.window.key -> (i + 1)).toMap
     val items       = pending.zipWithIndex.map { (s, i) =>
       val inside = s.messages.filter(m => m.at >= s.window.start && m.at < s.window.end)
@@ -290,7 +298,11 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
            |
            |${dayItems.mkString("\n\n")}
            |""".stripMargin
-    s"""You are writing the lines of a client's invoice. This is the client's project: when the conversation leaves unclear what a piece of work means for the client or their users, you may read its files (read, grep, glob) to find out, briefly. Do not change, create or delete any file, and do not run commands that change anything.
+    val access =
+      if readsProject then
+        "This is the client's project: when the conversation leaves unclear what a piece of work means for the client or their users, you may read its files (read, grep, glob) to find out, briefly. Do not change, create or delete any file, and do not run commands that change anything."
+      else "Write from the conversations below alone: do not use any tool."
+    s"""You are writing the lines of a client's invoice. $access
        |
        |$stretchPart
        |$dayPart
@@ -336,25 +348,41 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
       }
       .recover { case _ => None }
 
-  /** Run the prompt in a hidden thread in a worktree of its own on the project's default branch, so that reading the
-    * project cannot touch any checkout of the user's, and return its output. On every path the thread is stopped and
-    * deleted and its worktree removed (see [[removeWorktree]]).
+  /** Where a worker runs: in a worktree of its own of the project's checkout, on the project's default branch, so
+    * reading the project cannot touch any checkout of the user's; or, when the checkout has no commit to make one from
+    * (a directory that is not a repository, or a repository with no commits), in the Personal project's workspace,
+    * without the project's files.
     */
-  private def runWorker(projectId: String, sel: ModelSelection, text: String): Future[String] =
+  private enum Workplace:
+    case Worktree(projectId: String, hostId: String)
+    case Personal(projectId: String)
+
+    def readsProject: Boolean = this.isInstanceOf[Worktree]
+
+  /** Run the prompt, given whether the worker can read the project, in a hidden thread (see [[Workplace]]) and return
+    * its output. On every path the thread is stopped and deleted, and a worktree made for it removed (see
+    * [[removeWorktree]]); the Personal workspace is shared, and stays.
+    */
+  private def runWorker(projectId: String, sel: ModelSelection, text: Boolean => String): Future[String] =
     val threads                          = bb.sdk.threads.asInstanceOf[js.Dynamic]
-    def spawn(mode: Option[String], hostId: String): Future[js.Dynamic] =
+    def spawn(mode: Option[String], place: Workplace): Future[js.Dynamic] =
       val sources = js.Dynamic.literal("providerId" -> "explicit", "model" -> "explicit")
-      val args    = js.Dynamic.literal(
-        "projectId"             -> projectId,
-        "environment"           -> js.Dynamic.literal(
-          "type"      -> "host",
-          "hostId"    -> hostId,
-          "workspace" -> js.Dynamic.literal(
-            "type"       -> "managed-worktree",
-            "baseBranch" -> js.Dynamic.literal("kind" -> "default")
+      val (project, environment) = place match
+        case Workplace.Worktree(id, hostId) =>
+          id -> js.Dynamic.literal(
+            "type"      -> "host",
+            "hostId"    -> hostId,
+            "workspace" -> js.Dynamic.literal(
+              "type"       -> "managed-worktree",
+              "baseBranch" -> js.Dynamic.literal("kind" -> "default")
+            )
           )
-        ),
-        "prompt"                -> text,
+        case Workplace.Personal(id)         =>
+          id -> js.Dynamic.literal("type" -> "host", "workspace" -> js.Dynamic.literal("type" -> "personal"))
+      val args    = js.Dynamic.literal(
+        "projectId"             -> project,
+        "environment"           -> environment,
+        "prompt"                -> text(place.readsProject),
         "title"                 -> "Billing summaries",
         "visibility"            -> "hidden",
         "providerId"            -> sel.providerId,
@@ -370,7 +398,7 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
         sources.updateDynamic("permissionMode")("explicit")
       }
       threads.spawn(args).asInstanceOf[js.Promise[js.Dynamic]].toFuture
-    def dispose(id: String): Future[Unit] =
+    def dispose(id: String, place: Workplace): Future[Unit] =
       for
         _           <- threads.stop(js.Dynamic.literal("threadId" -> id)).asInstanceOf[js.Promise[js.Dynamic]].toFuture
                          .map(_ => ()).recover { case _ => () }
@@ -382,12 +410,12 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
                            threads.archive(js.Dynamic.literal("threadId" -> id)).asInstanceOf[js.Promise[js.Dynamic]]
                              .toFuture.map(_ => ()).recover { case _ => () }
                          }
-        _           <- environment.fold(Future.unit)(removeWorktree)
+        _           <- environment.filter(_ => place.readsProject).fold(Future.unit)(removeWorktree)
       yield ()
     for
       mode   <- permissionMode(sel.providerId)
-      host   <- hostOf(projectId)
-      worker <- spawn(mode, host)
+      place  <- workplaceOf(projectId)
+      worker <- spawn(mode, place)
       id = str(worker.id)
       output <- (for
                   done <- threads.applyDynamic("wait")(js.Dynamic.literal(
@@ -411,20 +439,38 @@ final class Summaries(bb: BbApi, settings: BbSettingsHandle, store: Store)(using
                   out  <-
                     threads.output(js.Dynamic.literal("threadId" -> id)).asInstanceOf[js.Promise[js.Dynamic]].toFuture
                 yield Option(str(out.output)).getOrElse(""))
-                  .transformWith(result => dispose(id).flatMap(_ => Future.fromTry(result)))
+                  .transformWith(result => dispose(id, place).flatMap(_ => Future.fromTry(result)))
     yield output
 
-  /** The machine the project's default source is on, where its worktrees are made. */
-  private def hostOf(projectId: String): Future[String] =
-    bb.sdk.projects.asInstanceOf[js.Dynamic].get(js.Dynamic.literal("projectId" -> projectId))
-      .asInstanceOf[js.Promise[js.Dynamic]].toFuture.flatMap { p =>
+  /** Where the project's summaries are written: a worktree on the machine of the project's default source, unless that
+    * source is a checkout on this machine with no commit, which bb cannot make a worktree from.
+    */
+  private def workplaceOf(projectId: String): Future[Workplace] =
+    val projects = bb.sdk.projects.asInstanceOf[js.Dynamic]
+    projects.get(js.Dynamic.literal("projectId" -> projectId)).asInstanceOf[js.Promise[js.Dynamic]].toFuture.flatMap { p =>
       val project = if isDefined(p.project) then p.project else p
       val sources = Option(project.sources).filter(isDefined).fold(Vector.empty[js.Dynamic])(
         _.asInstanceOf[js.Array[js.Dynamic]].toVector
       )
-      sources.find(s => bool(s.isDefault)).orElse(sources.headOption).map(s => str(s.hostId)).filter(_.nonEmpty) match
-        case Some(host) => Future.successful(host)
-        case None       => Future.failed(new RuntimeException(s"project $projectId has no source on a machine to run summaries in"))
+      sources.find(s => bool(s.isDefault)).orElse(sources.headOption) match
+        case None         => Future.failed(new RuntimeException(s"project $projectId has no source on a machine to run summaries in"))
+        case Some(source) =>
+          val path = str(source.path)
+          val noCommit =
+            if path.isEmpty || !NodeFs.existsSync(path) then Future.successful(false)
+            else Git("-C", path, "rev-parse", "--verify", "--quiet", "HEAD^{commit}").map(_ => false).recover { case _ => true }
+          noCommit.flatMap {
+            case false => Future.successful(Workplace.Worktree(projectId, str(source.hostId)))
+            case true  => personalProject().map(Workplace.Personal.apply)
+          }
+    }
+
+  /** The id of bb's Personal project, the only one whose threads may use the personal workspace. */
+  private def personalProject(): Future[String] =
+    bb.sdk.projects.list(js.Dynamic.literal("includePersonal" -> true)).toFuture.flatMap { all =>
+      all.toVector.find(p => str(p.kind) == "personal").map(p => str(p.id)) match
+        case Some(id) => Future.successful(id)
+        case None     => Future.failed(new RuntimeException("bb has no Personal project to write summaries in"))
     }
 
   /** How long the removal of a worker's worktree is waited for before its branch is deleted. */
