@@ -91,6 +91,13 @@ object SessionsView:
           case _ => runs :+ SharedRun(root, Vector(b))
       }
 
+  /** The shared stretches still to decide that hold some of a thread's window. */
+  private def undecidedIn(runs: Vector[SharedRun], w: Window): Vector[SharedRun] =
+    runs.filter(r => r.toDecide && r.threadIds.contains(w.threadId) && r.start < w.end && r.end > w.start)
+
+  /** The fill of a stretch waiting on a shared-stretch decision: the strips' stripes, faint. */
+  private val WaitingHatch = "repeating-linear-gradient(45deg, rgb(245 158 11 / 0.18) 0 6px, transparent 6px 12px)"
+
   /** How much of a shared stretch a thread got from its decision: all, part, none, or not decided yet. */
   private enum Share:
     case All, Part, NoneOfIt, Undecided
@@ -610,6 +617,16 @@ object SessionsView:
         sample("5m 22:28 · in Zoho by hand", StretchState.InZohoByHand(ZohoTrace.TimerLeftRunning(0L, "")), ticked = false, "Entered in Zoho yourself. Click to include it anyway."),
         sample("5m 22:28 · to Other thread", StretchState.GivenAway(Set.empty), ticked = false, "Shared time you gave wholly to another thread, or to nobody. Nothing to bill here."),
         <.div(
+          ^.key       := "waiting",
+          ^.className := "flex items-center gap-2",
+          <.div(
+            ^.className := "w-40 shrink-0 rounded border border-dashed border-amber-500 bg-background px-1 py-0.5 text-[10px] font-medium leading-tight",
+            ^.style     := js.Dynamic.literal("backgroundImage" -> WaitingHatch),
+            "shared: decide 5m 22:28"
+          ),
+          <.span("Some of its time was shared with another thread and who gets it is not decided. Click it to decide; then it can be ticked.")
+        ),
+        <.div(
           ^.key       := "shared-strip",
           ^.className := "flex items-center gap-2 sm:col-span-2 lg:col-span-3",
           <.div(^.className := "flex w-40 shrink-0 gap-1",
@@ -645,13 +662,12 @@ object SessionsView:
       val members  = pm.mark.members
       val keys     = members.map(_.window.key)
       // The shared stretches still to decide that this mark's time is in: a tag on the mark opens the first of them.
-      val toDecide = runs.filter(r =>
-        r.toDecide && members.exists(m =>
-          r.threadIds.contains(m.window.threadId) && r.start < m.window.end && r.end > m.window.start
-        )
-      )
-      val canTick  = th.bills(members.head.window.threadId) && members.forall(m => draftableKind(m.state))
-      val ticked   = canTick && keys.forall(s.draft)
+      val toDecide = members.flatMap(m => undecidedIn(runs, m.window)).distinct
+      val open     = th.bills(members.head.window.threadId) && members.forall(m => draftableKind(m.state))
+      // Time that cannot be sent until a shared stretch is decided is not offered for ticking: a click decides instead.
+      val waiting  = open && toDecide.nonEmpty
+      val canTick  = open && !waiting
+      val ticked   = open && keys.forall(s.draft)
       val canOut   = th.bills(members.head.window.threadId) &&
         (members.forall(m => draftableKind(m.state)) || members.forall(_.state == StretchState.LeftOut))
       val isOut    = members.forall(_.state == StretchState.LeftOut)
@@ -667,7 +683,9 @@ object SessionsView:
             case StretchState.GivenAway(to) => givenTo(to, th.title)
             case other                      => stateWord(other)
       def look(st: StretchState): String =
-        if hollow then "border-border/60 bg-background font-normal text-muted-foreground/60" else stateClass(st, ticked)
+        if hollow then "border-border/60 bg-background font-normal text-muted-foreground/60"
+        else if waiting then "border-dashed border-amber-500 bg-background" + (if ticked then " ring-2 ring-primary" else "")
+        else stateClass(st, ticked)
       val (cls, head, body) = pm.mark match
         case Mark.One(st)  =>
           (
@@ -688,14 +706,24 @@ object SessionsView:
         ^.onMouseEnter ==> ((e: ReactMouseEvent) => startHover(keys, e)),
         ^.onMouseLeave --> setHover(None),
         ^.className := s"absolute overflow-hidden rounded border px-1 text-[10px] leading-tight $cls " +
-          (if canTick then "cursor-pointer " else "") + (if keys.exists(s.leaving) then "animate-pulse opacity-60" else ""),
-        ^.style     := js.Dynamic.literal(
-          "left"   -> (cols.left(column) + 2),
-          "top"    -> pm.yTop,
-          "width"  -> (cols.width(column) - 8),
-          "height" -> height
+          (if canTick || waiting then "cursor-pointer " else "") + (if keys.exists(s.leaving) then "animate-pulse opacity-60" else ""),
+        ^.style     := {
+          val st = js.Dynamic.literal(
+            "left"   -> (cols.left(column) + 2),
+            "top"    -> pm.yTop,
+            "width"  -> (cols.width(column) - 8),
+            "height" -> height
+          )
+          if waiting then st.updateDynamic("backgroundImage")(WaitingHatch)
+          st
+        },
+        ^.onClick ==> ((e: ReactMouseEvent) =>
+          if s.busy then Callback.empty
+          else if waiting then
+            $.modState(_.copy(deciding = Some(Deciding(toDecide.head.keys, e.clientX, e.clientY))))
+          else if canTick then tick(keys)
+          else Callback.empty
         ),
-        ^.onClick --> (if canTick && !s.busy then tick(keys) else Callback.empty),
         title.map(_ => <.div(^.className := "h-[14px]")),
         <.div(
           ^.className := (if hollow then "flex items-center gap-1 whitespace-nowrap" else "flex items-center gap-1 font-medium whitespace-nowrap"),
@@ -1399,7 +1427,11 @@ object SessionsView:
               <.div(
                 ^.className := "relative z-50 space-y-1",
                 {
-                  val tickable = screen.stretches.toVector.filter(l => th.bills(l.threadId) && draftableKind(stateOf(l.state)))
+                  val runs     = sharedRuns(s.shared.getOrElse(Vector.empty))
+                  val tickable = screen.stretches.toVector.filter(l =>
+                    th.bills(l.threadId) && draftableKind(stateOf(l.state)) &&
+                      undecidedIn(runs, Window(l.threadId, l.day, l.start.toLong, l.end.toLong)).isEmpty
+                  )
                   val ticked   = tickable.count(l => s.draft(l.key))
                   <.div(
                     ^.className := "flex items-center gap-2 text-xs text-muted-foreground",
