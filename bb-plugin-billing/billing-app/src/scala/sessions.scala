@@ -696,16 +696,22 @@ object SessionsView:
       val height   = math.max(pm.yBottom - pm.yTop - 2, 14.0)
       val parts    = members.length
       val tiny     = members.forall(_.durationMs < SessionView.TinyMs)
+      val threadId = members.head.window.threadId
+      val unbilled = members.forall(_.state == StretchState.Unbilled)
+      // Time on a thread never marked as client work or not waits on that choice: a click opens it.
+      val unmarked = th.billing(threadId) == Billing.Unmarked && unbilled
       // Time on a thread that does not bill is shown, never decided: hollow, and "not billable" in place of "unbilled".
-      val hollow = !th.bills(members.head.window.threadId) && members.forall(_.state == StretchState.Unbilled)
+      val hollow   = !th.bills(threadId) && !unmarked && unbilled
       def word(st: StretchState): String =
-        if hollow then "not billable"
+        if unmarked then "not marked as client work or not"
+        else if hollow then "not billable"
         else
           st match
             case StretchState.GivenAway(to) => givenTo(to, th.title)
             case other                      => stateWord(other)
       def look(st: StretchState): String =
-        if hollow then "border-border/60 bg-background font-normal text-muted-foreground/60"
+        if unmarked then "border-dashed border-amber-500 bg-background text-amber-700 dark:text-amber-400"
+        else if hollow then "border-border/60 bg-background font-normal text-muted-foreground/60"
         else if waiting then "border-dashed border-amber-500 bg-background" + (if ticked then " ring-2 ring-primary" else "")
         else stateClass(st, ticked)
       val (cls, head, body) = pm.mark match
@@ -728,7 +734,7 @@ object SessionsView:
         ^.onMouseEnter ==> ((e: ReactMouseEvent) => startHover(keys, e)),
         ^.onMouseLeave --> setHover(None),
         ^.className := s"absolute overflow-hidden rounded border px-1 text-[10px] leading-tight $cls " +
-          (if canTick || waiting then "cursor-pointer " else "") + (if keys.exists(s.leaving) then "animate-pulse opacity-60" else ""),
+          (if canTick || waiting || unmarked then "cursor-pointer " else "") + (if keys.exists(s.leaving) then "animate-pulse opacity-60" else ""),
         ^.style     := {
           val st = js.Dynamic.literal(
             "left"   -> (cols.left(column) + 2),
@@ -744,6 +750,7 @@ object SessionsView:
           else if waiting then
             $.modState(_.copy(deciding = Some(Deciding(toDecide.head.keys, e.clientX, e.clientY))))
           else if canTick then tick(keys)
+          else if unmarked then $.state.flatMap(st => if st.picking.contains(threadId) then Callback.empty else togglePicker(threadId))
           else Callback.empty
         ),
         title.map(_ => <.div(^.className := "h-[14px]")),
@@ -887,7 +894,9 @@ object SessionsView:
           ^.style     := js.Dynamic.literal("top" -> -40, "height" -> 40)
         ),
         byColumn.map { (column, boxes) =>
-          val names  = boxes.sortBy(_.yTop).map(_.box.info)
+          // A thread never marked as client work or not is named first: it is what the column waits on.
+          val names  = boxes.sortBy(b => (if b.box.info.billing == Billing.Unmarked && b.own.nonEmpty then 0 else 1, b.yTop))
+            .map(_.box.info)
           val need   = needs(column)
           val folded = cols.folded(column)
           val fold   = <.button(
@@ -909,7 +918,6 @@ object SessionsView:
             ),
             if folded then fold
             else names.take(3).zipWithIndex.map { (t, i) =>
-              val label = if i == 2 && names.length > 3 then s"${t.title} +${names.length - 3} more" else t.title
               <.div(
                 ^.key       := t.id,
                 ^.className := "flex items-center gap-1",
@@ -919,8 +927,9 @@ object SessionsView:
                   ^.`type`    := "button",
                   ^.className := "min-w-0 flex-1 truncate text-left font-semibold hover:underline",
                   ^.onClick --> p.openThread(t.id),
-                  label
+                  t.title
                 ),
+                <.span(^.className := "shrink-0 text-muted-foreground", s"+${names.length - 3}").when(i == 2 && names.length > 3),
                 billingChip(th, t.id, t.billing)
               )
             }.toVdomArray
