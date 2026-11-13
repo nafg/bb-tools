@@ -158,8 +158,10 @@ object SessionsView:
 
   /** One name's row in a column header: as tall as the bordered billing tag beside the name. */
   private val HeaderRowPx = 16
-  /** Height of the sticky row naming every column, three names deep; a box's own sticky name stops just under it. */
-  private val HeaderPx = 2 + 4 + 3 * HeaderRowPx + 4
+  /** Height of the sticky row naming every thread of every column, for a column of `names` threads at most; a box's
+    * own sticky name stops just under it.
+    */
+  private def headerPx(names: Int): Int = 2 + 4 + math.max(1, names) * HeaderRowPx + 4
   /** The axis's clock times, right-aligned. */
   private val ClockPx = 60
   /** Lanes left of the clock times for the dots of threads with no box to sit on: one lane per signal kind. */
@@ -799,7 +801,7 @@ object SessionsView:
           case Billing.Unmarked      => "unset"
       )
 
-    private def boxView(pr: Props, cols: Columns, p: PlacedBox): Vector[VdomNode] =
+    private def boxView(pr: Props, cols: Columns, headerHeight: Int, p: PlacedBox): Vector[VdomNode] =
       val id      = p.box.info.id
       val billing = p.box.info.billing
       val cls     = billing match
@@ -814,7 +816,7 @@ object SessionsView:
           case Billing.NotClientWork => " (not client work)"
           case Billing.Unmarked      => " (never marked as client work or not)")),
         ^.className := "sticky top-0 z-30 block truncate rounded-sm bg-background px-1 text-left text-[10px] font-semibold leading-[14px] hover:underline",
-        ^.style     := js.Dynamic.literal("width" -> (cols.width(p.column) - 10), "top" -> HeaderPx),
+        ^.style     := js.Dynamic.literal("width" -> (cols.width(p.column) - 10), "top" -> headerHeight),
         ^.onClick --> pr.openThread(id),
         p.box.info.title
       )
@@ -830,7 +832,7 @@ object SessionsView:
         ),
         header
       )
-      Vector[VdomNode](frame) ++ p.children.flatMap(boxView(pr, cols, _))
+      Vector[VdomNode](frame) ++ p.children.flatMap(boxView(pr, cols, headerHeight, _))
 
     /** What a column's threads still need, most urgent first. */
     private enum ColumnNeed(val headerClass: String, val words: String):
@@ -885,9 +887,11 @@ object SessionsView:
         ClockPx + (if inLanes.nonEmpty then LanesPx else 0)
       )
       val width    = cols.left(layout.columns) + 20
+      // Every thread of every column is named in the header: as tall as the column with the most threads.
+      val headerHeight = headerPx(byColumn.map(_._2.length).maxOption.getOrElse(1))
       val header   = <.div(
         ^.className := "sticky top-0 z-40 border-b border-border bg-background",
-        ^.style     := js.Dynamic.literal("height" -> HeaderPx, "width" -> width),
+        ^.style     := js.Dynamic.literal("height" -> headerHeight, "width" -> width),
         // The screen has padding above this row; an opaque strip fills it so nothing scrolls into view above the names.
         <.div(
           ^.className := "absolute inset-x-0 bg-background",
@@ -914,10 +918,10 @@ object SessionsView:
               "left"   -> (cols.left(column) + 4),
               "top"    -> 2,
               "width"  -> (cols.width(column) - 10),
-              "height" -> (HeaderPx - 4)
+              "height" -> (headerHeight - 4)
             ),
             if folded then fold
-            else names.take(3).zipWithIndex.map { (t, i) =>
+            else names.zipWithIndex.map { (t, i) =>
               <.div(
                 ^.key       := t.id,
                 ^.className := "flex items-center gap-1",
@@ -929,7 +933,6 @@ object SessionsView:
                   ^.onClick --> p.openThread(t.id),
                   t.title
                 ),
-                <.span(^.className := "shrink-0 text-muted-foreground", s"+${names.length - 3}").when(i == 2 && names.length > 3),
                 billingChip(th, t.id, t.billing)
               )
             }.toVdomArray
@@ -940,7 +943,7 @@ object SessionsView:
           (column, a) =>
             <.div(
               ^.className := "absolute z-50 w-72 rounded border border-border bg-background p-1 text-xs shadow-md",
-              ^.style     := js.Dynamic.literal("left" -> cols.left(column), "top" -> HeaderPx),
+              ^.style     := js.Dynamic.literal("left" -> cols.left(column), "top" -> headerHeight),
               s.projects.fold[VdomNode](<.div(^.className := "p-1 text-muted-foreground", "Loading…"))(projects =>
                 BillToSelect.Component.withKey(a.threadId)(BillToSelect.forAccount(
                   a,
@@ -961,7 +964,7 @@ object SessionsView:
           "height" -> (layout.height + 40),
           "width"  -> width
         ),
-        layout.roots.flatMap(boxView(p, cols, _)).toVdomArray,
+        layout.roots.flatMap(boxView(p, cols, headerHeight, _)).toVdomArray,
         layout.roots.flatMap(allMarks).map((pm, c, t) => markView(s, th, tz, pm, cols, c, t, runs)).toVdomArray,
         // Each shared stretch as a strip down the right edge of every thread in it that has a box here.
         runs.filter(r => r.toDecide || r.blocks.forall(_.decision != null)).flatMap { run =>
