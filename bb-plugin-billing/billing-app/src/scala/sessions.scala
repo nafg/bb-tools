@@ -811,6 +811,7 @@ object SessionsView:
       )
       val frame   = <.div(
         ^.key       := s"box-${p.box.info.id}",
+        VdomAttr("data-thread-box") := p.box.info.id,
         ^.className := s"absolute rounded border $cls",
         ^.style     := js.Dynamic.literal(
           "left"   -> cols.left(p.column),
@@ -1087,6 +1088,39 @@ object SessionsView:
     /** How many shared stretches of the session are still to decide, and the one click that gives each with a single
       * client thread to it. The stretches themselves are the striped strips on the timeline.
       */
+    /** Scrolls the thread's box into view and opens its bill-to picker. */
+    private def jumpTo(id: String): Callback =
+      Callback(
+        Option(dom.document.querySelector(s"""[data-thread-box="$id"]""")).foreach(
+          _.asInstanceOf[js.Dynamic].scrollIntoView(js.Dynamic.literal("block" -> "center", "inline" -> "center"))
+        )
+      ) >> $.state.flatMap(s => if s.picking.contains(id) then Callback.empty else togglePicker(id))
+
+    /** The session's threads never marked as client work or not, by name: their time can be neither billed nor left
+      * aside until they are. A click goes to the thread and opens where it bills.
+      */
+    private def unmarkedLine(s: State, screen: SessionScreenJs, th: Threads): VdomNode =
+      val ids = screen.stretches.toVector.map(_.threadId).distinct.filter(th.billing(_) == Billing.Unmarked)
+      if ids.isEmpty then EmptyVdom
+      else
+        <.div(
+          ^.className := "flex flex-wrap items-center gap-2 text-xs",
+          <.span(
+            ^.className := "font-medium",
+            s"${counted(ids.length, "thread")} never marked as client work or not, so nothing of their time can be billed or set aside yet:"
+          ),
+          ids.map(id =>
+            <.button(
+              ^.key       := id,
+              ^.`type`    := "button",
+              ^.className := "max-w-[20rem] truncate rounded border border-dashed border-amber-500/70 px-1.5 py-0.5 text-amber-700 hover:bg-amber-500/10 dark:text-amber-400",
+              ^.title     := s"${th.title(id)}: go to it and choose where it bills",
+              ^.onClick --> jumpTo(id),
+              th.title(id)
+            )
+          ).toVdomArray
+        )
+
     private def sharedLine(s: State): VdomNode =
       val runs  = sharedRuns(s.shared.getOrElse(Vector.empty)).filter(_.toDecide)
       val sole  = runs.flatMap(_.blocks).count(b => b.decision == null && b.billableThreadIds.length == 1)
@@ -1460,6 +1494,7 @@ object SessionsView:
                     s"$ticked of ${tickable.length} tickable stretches ticked"
                   ).when(tickable.nonEmpty)
                 },
+                unmarkedLine(s, screen, th),
                 sharedLine(s),
                 sentCard(s, tz),
                 sendPanel(p, s, tz, screen, th)
