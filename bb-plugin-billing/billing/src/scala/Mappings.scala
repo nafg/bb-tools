@@ -2,7 +2,7 @@ package billing
 
 import bbplugin.Dyn.str
 import bbplugin.BbApi
-import billingcore.{Billability, Mapping, MappingEntry, ProjectRule, Resolved, ZohoTarget}
+import billingcore.{Billability, Change, Mapping, MappingEntry, ProjectRule, Resolved, ZohoTarget}
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.js
@@ -11,7 +11,7 @@ import scala.scalajs.js.JSConverters.*
 /** The `billing` metadata namespace on threads: `{ zoho: { projectId, projectName, taskId, taskName, customerId,
   * customerName } }`, `{ zoho: null }` for an explicitly unbillable thread, or no `zoho` key to inherit.
   */
-final class Mappings(bb: BbApi)(using ExecutionContext):
+final class Mappings(bb: BbApi, changes: ChangeFeed)(using ExecutionContext):
   private val Digits = """\d+""".r
 
   /** A namespace's `zoho` entry. A malformed value counts as absent and is reported, never silently trusted. */
@@ -108,19 +108,19 @@ final class Mappings(bb: BbApi)(using ExecutionContext):
         "set"      -> js.Dynamic.literal("zoho" -> Json.targetJs(target))
       ))
       .toFuture
-      .map(_ => ())
+      .map(_ => changes(Change.BillsTo))
 
   def markUnbillable(threadId: String): Future[Unit] =
     bb.sdk.threads
       .updatePluginMetadata(js.Dynamic.literal("threadId" -> threadId, "set" -> js.Dynamic.literal("zoho" -> null)))
       .toFuture
-      .map(_ => ())
+      .map(_ => changes(Change.BillsTo))
 
   def clear(threadId: String): Future[Unit] =
     bb.sdk.threads
       .updatePluginMetadata(js.Dynamic.literal("threadId" -> threadId, "remove" -> js.Array("zoho")))
       .toFuture
-      .map(_ => ())
+      .map(_ => changes(Change.BillsTo))
 
 /** `ancestry` holds each requested thread's ancestors, parent first. */
 final case class Resolution(

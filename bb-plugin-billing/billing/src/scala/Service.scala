@@ -142,8 +142,10 @@ final class Service(
   projectMappings: ProjectMappings,
   zoho: Zoho,
   summaries: Summaries,
-  conversation: Conversation
+  conversation: Conversation,
+  changes: ChangeFeed
 )(using ExecutionContext):
+  changes.keep(dropAffected)
   private val cache = mutable.Map.empty[String, ThreadSummary]
 
   /** A thread's conversation is read from bb's timeline once and kept while nothing new can be in it: until the thread
@@ -689,7 +691,88 @@ final class Service(
       .recover { case _ => Vector.empty }
 
   /** The ledger of `root` and, when asked, of the subthreads that bill to the same place. */
+  /** A ledger kept between requests: its result and the recording and subthreads it was computed from, and, once it is
+    * computed, what it read. One still being computed (`inputs` empty) is dropped by any change, since it may have read
+    * the store before it.
+    */
+  private final case class KeptLedger(
+    sources: LedgerSources,
+    result: Future[Either[String, LedgerResult]],
+    inputs: Option[Inputs])
+
+  /** What a ledger reads from outside this plugin's own store, which announces no changes: the recording, read from
+    * `from` on, and the root's subthreads.
+    */
+  private final case class LedgerSources(from: Long, recording: Vector[Interval], subthreads: Vector[String]):
+    /** True when nothing the ledger reading `inputs` used has moved since `earlier`. */
+    def sameFor(inputs: Inputs, earlier: LedgerSources): Boolean =
+      def of(r: Vector[Interval]) = r.filter(i => inputs.threadIds(i.threadId))
+      subthreads == earlier.subthreads && of(recording) == of(earlier.recording)
+
+  private val keptLedgers = mutable.Map.empty[(String, Boolean), KeptLedger]
+
+  /** Drops every kept ledger the changes touch. */
+  private def dropAffected(batch: Vector[Change]): Unit =
+    keptLedgers.filterInPlace((_, k) => k.inputs.exists(i => !i.affectedByAny(batch)))
+
+  /** What a ledger read: its threads, those it shares stretches with, and the Zoho project it bills to. */
+  private def inputsOf(l: LedgerResult): Inputs =
+    Inputs(
+      (l.root.threadId +: (l.coveredIds ++ l.leftOut.map(_._1.threadId) ++ l.blocks.flatMap(_._1.threadIds))).toSet,
+      l.target.map(_.projectId).toSet
+    )
+
+  /** The recording from `from` on and the root's subthreads, as a ledger would read them now. */
+  private def ledgerSources(root: String, subthreads: Boolean, from: Long): Future[Either[String, LedgerSources]] =
+    for
+      (cal, _) <- calendar()
+      subs     <- if subthreads then descendants(root) else Future.successful(Vector.empty)
+      read     <- recordedIntervals(from, cal.nextDayStart(js.Date.now().toLong))
+    yield read.map(LedgerSources(from, _, subs.sorted))
+
+  /** Where a ledger of `root` reads the recording from: the day before its oldest covered thread began. */
+  private def ledgerFrom(l: LedgerResult): Long =
+    l.calendar.dayStart(l.covered.map(_.createdAt - 24 * 3600_000L).minOption.getOrElse(0L))
+
+  /** The thread's ledger: the one kept, while no change has touched what it read and its recording and subthreads are
+    * as they were, else computed again and kept. A kept one also lets Zoho be read again behind it, so entries made in
+    * Zoho by hand are noticed (see [[zohoEntries]]).
+    */
   def ledger(root: String, subthreads: Boolean): Future[Either[String, LedgerResult]] =
+    val key = (root, subthreads)
+    keptLedgers.get(key) match
+      case Some(k @ KeptLedger(_, result, Some(inputs))) =>
+        result.value.flatMap(_.toOption).flatMap(_.toOption) match
+          case Some(l) =>
+            ledgerSources(root, subthreads, k.sources.from).flatMap {
+              case Right(now) if now.sameFor(inputs, k.sources) =>
+                val _ = handEntered(l.target, l.stretches.map(_.stretch.window.day).distinct)
+                result
+              case _                                            => computeAndKeep(key)
+            }
+          case None    => computeAndKeep(key)
+      case Some(computing)                               => computing.result
+      case None                                          => computeAndKeep(key)
+
+  private def computeAndKeep(key: (String, Boolean)): Future[Either[String, LedgerResult]] =
+    val (root, subthreads) = key
+    // The sources are read before the ledger, so a kept ledger is never newer than what it is checked against.
+    val computed = computeLedger(root, subthreads).flatMap {
+      case Left(e)  => Future.successful((Left(e), None))
+      case Right(l) => ledgerSources(root, subthreads, ledgerFrom(l)).map(s => (Right(l), s.toOption))
+    }
+    val result   = computed.map(_._1)
+    val entry    = KeptLedger(LedgerSources(0L, Vector.empty, Vector.empty), result, None)
+    keptLedgers.update(key, entry)
+    computed.onComplete { done =>
+      if keptLedgers.get(key).exists(_ eq entry) then
+        done.toOption match
+          case Some((Right(l), Some(sources))) => keptLedgers.update(key, KeptLedger(sources, result, Some(inputsOf(l))))
+          case _                               => keptLedgers -= key
+    }
+    result
+
+  private def computeLedger(root: String, subthreads: Boolean): Future[Either[String, LedgerResult]] =
     for
       (cal, _) <- calendar()
       subs     <- if subthreads then descendants(root) else Future.successful(Vector.empty)
@@ -859,7 +942,11 @@ final class Service(
       case Left(e)  => Future.successful(Left(e))
       case Right(l) =>
         val (stretches, days) = toDescribe(l, pick.keysOn(l.stretches.map(_.stretch)))
-        summaries.describe(l.projectId, stretches, days, Text.stamp(l.calendar)).map(Right(_))
+        summaries.describe(l.projectId, stretches, days, Text.stamp(l.calendar))
+          .map { _ =>
+            changes(Change.Summarized(stretches.map(_.window.threadId).toSet + root))
+            Right(())
+          }
           .recover { case e => Left(errorMessage(e)) }
     }
 
@@ -1004,39 +1091,64 @@ final class Service(
           record   <- records(Vector(s)).map(_.head)
         yield Right(Audit(record, cal, titles, inside, existing._1, existing._2))
 
-  /** How long a read of Zoho entries answers without being read again. */
-  private val ZohoEntriesFreshMs = 30_000.0
-
-  /** A Zoho project's time entries from one day to another. A read answers at once from the last one: within
-    * [[ZohoEntriesFreshMs]] as it is, later while Zoho is read again behind it, and when that read differs, pages are
-    * told [[BillingEvent.Changed]] so they ask again. Reading Zoho takes seconds, and entries made in Zoho by hand are
-    * rare.
+  /** How long a read of a project's Zoho entries answers without being read again. Entries made in Zoho by hand, the
+    * only ones a read is for, are rare; every read counts against Zoho's daily limit on API calls.
     */
-  private val zohoEntryReads   = mutable.Map.empty[(String, String, String), (Double, Future[Vector[ZohoExistingEntry]])]
-  /** The reads under way behind an answer already given. */
-  private val zohoEntryRereads = mutable.Set.empty[(String, String, String)]
-  private def zohoEntries(projectId: String, from: String, to: String): Future[Vector[ZohoExistingEntry]] =
-    val key = (projectId, from, to)
-    def read(): Future[Vector[ZohoExistingEntry]] = zoho.clientOrFail().flatMap(_.timeEntries(from, to, projectId))
-    zohoEntryReads.get(key) match
-      case Some((at, last)) if js.Date.now() - at < ZohoEntriesFreshMs => last
+  private val ZohoEntriesFreshMs = 5 * 60_000.0
+
+  /** One read of a Zoho project's time entries, over the days `from` to `to`, made at `at`. */
+  private final case class EntriesRead(from: String, to: String, at: Double, entries: Future[Vector[ZohoExistingEntry]]):
+    def covers(f: String, t: String): Boolean = from <= f && t <= to
+
+  /** The last read of each Zoho project's entries, by project. One read serves every caller whose days fall inside it,
+    * whatever thread or session asks; a caller reaching outside it reads again over both spans together.
+    */
+  private val zohoEntryReads   = mutable.Map.empty[String, EntriesRead]
+  /** The projects read again behind an answer already given. */
+  private val zohoEntryRereads = mutable.Set.empty[String]
+
+  /** A Zoho project's time entries from one day to another. A read answers at once from the last one that covers the
+    * days: within [[ZohoEntriesFreshMs]] as it is, later while Zoho is read again behind it. When that read finds
+    * entries made outside this plugin that differ, that is announced as [[Change.ZohoHandEntries]]; entries this plugin
+    * made never are, as everything that shows them already knows of them. `fresh` reads Zoho now, whatever was read.
+    */
+  private def zohoEntries(
+    projectId: String,
+    from: String,
+    to: String,
+    fresh: Boolean = false): Future[Vector[ZohoExistingEntry]] =
+    def read(f: String, t: String): EntriesRead =
+      val r = EntriesRead(f, t, js.Date.now(), zoho.clientOrFail().flatMap(_.timeEntries(f, t, projectId)))
+      zohoEntryReads.update(projectId, r)
+      r.entries.failed.foreach(_ => if zohoEntryReads.get(projectId).contains(r) then zohoEntryReads -= projectId)
+      r
+    def notMine(es: Vector[ZohoExistingEntry]): Set[ZohoExistingEntry] =
+      val mine = store.allEntryIds()
+      es.filterNot(e => mine(e.timeEntryId)).toSet
+    def announceIfDiffers(previous: Vector[ZohoExistingEntry], again: EntriesRead): Unit =
+      again.entries.foreach(now =>
+        if notMine(now) != notMine(previous) then changes(Change.ZohoHandEntries(projectId))
+      )
+    val answer = zohoEntryReads.get(projectId) match
+      case Some(r) if fresh                                                           =>
+        val previous = r.entries.value.flatMap(_.toOption)
+        val again    = read(Ordering[String].min(from, r.from), Ordering[String].max(to, r.to))
+        previous.foreach(announceIfDiffers(_, again))
+        again
+      case Some(r) if r.covers(from, to) && js.Date.now() - r.at < ZohoEntriesFreshMs => r
       // The last read is done: answer with it, and read again behind it.
-      case Some((_, last)) if last.value.exists(_.isSuccess)           =>
-        val previous = last.value.get.get
-        if zohoEntryRereads.add(key) then
-          read().onComplete { result =>
-            zohoEntryRereads.remove(key)
-            result.foreach { fresh =>
-              zohoEntryReads.update(key, (js.Date.now(), Future.successful(fresh)))
-              if fresh.toSet != previous.toSet then publish(BillingEvent.Changed)
-            }
-          }
-        last
-      case _                                                           =>
-        val f = read()
-        zohoEntryReads.update(key, (js.Date.now(), f))
-        f.failed.foreach(_ => zohoEntryReads.remove(key))
-        f
+      case Some(r) if r.covers(from, to) && r.entries.value.exists(_.isSuccess)       =>
+        val previous = r.entries.value.get.get
+        if zohoEntryRereads.add(projectId) then
+          val again = read(r.from, r.to)
+          again.entries.onComplete(_ => zohoEntryRereads -= projectId)
+          announceIfDiffers(previous, again)
+        r
+      case Some(r) if r.covers(from, to)                                              => r
+      case Some(r)                                                                    =>
+        read(Ordering[String].min(from, r.from), Ordering[String].max(to, r.to))
+      case None                                                                       => read(from, to)
+    answer.entries.map(_.filter(e => from <= e.date && e.date <= to))
 
   private def handEntered(
     target: Option[ZohoTarget],
@@ -1050,19 +1162,30 @@ final class Service(
       case _                               => Future.successful((Vector.empty, None))
 
   def setExcluded(windowKey: String, excluded: Boolean): Unit =
-    windowKey.split('|').headOption.foreach(threadId => store.setExcluded(windowKey, threadId, excluded))
+    windowKey.split('|').headOption.foreach { threadId =>
+      store.setExcluded(windowKey, threadId, excluded)
+      changes(Change.LeftOut(threadId))
+    }
 
-  def setNotes(root: String, day: String, notes: Option[String]): Unit = store.setNotesOverride(root, day, notes)
+  def setNotes(root: String, day: String, notes: Option[String]): Unit =
+    store.setNotesOverride(root, day, notes)
+    changes(Change.NotesEdited(root))
 
   /** Decides a shared stretch of the thread's ledger. */
   def decide(key: BlockKey, allocation: Allocation, root: String, subthreads: Boolean): Future[Either[String, Unit]] =
     ledger(root, subthreads).map(_.flatMap { l =>
       l.blocks.map(_._1).find(_.key == key) match
         case None        => Left("that stretch is not part of this thread's ledger; reload")
-        case Some(block) => Allocation.validate(allocation, block).map(valid => store.saveDecision(key, valid))
+        case Some(block) =>
+          Allocation.validate(allocation, block).map { valid =>
+            store.saveDecision(key, valid)
+            changes(Change.Decided(key))
+          }
     })
 
-  def undecide(key: BlockKey): Unit = store.deleteDecision(key)
+  def undecide(key: BlockKey): Unit =
+    store.deleteDecision(key)
+    changes(Change.Decided(key))
 
   /** The shared stretches of the ledger reaching into `period`, decided or not. */
   private def sharedWithin(l: LedgerResult, period: Option[Period]): Vector[(OverlapBlock, Option[Allocation])] =
@@ -1101,6 +1224,7 @@ final class Service(
     ledger(root, subthreads).map(_.map { l =>
       val decisions = Submissions.soleBillableDecisions(undecidedWithin(l, within), l.billability)
       decisions.foreach(d => store.saveDecision(d.key, d.allocation))
+      changes(decisions.map(d => Change.Decided(d.key))*)
       decisions.size
     })
 
@@ -1145,7 +1269,35 @@ final class Service(
       case Left(error)                                => Future.successful(Left(error))
       case Right(p) if billed && blockers(p).nonEmpty => Future.successful(Left(blockers(p).mkString("; ")))
       case Right(p) if p.covered.isEmpty              => Future.successful(Left("nothing to cover"))
-      case Right(p)                                   =>
+      case Right(p) if billed                         =>
+        unseenHandEntries(p).flatMap {
+          case Some(why) => Future.successful(Left(why))
+          case None      => record(root, p, billed)
+        }
+      case Right(p)                                   => record(root, p, billed)
+    }
+
+  /** Entries made in Zoho by hand on the plan's days that the plan did not show, read from Zoho now: what was shown may
+    * be minutes old (see [[ZohoEntriesFreshMs]]). Some(the reason not to send) when there are any.
+    */
+  private def unseenHandEntries(p: PlanResult): Future[Option[String]] =
+    val days = p.entries.map(_.day)
+    (p.target, days.minOption, days.maxOption) match
+      case (Some(t), Some(from), Some(to)) =>
+        zohoEntries(t.projectId, from, to, fresh = true).map { entries =>
+          val mine   = store.allEntryIds()
+          val shown  = p.handEntered.map(_.entry.timeEntryId).toSet
+          val unseen = entries.filter(e => days.contains(e.date) && !mine(e.timeEntryId) && !shown(e.timeEntryId))
+          Option.when(unseen.nonEmpty)(
+            s"Zoho has entries on these days made outside bb that the review did not show (" +
+              unseen.map(e => s"${e.date} ${e.logTime} ${e.taskName}").mkString(", ") +
+              "); nothing was sent. Look at it again before sending."
+          )
+        }
+      case _                               => Future.successful(None)
+
+  /** Records the plan as a submission, sending its entries to Zoho when `billed`. */
+  private def record(root: String, p: PlanResult, billed: Boolean): Future[Either[String, SubmitOutcome]] =
         val id                                    = s"sub-${js.Date.now().toLong}-${root.takeRight(6)}"
         val submission                            = Submission(
           id = id,
@@ -1189,7 +1341,7 @@ final class Service(
         def finish(entries: Vector[SubmissionEntry]): SubmitOutcome =
           if !billed || entries.isEmpty then store.recordSubmission(submission)
           store.clearNotesOverrides(root)
-          publish(BillingEvent.Changed)
+          changes(Change.Submitted(submission.spans.map(_.threadId).toSet + root), Change.NotesEdited(root))
           SubmitOutcome(submission, entries)
         send.map(entries => Right(finish(entries))).recoverWith { case e =>
           // A failure after some entries reached Zoho: those are in Zoho and recorded here, so the submission stands with
@@ -1206,7 +1358,6 @@ final class Service(
                 s"The submission stands for what was sent; undo submission $id to take it back, or enter the missing days in Zoho by hand."
             ))
         }
-    }
 
   /** Deletes a submission: its Zoho entries go, and the stretches it covered are unbilled again. Any submission, in any
     * order, since billed is only ever what the remaining submissions cover.
@@ -1224,7 +1375,7 @@ final class Service(
             )
         deletions.map { n =>
           store.deleteSubmission(s.id)
-          publish(BillingEvent.Changed)
+          changes(Change.Submitted(s.spans.map(_.threadId).toSet + s.rootThreadId))
           Right(n)
         }
 

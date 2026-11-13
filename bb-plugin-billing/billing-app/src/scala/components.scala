@@ -743,7 +743,7 @@ object ToBillView:
     .componentDidMount(_.backend.load)
     .componentDidUpdate(x =>
       arrived(x.prevProps.event, x.currentProps.event) match
-        case Some(BillingEvent.Changed) => x.backend.load
+        case Some(BillingEvent.Changed(_)) => x.backend.load
         case _                          => Callback.empty
     )
     .build
@@ -819,7 +819,7 @@ object SubmissionsView:
     .componentDidMount(_.backend.load)
     .componentDidUpdate(x =>
       arrived(x.prevProps.event, x.currentProps.event) match
-        case Some(BillingEvent.Changed) => x.backend.load
+        case Some(BillingEvent.Changed(_)) => x.backend.load
         case _                          => Callback.empty
     )
     .build

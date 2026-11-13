@@ -47,7 +47,17 @@ class BillingRpcTest extends FunSuite:
 
   test("every event survives the wire"):
     Vector(
-      BillingEvent.Changed,
+      BillingEvent.Changed(Vector(
+        Change.Decided(BlockKey("2026-10-19", 1L, 2L, Set("a", "b"))),
+        Change.LeftOut("a"),
+        Change.Submitted(Set("a", "b")),
+        Change.NotesEdited("a"),
+        Change.Summarized(Set("a")),
+        Change.BillsTo,
+        Change.ZohoHandEntries("p1"),
+        Change.Archived("a"),
+        Change.Restarted
+      )),
       BillingEvent.SummariesWritten("thr_1"),
       BillingEvent.SummariesFailed("thr_1", "no model")
     ).foreach(e => assertEquals(BillingEvent.decode(e.encode), Some(e)))

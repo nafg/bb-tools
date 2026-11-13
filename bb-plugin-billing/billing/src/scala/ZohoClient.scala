@@ -22,6 +22,21 @@ class ZohoClient(credentials: ZohoCredentials, log: String => Unit)(using Execut
 
   private var accessToken: Option[(String, Double)] = None
 
+  /** The refresh under way, so requests made together share one new token instead of each asking for its own. */
+  private var refreshing: Option[Future[String]] = None
+
+  /** The local day and how many API calls were made on it; logged every [[CallsLoggedEvery]] calls, since Zoho
+    * limits the calls an organization makes in a day.
+    */
+  private var callsOnDay: (String, Int) = ("", 0)
+  private val CallsLoggedEvery          = 25
+
+  private def counted(method: String, path: String): Unit =
+    val day   = new js.Date().asInstanceOf[js.Dynamic].toLocaleDateString("en-CA").asInstanceOf[String]
+    val calls = if callsOnDay._1 == day then callsOnDay._2 + 1 else 1
+    callsOnDay = (day, calls)
+    if calls % CallsLoggedEvery == 0 then log(s"Zoho API: $calls calls on $day from this plugin since it started (last: $method $path)")
+
   private def fetch(url: String, init: js.Dynamic): Future[js.Dynamic] =
     js.Dynamic.global.fetch(url, init).asInstanceOf[js.Promise[js.Dynamic]].toFuture
 
@@ -40,13 +55,14 @@ class ZohoClient(credentials: ZohoCredentials, log: String => Unit)(using Execut
   private def token: Future[String] =
     accessToken match
       case Some((token, expiresAt)) if js.Date.now() < expiresAt => Future.successful(token)
+      case _ if refreshing.nonEmpty                              => refreshing.get
       case _                                                     =>
         val form = js.Dynamic.newInstance(js.Dynamic.global.URLSearchParams)()
         val _    = form.set("grant_type", "refresh_token")
         val _    = form.set("client_id", credentials.clientId)
         val _    = form.set("client_secret", credentials.clientSecret)
         val _    = form.set("refresh_token", credentials.refreshToken)
-        fetch(accountsUrl, js.Dynamic.literal("method" -> "POST", "body" -> form))
+        val refresh = fetch(accountsUrl, js.Dynamic.literal("method" -> "POST", "body" -> form))
           .flatMap(readJson(_, "token refresh"))
           .flatMap { json =>
             val token = str(json.access_token)
@@ -61,6 +77,9 @@ class ZohoClient(credentials: ZohoCredentials, log: String => Unit)(using Execut
               log("Zoho access token refreshed")
               Future.successful(token)
           }
+          .andThen(_ => refreshing = None)
+        refreshing = Some(refresh)
+        refresh
 
   private def request(
     method: String,
@@ -77,6 +96,7 @@ class ZohoClient(credentials: ZohoCredentials, log: String => Unit)(using Execut
         headers.updateDynamic("Content-Type")("application/json")
         init.updateDynamic("body")(js.JSON.stringify(b.asInstanceOf[js.Object]))
       }
+      counted(method, path)
       fetch(s"$apiUrl$path?$params", init).flatMap(readJson(_, s"$method $path"))
     }
 

@@ -47,6 +47,8 @@ object SessionsView:
     projects: Option[Vector[ProjectInfo]],
     /** The keys being left out or put back, until the screen that shows the change arrives. */
     leaving: Set[String],
+    /** A reload was asked for while one was under way: one more follows it, with whatever changed meanwhile. */
+    reloadAgain: Boolean,
     /** Columns folded or unfolded by hand, by the id of the column's first thread; true is folded. Any other column
       * is folded when it has nothing left to review.
       */
@@ -240,10 +242,24 @@ object SessionsView:
         $.modState(_.copy(loading = true, error = None)) >>
           Callback.future(
             rpc(p.call, BillingRpc.SessionScreen(at))
-              .map(r => arrive(r))
-              .recover { case e => $.modState(_.copy(loading = false, leaving = Set.empty, error = Some(errorMessage(e)))) }
+              .map(r => arrive(r) >> reloadIfAsked)
+              .recover { case e =>
+                $.modState(_.copy(loading = false, leaving = Set.empty, error = Some(errorMessage(e)))) >> reloadIfAsked
+              }
           )
       }
+
+    /** The reload asked for while the last one was under way. */
+    private def reloadIfAsked: Callback =
+      $.state.flatMap(s => if s.reloadAgain then $.modState(_.copy(reloadAgain = false)) >> reloadCurrent else Callback.empty)
+
+    /** What the open session shows comes from: its threads, and the Zoho projects they bill to. */
+    private def screenInputs(screen: SessionScreenJs): Inputs =
+      val accts = accounts(screen.threads)
+      Inputs(
+        accts.map(_.threadId).toSet ++ screen.stretches.toVector.map(_.threadId),
+        accts.flatMap(_.billsTo).map(_.projectId).toSet
+      )
 
     private def threadsOf(screen: SessionScreenJs) = new Threads(accounts(screen.threads))
 
@@ -379,10 +395,12 @@ object SessionsView:
 
     def onEvent(event: BillingEvent): Callback =
       event match
-        case BillingEvent.SummariesWritten(id)      => $.modState(ended(_, id)) >> reloadCurrent
+        // The lines it wrote arrive as a `Summarized` change.
+        case BillingEvent.SummariesWritten(id)      => $.modState(ended(_, id))
         case BillingEvent.SummariesFailed(id, why)  =>
           $.modState(st => ended(st, id).copy(error = Some(s"Summaries not written: $why")))
-        case BillingEvent.Changed                   => reloadCurrent
+        case BillingEvent.Changed(cs)               =>
+          $.state.flatMap(s => if s.screen.forall(screenInputs(_).affectedByAny(cs)) then reloadCurrent else Callback.empty)
 
     /** Opens or closes a thread's bill-to picker, reading the bb projects the first time. */
     private def togglePicker(id: String): Callback =
@@ -492,9 +510,11 @@ object SessionsView:
         s.screen.filter(_.current >= 0).foreach(sc => savedDrafts(sc.sessions(sc.current).start) = s.draft)
       )
 
+    /** Reads the open session again; asked while a read is under way, once more after it, never two at once. */
     def reloadCurrent: Callback =
       $.state.flatMap(s =>
-        load(s.screen.filter(_.current >= 0).map(sc => sc.sessions(sc.current).start.toLong))
+        if s.loading then $.modState(_.copy(reloadAgain = true))
+        else load(s.screen.filter(_.current >= 0).map(sc => sc.sessions(sc.current).start.toLong))
       )
 
     private def decide(root: String)(key: BlockKey, allocation: Allocation): Callback =
@@ -1451,7 +1471,7 @@ object SessionsView:
 
   val Component = ScalaComponent
     .builder[Props]("SessionsView")
-    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, shared = None, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Map.empty, written = 0, saving = None, since = Map.empty, now = js.Date.now(), picking = None, projects = None, leaving = Set.empty, folding = Map.empty, deciding = None, sent = None))
+    .initialState(State(None, loading = false, error = None, Set.empty, Map.empty, shared = None, busy = false, hover = None, hoverAt = HoverAt(0, 480), writing = Map.empty, written = 0, saving = None, since = Map.empty, now = js.Date.now(), picking = None, projects = None, leaving = Set.empty, reloadAgain = false, folding = Map.empty, deciding = None, sent = None))
     .backend(new Backend(_))
     .render($ => $.backend.render($.props, $.state))
     .componentDidMount(x => x.backend.load(None) >> x.backend.startClock)

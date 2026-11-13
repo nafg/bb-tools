@@ -1,6 +1,6 @@
 package billingapp
 
-import billingcore.{SubmissionRecord, ThreadAccount, WireJs}
+import billingcore.{Inputs, SubmissionRecord, ThreadAccount, WireJs}
 
 import scala.scalajs.js
 
@@ -328,6 +328,14 @@ def hoursMinutes(ms: Double): String = billingcore.Durations.hoursMinutes(ms.toL
 /** The account or record behind a value of the wire; a value the codec does not know is dropped. */
 def accountOf(value: js.Any): Option[ThreadAccount]             = ThreadAccount.decode(WireJs.fromJs(value))
 def accounts(values: js.Array[js.Any]): Vector[ThreadAccount]   = values.toVector.flatMap(accountOf)
+
+/** What a ledger page shows comes from: its threads, the threads it shares stretches with, and its Zoho project. */
+def ledgerInputs(l: LedgerJs): Inputs =
+  Inputs(
+    (accountOf(l.root).toVector ++ accounts(l.covered) ++ l.leftOut.toVector.flatMap(x => accountOf(x.thread)))
+      .map(_.threadId).toSet ++ l.blocks.toVector.flatMap(_.threadIds),
+    nullable(l.target).map(_.projectId).toSet
+  )
 def recordOf(value: js.Any): Option[SubmissionRecord]           = SubmissionRecord.decode(WireJs.fromJs(value))
 def records(values: js.Array[js.Any]): Vector[SubmissionRecord] = values.toVector.flatMap(recordOf)
 

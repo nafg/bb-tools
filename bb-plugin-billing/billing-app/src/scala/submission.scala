@@ -307,9 +307,8 @@ object SubmissionPanel:
           case (LedgerPhase.Writing(_), BillingEvent.SummariesWritten(id)) if id == p.threadId       => reload()
           case (LedgerPhase.Writing(l), BillingEvent.SummariesFailed(id, error)) if id == p.threadId =>
             $.modState(_.copy(phase = LedgerPhase.Failed(Some(l), s"Summaries not written: $error")))
-          // A run started before this screen opened, or a change made elsewhere: the ledger is stale.
-          case (LedgerPhase.Reviewing(_), BillingEvent.SummariesWritten(id)) if id == p.threadId     => reload()
-          case (LedgerPhase.Reviewing(_), BillingEvent.Changed)                                      => reload()
+          // A change to what the ledger shows, made here or elsewhere, a summary run's lines among them.
+          case (LedgerPhase.Reviewing(l), BillingEvent.Changed(cs)) if ledgerInputs(l).affectedByAny(cs) => reload()
           case _                                                                                     => Callback.empty
       }
 

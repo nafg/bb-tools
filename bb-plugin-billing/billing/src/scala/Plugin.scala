@@ -53,11 +53,13 @@ def plugin(bb: BbApi): Unit =
 
   val store           = Store(db)
   val recorder        = Recorder(bb)
-  val mappings        = Mappings(bb)
+  val changes         = ChangeFeed(bb)
+  val mappings        = Mappings(bb, changes)
   val zoho            = Zoho(bb, settings)
-  val projectMappings = ProjectMappings(bb)
+  val projectMappings = ProjectMappings(bb, changes)
   val summaries       = Summaries(bb, settings, store)
-  val service = Service(bb, settings, store, recorder, mappings, projectMappings, zoho, summaries, Conversation(bb))
+  val service         =
+    Service(bb, settings, store, recorder, mappings, projectMappings, zoho, summaries, Conversation(bb), changes)
 
   val commands = Commands(bb, service, recorder, mappings, projectMappings, zoho, summaries)
 
@@ -66,16 +68,18 @@ def plugin(bb: BbApi): Unit =
   AgentTools.register(bb, service, commands)
 
   // A page open across a reload refreshes, so it stops waiting on summary runs the old plugin took with it.
-  service.publish(BillingEvent.Changed)
-  service.warm()
+  changes(Change.Restarted)
+  val _ = service.warm()
 
-  // An archived thread must get a billing decision; the page refreshes its must-decide list.
-  bb.events.on("thread.archived", (_: js.Dynamic) => service.publish(BillingEvent.Changed))
+  // An archived thread must get a billing decision. An event without the thread's id could be any thread.
+  def archived(e: js.Dynamic): Change =
+    Option(bbplugin.Dyn.str(e.threadId)).filter(_.nonEmpty).fold(Change.Restarted)(Change.Archived.apply)
+  bb.events.on("thread.archived", (e: js.Dynamic) => changes(archived(e)))
   bb.events.on(
     "thread.unarchived",
-    (_: js.Dynamic) =>
+    (e: js.Dynamic) =>
       service.forgetArchived()
-      service.publish(BillingEvent.Changed)
+      changes(archived(e))
   )
 
   zoho.missingSettings().foreach { missing =>

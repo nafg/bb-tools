@@ -2,7 +2,7 @@ package billing
 
 import bbplugin.BbApi
 import bbplugin.Dyn.str
-import billingcore.{ProjectMapping, ProjectRule, ProjectZoho}
+import billingcore.{Change, ProjectMapping, ProjectRule, ProjectZoho}
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.js
@@ -13,7 +13,7 @@ import scala.scalajs.js.JSConverters.*
   * threads that choose nothing. Separately, under `notClientWork`, the ids of bb projects whose threads are not client
   * work unless they or a parent choose otherwise.
   */
-final class ProjectMappings(bb: BbApi)(using ExecutionContext):
+final class ProjectMappings(bb: BbApi, changes: ChangeFeed)(using ExecutionContext):
   private val Key              = "projectMappings"
   private val NotClientWorkKey = "notClientWork"
 
@@ -25,7 +25,7 @@ final class ProjectMappings(bb: BbApi)(using ExecutionContext):
   def setNotClientWork(bbProjectId: String, on: Boolean): Future[Unit] =
     notClientWork().flatMap { current =>
       val next = if on then current + bbProjectId else current - bbProjectId
-      bb.storage.kv.set(NotClientWorkKey, next.toVector.sorted.toJSArray).toFuture.map(_ => ())
+      bb.storage.kv.set(NotClientWorkKey, next.toVector.sorted.toJSArray).toFuture.map(_ => changes(Change.BillsTo))
     }
 
   def all(): Future[Map[String, Vector[ProjectZoho]]] =
@@ -55,7 +55,10 @@ final class ProjectMappings(bb: BbApi)(using ExecutionContext):
           js.Dynamic.literal("projectId" -> i.projectId, "taskId" -> i.taskId)
         ).toJSArray)
       }
-      bb.storage.kv.set(Key, obj).toFuture.map(_ => next)
+      bb.storage.kv.set(Key, obj).toFuture.map { _ =>
+        changes(Change.BillsTo)
+        next
+      }
     }
 
   /** Each bb project's rule, given the catalog to name its default: a default target wins over a not-client-work mark. */

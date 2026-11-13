@@ -160,8 +160,8 @@ enum BillingRpc[Reply]:
 
 /** What the plugin tells the page on the "billing" realtime channel. */
 enum BillingEvent:
-  /** A submission was made or undone, or a thread was archived or unarchived: lists and ledgers are stale. */
-  case Changed
+  /** These changes were made: what was computed from what they touch is stale (see `Inputs.affectedBy`). */
+  case Changed(changes: Vector[Change])
 
   /** The run `BillingRpc.Summarize` started for this thread wrote its lines and notes. */
   case SummariesWritten(threadId: String)
@@ -170,7 +170,8 @@ enum BillingEvent:
 
   def encode: Wire.Obj =
     this match
-      case Changed                          => Wire.obj("type" -> Wire.Str("changed"))
+      case Changed(changes)                 =>
+        Wire.obj("type" -> Wire.Str("changed"), "changes" -> Wire.Arr(changes.map(_.encode)))
       case SummariesWritten(threadId)       =>
         Wire.obj("type" -> Wire.Str("summariesWritten"), "threadId" -> Wire.Str(threadId))
       case SummariesFailed(threadId, error) =>
@@ -180,7 +181,8 @@ object BillingEvent:
   def decode(value: Wire): Option[BillingEvent] =
     def field(name: String) = value.field(name).flatMap(_.asStr)
     field("type") match
-      case Some("changed")          => Some(Changed)
+      case Some("changed")          =>
+        value.field("changes").flatMap(_.asArr).map(cs => Changed(cs.flatMap(Change.decode)))
       case Some("summariesWritten") => field("threadId").map(SummariesWritten.apply)
       case Some("summariesFailed")  =>
         for threadId <- field("threadId"); error <- field("error") yield SummariesFailed(threadId, error)
