@@ -156,8 +156,10 @@ object SessionsView:
     def left(c: Int): Int               = axisPx + (0 until c).map(width).sum
     def spanWidth(c: Int, n: Int): Int  = (c until c + n).map(width).sum
 
-  /** Height of the sticky row naming every column; a box's own sticky name stops just under it. */
-  private val HeaderPx = 50
+  /** One name's row in a column header: as tall as the bordered billing tag beside the name. */
+  private val HeaderRowPx = 16
+  /** Height of the sticky row naming every column, three names deep; a box's own sticky name stops just under it. */
+  private val HeaderPx = 2 + 4 + 3 * HeaderRowPx + 4
   /** The axis's clock times, right-aligned. */
   private val ClockPx = 60
   /** Lanes left of the clock times for the dots of threads with no box to sit on: one lane per signal kind. */
@@ -911,6 +913,7 @@ object SessionsView:
               <.div(
                 ^.key       := t.id,
                 ^.className := "flex items-center gap-1",
+                ^.style     := js.Dynamic.literal("height" -> HeaderRowPx),
                 fold.when(i == 0),
                 <.button(
                   ^.`type`    := "button",
