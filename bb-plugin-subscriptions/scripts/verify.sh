@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks the live subscriptions plugin: that it is running, that what it last told each thread still matches GitHub
-# and GitLab, and that threads got their messages exactly once. Covers PRs and MRs, branches and tags.
+# and GitLab, and that threads got their messages exactly once. Covers PRs and MRs, branches, tags, Maven Central
+# artifacts and other bb threads.
 #
 # Usage: verify.sh [days]   (default 7: how far back to check delivered messages)
 # Needs bb, gh, glab, jq and sqlite3, and network access, so run it outside any sandbox.
@@ -17,7 +18,8 @@ echo "== Plugin"
 status=$(bb plugin list 2>&1 | awk '/^subscriptions@/ {p = 1; print; next} p && /^[^ ]/ {p = 0} p')
 echo "$status"
 grep -q ' running' <<<"$status" || problem "the plugin is not running"
-grep -q 'last: ok' <<<"$status" || problem "the poll schedule's last run did not succeed"
+# "last: running" means a poll is in progress right now, which is normal.
+grep -q -E 'last: (ok|running)' <<<"$status" || problem "the poll schedule's last run did not succeed"
 
 echo
 echo "== Plugin log: errors and warnings"
@@ -110,6 +112,16 @@ live_state() {
 }
 
 # Maven Central targets are stored by their central.sonatype.com URL.
+# Thread targets are stored as bb:thread/<id>/archived.
+thread_live() {
+  local id=${1#bb:thread/}
+  id=${id%/archived}
+  bb thread show "$id" --json 2>/dev/null | jq -r '
+    (.thread // .) as $t
+    | if $t.deletedAt != null then "thread Deleted" elif $t.archivedAt != null then "thread Archived"
+      elif $t.id != null then "thread Open" else "Unknown:thread" end' || echo "Unknown:thread"
+}
+
 maven_live() {
   local rest=${1#https://central.sonatype.com/artifact/} g a v base
   IFS=/ read -r g a v <<<"$rest"
@@ -129,7 +141,11 @@ active=$(sqlite3 -separator $'\t' "$DB" "SELECT id, thread_id, url, state, ifnul
 [[ -z $active ]] && echo "  none"
 while IFS=$'\t' read -r id thread url stored check_error; do
   [[ -z ${id:-} ]] && continue
-  if [[ $url == https://central.sonatype.com/* ]]; then live=$(maven_live "$url" 2>&1); else live=$(live_state "$url" 2>&1); fi
+  case $url in
+    https://central.sonatype.com/*) live=$(maven_live "$url" 2>&1) ;;
+    bb:thread/*) live=$(thread_live "$url" 2>&1) ;;
+    *) live=$(live_state "$url" 2>&1) ;;
+  esac
   if [[ $stored == change\ * ]]; then
     # The stored form also holds the updated time and the reviews and comments already reported; compare the rest.
     read -r k l c sha updated seen <<<"$stored"
