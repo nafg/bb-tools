@@ -185,7 +185,8 @@ final class Poller(bb: BbApi, store: Store, sources: Sources):
     val delivered =
       if lines.isEmpty then Future.unit
       else send(s.threadId, s"${messagePrefix(s)} ${lines.mkString("\n")}\n${result.link}")
-    // Recorded only after delivery, so a failed send is retried on the next check.
+    // Recorded only after delivery, so a failed send is retried on the next check. A reload between sending and
+    // recording also means the next check sends the message again: a duplicate is better than a lost message.
     delivered.map(_ => store.recordCheck(s.id, result))
 
   private def reportCheckError(s: Subscription, error: String): Future[Unit] =
