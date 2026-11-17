@@ -195,7 +195,7 @@ projects:
         - template-js
     dependsOn:
     - subscriptions-source
-    folder: ./bb-plugin-forge-shared/forge-core
+    folder: ./bb-plugin-subscriptions-forge-shared/forge-core
   forge-core-test:
     dependsOn: forge-core
     extends:
@@ -204,7 +204,7 @@ projects:
     isTestProject: true
     dependencies:
     - org.scalameta::munit:1.1.1
-    folder: ./bb-plugin-forge-shared/forge-core-test
+    folder: ./bb-plugin-subscriptions-forge-shared/forge-core-test
   forge-js:
     dependsOn:
     - bb-plugin-facades
@@ -213,21 +213,21 @@ projects:
     extends:
     - template-common
     - template-js
-    folder: ./bb-plugin-forge-shared/forge-js
-  forge-github:
+    folder: ./bb-plugin-subscriptions-forge-shared/forge-js
+  subscriptions-github:
     dependsOn:
     - forge-js
     extends:
     - template-common
     - template-js
-    folder: ./bb-plugin-forge-github/forge-github
-  forge-gitlab:
+    folder: ./bb-plugin-subscriptions-github/subscriptions-github
+  subscriptions-gitlab:
     dependsOn:
     - forge-js
     extends:
     - template-common
     - template-js
-    folder: ./bb-plugin-forge-gitlab/forge-gitlab
+    folder: ./bb-plugin-subscriptions-gitlab/subscriptions-gitlab
   local-git-core:
     cross:
       jvm3:
@@ -240,7 +240,7 @@ projects:
         - template-js
     dependsOn:
     - subscriptions-source
-    folder: ./bb-plugin-local-git/local-git-core
+    folder: ./bb-plugin-subscriptions-local-git/local-git-core
   local-git-core-test:
     dependsOn: local-git-core
     extends:
@@ -249,8 +249,8 @@ projects:
     isTestProject: true
     dependencies:
     - org.scalameta::munit:1.1.1
-    folder: ./bb-plugin-local-git/local-git-core-test
-  local-git:
+    folder: ./bb-plugin-subscriptions-local-git/local-git-core-test
+  subscriptions-local-git:
     dependsOn:
     - bb-plugin-facades
     - local-git-core
@@ -258,7 +258,7 @@ projects:
     extends:
     - template-common
     - template-js
-    folder: ./bb-plugin-local-git/local-git
+    folder: ./bb-plugin-subscriptions-local-git/subscriptions-local-git
   maven-central-core:
     cross:
       jvm3:
@@ -271,7 +271,7 @@ projects:
         - template-js
     dependsOn:
     - subscriptions-source
-    folder: ./bb-plugin-maven-central/maven-central-core
+    folder: ./bb-plugin-subscriptions-maven-central/maven-central-core
   maven-central-core-test:
     dependsOn: maven-central-core
     extends:
@@ -280,8 +280,8 @@ projects:
     isTestProject: true
     dependencies:
     - org.scalameta::munit:1.1.1
-    folder: ./bb-plugin-maven-central/maven-central-core-test
-  maven-central:
+    folder: ./bb-plugin-subscriptions-maven-central/maven-central-core-test
+  subscriptions-maven-central:
     dependsOn:
     - bb-plugin-facades
     - maven-central-core
@@ -289,7 +289,7 @@ projects:
     extends:
     - template-common
     - template-js
-    folder: ./bb-plugin-maven-central/maven-central
+    folder: ./bb-plugin-subscriptions-maven-central/subscriptions-maven-central
   subscriptions-core:
     cross:
       jvm3:

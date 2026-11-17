@@ -1,12 +1,12 @@
 {
-  "name": "bb-plugin-maven-central",
+  "name": "bb-plugin-subscriptions-maven-central",
   "version": "0.1.0",
   "type": "module",
   "engines": { "bbPluginSdk": "^0.6.0" },
   "scripts": {
-    "build": "bleep --directory .. link maven-central && cp ../.bleep/builds/normal/.bloop/maven-central/link-output/debug/js/main.js server.js",
+    "build": "bleep --directory .. link subscriptions-maven-central && cp ../.bleep/builds/normal/.bloop/subscriptions-maven-central/link-output/debug/js/main.js server.js",
     "test": "bleep --directory .. test maven-central-core-test",
-    "reload": "npm run build && bb plugin reload maven-central"
+    "reload": "npm run build && bb plugin reload subscriptions-maven-central"
   },
   "bb": {
     "name": "Maven Central (subscriptions source)",

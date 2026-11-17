@@ -91,11 +91,20 @@ final class SourceClient(bb: BbApi, val pluginId: String, val description: Strin
       .toFuture
       .map(_.asInstanceOf[js.Dynamic])
 
+  /** bb reports a failed call as "BbHttpError: HTTP 500: <the source's message>"; the source's message is what
+    * a thread needs to read.
+    */
+  private def unwrapped[A](f: Future[A]): Future[A] =
+    f.recoverWith { case e =>
+      val message = Option(e.getMessage).getOrElse("").replaceFirst("""^(?:\w+Error: )?HTTP \d+: """, "")
+      Future.failed(Exception(message))
+    }
+
   def recognize(input: String): Future[Recognition] =
-    call(SourceMethods.Recognize, js.Dynamic.literal("input" -> input)).map(recognitionFromJs)
+    unwrapped(call(SourceMethods.Recognize, js.Dynamic.literal("input" -> input)).map(recognitionFromJs))
 
   def check(request: CheckRequest): Future[CheckResult] =
-    call(
+    unwrapped(call(
       SourceMethods.Check,
       js.Dynamic.literal(
         "url"                -> request.url,
@@ -103,7 +112,7 @@ final class SourceClient(bb: BbApi, val pluginId: String, val description: Strin
         "subscriberThreadId" -> request.subscriberThreadId,
         "force"              -> request.force
       )
-    ).map(resultFromJs)
+    ).map(resultFromJs))
 
 object SourceClient:
   /** Every installed plugin that registered the source methods. */

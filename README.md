@@ -18,11 +18,11 @@ Tools around [bb](https://github.com/get-bb/bb).
 - `bb-plugin-subscriptions/` — bb plugin (written in Scala.js) that lets a
   thread subscribe to something and get a message when it changes. It stores and
   delivers; source plugins check the targets. Threads are its own source.
-- `bb-plugin-forge-github/`, `bb-plugin-forge-gitlab/` — subscription sources
+- `bb-plugin-subscriptions-github/`, `bb-plugin-subscriptions-gitlab/` — subscription sources
   for GitHub pull requests and GitLab merge requests, branches and tags, read
-  through `gh` and `glab`; their shared code is in `bb-plugin-forge-shared/`.
-- `bb-plugin-maven-central/` — subscription source for Maven Central versions.
-- `bb-plugin-local-git/` — subscription source for local git branches.
+  through `gh` and `glab`; their shared code is in `bb-plugin-subscriptions-forge-shared/`.
+- `bb-plugin-subscriptions-maven-central/` — subscription source for Maven Central versions.
+- `bb-plugin-subscriptions-local-git/` — subscription source for local git branches.
 - `bb-plugin-wbs/` — bb plugin (written in Scala.js) that renders `*.wbs.yaml`
   work-breakdown estimates as a tree table with totals, in the file panel and
   via `bb wbs html`.

@@ -1,4 +1,4 @@
-# bb-plugin-local-git
+# bb-plugin-subscriptions-local-git
 
 A source for the subscriptions plugin (`bb-plugin-subscriptions`): threads subscribe to `git:/absolute/path#branch`
 and hear each time that branch gets new commits, with their subjects, or is rewritten. It runs `git` on the machine

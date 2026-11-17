@@ -123,5 +123,12 @@ object Store:
       |  WHEN url LIKE 'bb:thread/%' THEN 'subscriptions'
       |  WHEN url LIKE 'https://central.sonatype.com/%' THEN 'maven-central'
       |  WHEN url LIKE '%/-/%' THEN 'forge-gitlab'
-      |  ELSE 'forge-github' END""".stripMargin
+      |  ELSE 'forge-github' END""".stripMargin,
+    // Source plugins are named subscriptions-<source>.
+    """UPDATE subscriptions SET source = CASE source
+      |  WHEN 'forge-github' THEN 'subscriptions-github'
+      |  WHEN 'forge-gitlab' THEN 'subscriptions-gitlab'
+      |  WHEN 'maven-central' THEN 'subscriptions-maven-central'
+      |  WHEN 'local-git' THEN 'subscriptions-local-git'
+      |  ELSE source END""".stripMargin
   )

@@ -1,12 +1,12 @@
 {
-  "name": "bb-plugin-forge-gitlab",
+  "name": "bb-plugin-subscriptions-gitlab",
   "version": "0.1.0",
   "type": "module",
   "engines": { "bbPluginSdk": "^0.6.0" },
   "scripts": {
-    "build": "bleep --directory .. link forge-gitlab && cp ../.bleep/builds/normal/.bloop/forge-gitlab/link-output/debug/js/main.js server.js",
+    "build": "bleep --directory .. link subscriptions-gitlab && cp ../.bleep/builds/normal/.bloop/subscriptions-gitlab/link-output/debug/js/main.js server.js",
     "test": "bleep --directory .. test forge-core-test",
-    "reload": "npm run build && bb plugin reload forge-gitlab"
+    "reload": "npm run build && bb plugin reload subscriptions-gitlab"
   },
   "bb": {
     "name": "GitLab (subscriptions source)",
