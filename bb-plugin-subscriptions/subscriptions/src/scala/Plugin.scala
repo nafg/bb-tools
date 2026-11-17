@@ -372,18 +372,37 @@ private def runCli(store: Store, actions: Actions, argv: List[String], ctx: js.D
     case ("--help" | "-h" | "help") :: _ => Future.successful(cliOk(Usage))
     case _                               => Future.successful(cliErr(Usage))
 
-/** The query other plugins use to read which threads wait for which. Discoverable, so a caller can tell this
-  * plugin being absent from nothing waiting.
+/** The queries other plugins use to read and change which threads wait for which. Discoverable, so a caller can
+  * tell this plugin being absent from nothing waiting.
   */
-private def registerRpc(bb: BbApi, store: Store): Unit =
+private def registerRpc(bb: BbApi, store: Store, actions: Actions): Unit =
+  def threadId(description: String) = js.Dynamic.literal("type" -> "string", "description" -> description)
+  val edgeProperties = js.Dynamic.literal(
+    "subscriberThreadId" -> threadId("The thread that will be told"),
+    "targetThreadId"     -> threadId("The thread it waits on")
+  )
   val edge = js.Dynamic.literal(
-    "type"     -> "object",
-    "required" -> js.Array("subscriberThreadId", "targetThreadId"),
-    "properties" -> js.Dynamic.literal(
-      "subscriberThreadId" -> js.Dynamic.literal("type" -> "string", "description" -> "The thread that will be told"),
-      "targetThreadId"     -> js.Dynamic.literal("type" -> "string", "description" -> "The thread it waits on")
+    "type"       -> "object",
+    "required"   -> js.Array("subscriberThreadId", "targetThreadId"),
+    "properties" -> edgeProperties
+  )
+  val message = StandardSchema.describedBy(
+    js.Dynamic.literal(
+      "type"       -> "object",
+      "required"   -> js.Array("message"),
+      "properties" -> js.Dynamic.literal("message" -> js.Dynamic.literal("type" -> "string"))
     )
   )
+  def edgeOf(input: js.Dynamic): Either[String, (String, String)] =
+    def str(v: js.Dynamic) = if js.typeOf(v) == "string" then Some(v.asInstanceOf[String]) else None
+    for
+      subscriber <- str(input.subscriberThreadId).toRight("subscriberThreadId is required")
+      target     <- str(input.targetThreadId).toRight("targetThreadId is required")
+    yield subscriber -> target
+  def answer(result: Future[Either[String, String]]): js.Promise[js.Dynamic] =
+    result
+      .flatMap(_.fold(e => Future.failed(js.JavaScriptException(js.Error(e))), m => Future.successful(js.Dynamic.literal("message" -> m))))
+      .toJSPromise
   bb.rpc.register(
     js.Dynamic.literal(
       "threadWaits" -> js.Dynamic.literal(
@@ -397,6 +416,19 @@ private def registerRpc(bb: BbApi, store: Store): Unit =
         ),
         "experimental_description" ->
           "Every active subscription of one thread to another thread being archived or deleted (bb:thread/<id>/archived)."
+      ),
+      "waitOnThread" -> js.Dynamic.literal(
+        "input"  -> StandardSchema.describedBy(edge),
+        "output" -> message,
+        "experimental_description" ->
+          ("Subscribes subscriberThreadId to targetThreadId being archived or deleted, as `bb subscriptions add` does. " +
+            "Makes no subscription when the target has already finished, and none twice.")
+      ),
+      "stopWaitingOnThread" -> js.Dynamic.literal(
+        "input"  -> StandardSchema.describedBy(edge),
+        "output" -> message,
+        "experimental_description" ->
+          "Cancels subscriberThreadId's subscription to targetThreadId being archived or deleted, if it has one."
       )
     ),
     js.Dynamic.literal(
@@ -405,11 +437,25 @@ private def registerRpc(bb: BbApi, store: Store): Unit =
           js.Dynamic.literal("subscriberThreadId" -> subscriber, "targetThreadId" -> watched)
         }
         js.Dynamic.literal("edges" -> js.Array(edges*))
+      },
+      "waitOnThread" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        answer(edgeOf(input) match
+          case Left(e)                   => Future.successful(Left(e))
+          case Right((subscriber, target)) => actions.add(subscriber, Target.ThreadArchived(target).url)
+        )
+      },
+      "stopWaitingOnThread" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        answer(Future.successful(edgeOf(input).flatMap { (subscriber, target) =>
+          store.find(subscriber, Target.ThreadArchived(target)) match
+            case None    => Right(s"@thread:$subscriber was not waiting on @thread:$target.")
+            case Some(s) => actions.cancel(s.id, Some(subscriber))
+        }))
       }
     ),
     js.Dynamic.literal(
       "experimental_discoverable" -> true,
-      "experimental_description"  -> "Subscriptions of threads to events; threadWaits lists which threads wait for which."
+      "experimental_description"  ->
+        "Subscriptions of threads to events; threadWaits lists which threads wait for which, waitOnThread and stopWaitingOnThread change that."
     )
   )
 
@@ -456,7 +502,7 @@ def plugin(bb: BbApi): Unit =
     )
   )
 
-  registerRpc(bb, store)
+  registerRpc(bb, store, actions)
 
   bb.events.on("thread.deleted", (payload: js.Dynamic) => store.endAllFor(payload.thread.id.asInstanceOf[String]))
   bb.events.on("thread.archived", (payload: js.Dynamic) => store.endAllFor(payload.thread.id.asInstanceOf[String]))
