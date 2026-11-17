@@ -13,6 +13,7 @@ plugins**:
 | `forge-github` | GitHub pull requests, branches and tags |
 | `forge-gitlab` | GitLab merge requests, branches and tags |
 | `maven-central` | `maven:group:artifact[:version]` |
+| `local-git` | a local git branch, `git:/absolute/path#branch` |
 
 A source registers two discoverable RPC methods (see `source/` and `source-rpc/`): one recognizes a target string
 and gives its canonical URL, the other checks a target against the state it returned last time and returns the new

@@ -22,6 +22,7 @@ Tools around [bb](https://github.com/get-bb/bb).
   for GitHub pull requests and GitLab merge requests, branches and tags, read
   through `gh` and `glab`; their shared code is in `bb-plugin-forge-shared/`.
 - `bb-plugin-maven-central/` — subscription source for Maven Central versions.
+- `bb-plugin-local-git/` — subscription source for local git branches.
 - `bb-plugin-wbs/` — bb plugin (written in Scala.js) that renders `*.wbs.yaml`
   work-breakdown estimates as a tree table with totals, in the file panel and
   via `bb wbs html`.

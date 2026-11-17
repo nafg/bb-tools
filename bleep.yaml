@@ -228,6 +228,37 @@ projects:
     - template-common
     - template-js
     folder: ./bb-plugin-forge-gitlab/forge-gitlab
+  local-git-core:
+    cross:
+      jvm3:
+        extends:
+        - template-common
+        - template-jvm
+      js3:
+        extends:
+        - template-common
+        - template-js
+    dependsOn:
+    - subscriptions-source
+    folder: ./bb-plugin-local-git/local-git-core
+  local-git-core-test:
+    dependsOn: local-git-core
+    extends:
+    - template-common
+    - template-jvm
+    isTestProject: true
+    dependencies:
+    - org.scalameta::munit:1.1.1
+    folder: ./bb-plugin-local-git/local-git-core-test
+  local-git:
+    dependsOn:
+    - bb-plugin-facades
+    - local-git-core
+    - subscriptions-source-rpc
+    extends:
+    - template-common
+    - template-js
+    folder: ./bb-plugin-local-git/local-git
   maven-central-core:
     cross:
       jvm3:

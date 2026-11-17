@@ -270,7 +270,8 @@ final class Actions(bb: BbApi, store: Store, sources: Sources):
 /** What the tools accept. Each kind comes from a source plugin; one that isn't installed won't recognize its own. */
 private val SupportedTargets =
   "What to subscribe to: a GitHub pull request or GitLab merge request URL, a branch URL (…/tree/<branch>), a " +
-    "repository's tags URL (…/tags), a Maven Central artifact as maven:group:artifact[:version] or its URL, or another " +
+    "repository's tags URL (…/tags), a Maven Central artifact as maven:group:artifact[:version] or its URL, a local " +
+    "git branch as git:/absolute/path/to/repo#branch, or another " +
     "bb thread being archived as bb:thread/thr_…/archived"
 
 private def textResult(text: String, isError: Boolean = false): js.Dynamic =
@@ -383,7 +384,8 @@ private val Usage =
   """Usage:
     |  bb subscriptions add <url> [--thread <thread-id>]
     |    <url>: a PR or MR, a branch (…/tree/<branch>), a repository's tags (…/tags), or a Maven Central
-    |           artifact as maven:group:artifact[:version] or its URL, or another thread being archived
+    |           artifact as maven:group:artifact[:version] or its URL, a local git branch
+    |           (git:/absolute/path#branch), or another thread being archived
     |           (bb:thread/thr_…/archived)
     |  bb subscriptions list [--thread <thread-id> | --all]
     |  bb subscriptions who <url>

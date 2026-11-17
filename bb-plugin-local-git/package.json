@@ -1,0 +1,17 @@
+{
+  "name": "bb-plugin-local-git",
+  "version": "0.1.0",
+  "type": "module",
+  "engines": { "bbPluginSdk": "^0.6.0" },
+  "scripts": {
+    "build": "bleep --directory .. link local-git && cp ../.bleep/builds/normal/.bloop/local-git/link-output/debug/js/main.js server.js",
+    "test": "bleep --directory .. test local-git-core-test",
+    "reload": "npm run build && bb plugin reload local-git"
+  },
+  "bb": {
+    "name": "Local git (subscriptions source)",
+    "description": "Lets threads subscribe to a local git branch, as git:/path/to/repo#branch, through the subscriptions plugin, and hear of its new commits.",
+    "branding": { "icon": "GitBranch" },
+    "server": "./server.js"
+  }
+}
