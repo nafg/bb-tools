@@ -47,8 +47,8 @@ private object Git:
     run(b.repo, "rev-parse", "--verify", "--quiet", s"refs/heads/${b.branch}^{commit}").flatMap { r =>
       if r.exitCode == 0 then Future.successful(r.stdout.trim)
       else
-        val why = Option(r.stderr.trim).filter(_.nonEmpty).getOrElse(s"no branch ${b.branch} there")
-        Future.failed(GitException(s"can't read ${b.branch} in ${b.repo}: $why"))
+        // The subscriptions plugin already names the branch and repository; say only what went wrong.
+        Future.failed(GitException(Option(r.stderr.trim).filter(_.nonEmpty).getOrElse("no such branch")))
     }
 
   /** How the branch moved from `from` to `to`, or None when git can't tell (the old commit is gone, for example). */
