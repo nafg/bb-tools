@@ -8,7 +8,10 @@ import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.js
 import scala.scalajs.js.JSConverters.*
 
-/** Everything the plugin reads from bb and from the activity recorder, returned as core-model values.
+/** One thread's own labels, the threads it waits on, and the label it is read as having. */
+final case class Shown(own: ThreadLabels, blockedBy: List[String], effective: Option[Effective])
+
+/** Everything the plugin reads from bb, the activity recorder, and the subscriptions plugin, returned as core-model values.
   */
 final class Store(bb: BbApi)(using ExecutionContext):
   private val PageSize  = 200
@@ -63,26 +66,30 @@ final class Store(bb: BbApi)(using ExecutionContext):
         }
     }.map(_.toMap)
 
-  /** The goals namespace of each thread that has one. */
-  def labels(threadIds: List[String]): Future[Map[String, ThreadLabels]] =
+  /** The raw goals namespace of each thread that has one. */
+  private def metadata(threadIds: List[String]): Future[Map[String, js.Dynamic]] =
     batched(threadIds) { batch =>
       bb.sdk.threads
         .experimental_listPluginMetadata(js.Dynamic.literal("threadIds" -> batch.toJSArray))
         .toFuture
-        .map { response =>
-          Js.optArr(response.threads).getOrElse(Nil).flatMap { row =>
-            Js.optStr(row.threadId).map(_ -> Js.labelsOf(row.metadata))
-          }
-        }
+        .map(response => Js.optArr(response.threads).getOrElse(Nil).flatMap(row => Js.optStr(row.threadId).map(_ -> row.metadata)))
     }.map(_.toMap)
 
-  /** `labels` for `threadIds`, then for every thread those wait on, and so on, so lending can follow a chain through closed threads. */
-  private def labelsWithBlockers(threadIds: List[String]): Future[Map[String, ThreadLabels]] =
-    def closure(loaded: Map[String, ThreadLabels], asked: Set[String]): Future[Map[String, ThreadLabels]] =
-      val next = loaded.values.flatMap(_.blockedBy).toList.distinct.filterNot(asked.contains)
-      if next.isEmpty then Future.successful(loaded)
-      else labels(next).flatMap(more => closure(loaded ++ more, asked ++ next))
-    labels(threadIds).flatMap(closure(_, threadIds.toSet))
+  /** The goals namespace of each thread that has one. */
+  def labels(threadIds: List[String]): Future[Map[String, ThreadLabels]] =
+    metadata(threadIds).map(_.view.mapValues(Js.labelsOf).toMap)
+
+  /** The `blockedBy` lists goals stored before waits moved to the subscriptions plugin, for each thread that still has one. */
+  def legacyBlockedBy(threadIds: List[String]): Future[Map[String, List[String]]] =
+    metadata(threadIds).map(_.flatMap { (id, meta) =>
+      Js.optArr(meta.blockedBy).map(ids => id -> ThreadLabels.legacyBlockedBy(ids.map(_.asInstanceOf[Any])))
+    })
+
+  def removeLegacyBlockedBy(threadId: String): Future[Unit] =
+    bb.sdk.threads
+      .updatePluginMetadata(js.Dynamic.literal("threadId" -> threadId, "set" -> js.Dynamic.literal(), "remove" -> js.Array("blockedBy")))
+      .toFuture
+      .map(_ => ())
 
   private def batched[A](ids: List[String])(load: List[String] => Future[List[A]]): Future[List[A]] =
     ids.distinct.grouped(BatchSize).foldLeft(Future.successful(List.empty[A])) { (acc, batch) =>
@@ -97,14 +104,12 @@ final class Store(bb: BbApi)(using ExecutionContext):
       threadId: String,
       goal: Option[Option[Goal]],
       value: Option[Option[Int]],
-      blockedBy: Option[List[String]],
       myMove: Option[Option[MyMove]] = None
   ): Future[ThreadLabels] =
     val set    = js.Dynamic.literal()
     val remove = js.Array[String]()
     goal.foreach(_.fold(remove.push("goal"))(g => set.updateDynamic("goal")(g.letter)))
     value.foreach(_.fold(remove.push("value"))(v => set.updateDynamic("value")(v)))
-    blockedBy.foreach(ids => if ids.isEmpty then remove.push("blockedBy") else set.updateDynamic("blockedBy")(ids.toJSArray))
     myMove.foreach {
       case None    => remove.push("myMove", "myMoveAt")
       case Some(m) =>
@@ -116,30 +121,40 @@ final class Store(bb: BbApi)(using ExecutionContext):
       .toFuture
       .map(Js.labelsOf)
 
-  /** Every thread with the labels inheritance and lending read: theirs, their ancestors', and those of every thread reachable through
-    * `blockedBy`. `within` keeps the threads active in a window (see `Overview.active`), given each one's attention seconds there.
+  /** Every thread with the labels inheritance and lending read: theirs, their ancestors', and those of every thread in a wait, and which
+    * threads each waits on (none when the subscriptions plugin is not installed). `within` keeps the threads active in a window (see
+    * `Overview.active`), given each one's attention seconds there.
     */
-  final case class Snapshot(threads: List[ThreadInfo], own: Map[String, ThreadLabels], ancestors: Map[String, List[String]]):
-    def resolved: Map[String, Resolved]                             = Overview.resolve(threads, own, ancestors)
+  final case class Snapshot(
+      threads: List[ThreadInfo],
+      own: Map[String, ThreadLabels],
+      ancestors: Map[String, List[String]],
+      blockedBy: Map[String, List[String]]
+  ):
+    def resolved: Map[String, Resolved]                             = Overview.resolve(threads, own, ancestors, blockedBy)
     def within(since: Long, seconds: Map[String, Double]): Snapshot =
       copy(threads = threads.filter(t => Overview.active(t, own.get(t.id), seconds.getOrElse(t.id, 0.0), since)))
 
   def snapshot(): Future[Snapshot] =
+    val waits = threadWaits().map(_.getOrElse(Map.empty))
     for
       threads <- allThreads()
       ids = threads.map(_.id)
-      anc <- ancestors(ids)
-      own <- labelsWithBlockers(ids ++ anc.values.flatten)
-    yield Snapshot(threads, own, anc)
+      anc   <- ancestors(ids)
+      waits <- waits
+      own   <- labels(ids ++ anc.values.flatten ++ waits.keys ++ waits.values.flatten)
+    yield Snapshot(threads, own, anc, waits)
 
-  /** The label a single thread is read as having, without loading every thread. */
-  def effectiveOf(threadId: String): Future[(ThreadLabels, Option[Effective])] =
+  /** A single thread's labels, waits, and the label it is read as having, without loading every thread. */
+  def shownOf(threadId: String): Future[Shown] =
+    val waits = threadWaits()
     for
       own <- ownLabels(threadId)
       anc <- ancestors(List(threadId))
       ids = anc.getOrElse(threadId, Nil)
-      more <- if own.goal.isDefined || ids.isEmpty then Future.successful(Map.empty[String, ThreadLabels]) else labels(ids)
-    yield own -> Inheritance.effective(threadId, more + (threadId -> own), anc)
+      more  <- if own.goal.isDefined || ids.isEmpty then Future.successful(Map.empty[String, ThreadLabels]) else labels(ids)
+      waits <- waits
+    yield Shown(own, waits.flatMap(_.get(threadId)).getOrElse(Nil), Inheritance.effective(threadId, more + (threadId -> own), anc))
 
   /** When the user last wrote to the thread: the newest turn request the user initiated, not an agent, bb, or an automation (those arrive
     * tagged as the user, so their "[bb " prefix is the only sign of them). None when there is no such message.
@@ -165,32 +180,71 @@ final class Store(bb: BbApi)(using ExecutionContext):
   private def messageText(data: js.Dynamic): String =
     Js.optArr(data.input).getOrElse(Nil).filter(b => Js.optStr(b.`type`).contains("text")).flatMap(b => Js.optStr(b.text)).mkString
 
+  // ---- other plugins ----
+
+  /** Whether `pluginId` publishes `method`. Discovery decides "not installed" because `callRpc`'s error codes have no unknown-plugin case,
+    * so a failed call alone cannot tell missing from broken.
+    */
+  private def publishes(pluginId: String, method: String): Future[Boolean] =
+    bb.sdk.plugins
+      .experimental_discoverRpc(js.Dynamic.literal("pluginId" -> pluginId, "method" -> method))
+      .toFuture
+      .map(_.nonEmpty)
+
+  private def callRpc(pluginId: String, method: String, input: js.Any): Future[js.Dynamic] =
+    bb.sdk.plugins
+      .callRpc(
+        js.Dynamic.literal(
+          "pluginId" -> pluginId,
+          "method"   -> method,
+          "input"    -> input,
+          // callRpc only calls `parse` on this; the caller reads the result itself.
+          "outputSchema" -> js.Dynamic.literal("parse" -> js.Any.fromFunction1((result: js.Any) => result))
+        )
+      )
+      .toFuture
+      .map(_.asInstanceOf[js.Dynamic])
+
+  // ---- subscriptions: the one record of which thread waits on which ----
+
+  private val SubscriptionsId = "subscriptions"
+
+  /** The threads each thread waits on: its subscriptions to their being archived. None when the subscriptions plugin is not installed. */
+  def threadWaits(): Future[Option[Map[String, List[String]]]] =
+    publishes(SubscriptionsId, "threadWaits").flatMap { installed =>
+      if !installed then Future.successful(None)
+      else
+        callRpc(SubscriptionsId, "threadWaits", null).map { response =>
+          val edges = Js.optArr(response.edges).getOrElse(Nil).flatMap { e =>
+            for from <- Js.optStr(e.subscriberThreadId); to <- Js.optStr(e.targetThreadId) yield from -> to
+          }
+          Some(edges.groupMap(_._1)(_._2).view.mapValues(_.distinct).toMap)
+        }
+    }
+
+  /** Subscribes `threadId` to `blocker` being archived; returns the subscriptions plugin's message. */
+  def waitOn(threadId: String, blocker: String): Future[String] = changeWait("waitOnThread", threadId, blocker)
+
+  /** Cancels `threadId`'s subscription to `blocker` being archived; returns the subscriptions plugin's message. */
+  def stopWaitingOn(threadId: String, blocker: String): Future[String] = changeWait("stopWaitingOnThread", threadId, blocker)
+
+  private def changeWait(method: String, threadId: String, blocker: String): Future[String] =
+    callRpc(SubscriptionsId, method, js.Dynamic.literal("subscriberThreadId" -> threadId, "targetThreadId" -> blocker))
+      .map(response => Js.optStr(response.message).getOrElse(""))
+
   // ---- activity recorder ----
 
   private val RecorderId = "activity-recorder"
 
   /** Attention seconds per thread in [from, to), each interval counted in full: `Right(None)` when the recorder plugin is not installed,
-    * `Left(message)` when it is but could not be read or answered in a shape the shared parser rejects. Discovery decides "not installed"
-    * because `callRpc`'s error codes have no unknown-plugin case, so a failed call alone cannot tell missing from broken.
+    * `Left(message)` when it is but could not be read or answered in a shape the shared parser rejects.
     */
   def attentionSeconds(from: Double, to: Double): Future[Either[String, Option[Map[String, Double]]]] =
-    bb.sdk.plugins
-      .experimental_discoverRpc(js.Dynamic.literal("pluginId" -> RecorderId, "method" -> "intervals"))
-      .toFuture
-      .flatMap { methods =>
-        if methods.isEmpty then Future.successful(Right(None))
+    publishes(RecorderId, "intervals")
+      .flatMap { installed =>
+        if !installed then Future.successful(Right(None))
         else
-          bb.sdk.plugins
-            .callRpc(
-              js.Dynamic.literal(
-                "pluginId" -> RecorderId,
-                "method"   -> "intervals",
-                "input"    -> js.Dynamic.literal("from" -> from, "to" -> to),
-                // callRpc only calls `parse` on this; the handler reads the result itself.
-                "outputSchema" -> js.Dynamic.literal("parse" -> js.Any.fromFunction1((result: js.Any) => result))
-              )
-            )
-            .toFuture
+          callRpc(RecorderId, "intervals", js.Dynamic.literal("from" -> from, "to" -> to))
             .map(response => ActivityJson.intervals(response).map(intervals => Some(secondsByThread(intervals))))
       }
       .recover { case e => Left(e.getMessage) }

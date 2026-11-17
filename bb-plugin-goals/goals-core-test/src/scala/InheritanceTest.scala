@@ -1,8 +1,8 @@
 package goalscore
 
 class InheritanceTest extends munit.FunSuite:
-  private val b3 = ThreadLabels(Some(Goal.B), Some(3), Nil)
-  private val s1 = ThreadLabels(Some(Goal.S), Some(1), Nil)
+  private val b3 = ThreadLabels(Some(Goal.B), Some(3))
+  private val s1 = ThreadLabels(Some(Goal.S), Some(1))
 
   test("an own goal wins over any ancestor"):
     val own       = Map("child" -> s1, "root" -> b3)
@@ -10,7 +10,7 @@ class InheritanceTest extends munit.FunSuite:
     assertEquals(Inheritance.effective("child", own, ancestors), Some(Effective(Goal.S, Some(1), LabelSource.Own)))
 
   test("without an own goal, the nearest labeled ancestor supplies goal and value together"):
-    val own       = Map("root" -> b3, "mid" -> ThreadLabels(None, Some(1), Nil), "leaf" -> ThreadLabels.Empty)
+    val own       = Map("root" -> b3, "mid" -> ThreadLabels(None, Some(1)), "leaf" -> ThreadLabels.Empty)
     val ancestors = Map("leaf" -> List("mid", "root"), "mid" -> List("root"))
     // mid has a value but no goal, so it is skipped entirely: the value is not mixed in.
     assertEquals(Inheritance.effective("leaf", own, ancestors), Some(Effective(Goal.B, Some(3), LabelSource.Inherited("root"))))

@@ -10,9 +10,20 @@ activity-recorder plugin.
 
 ## What it stores
 
-Five optional keys in the plugin's thread metadata namespace (`goals`):
-`goal` (a letter), `value` (1 to 3), `blockedBy` (thread ids), `myMove`
-(`quick`, `focus`, or `later`), and `myMoveAt` (when it was set).
+Four optional keys in the plugin's thread metadata namespace (`goals`):
+`goal` (a letter), `value` (1 to 3), `myMove` (`quick`, `focus`, or
+`later`), and `myMoveAt` (when it was set).
+
+The threads a thread waits on are not stored here. Each wait is the
+subscriptions plugin's subscription of the blocked thread to the blocker
+being archived (`bb:thread/<id>/archived`), so a blocked thread is always told
+when its blocker finishes. Goals reads them with that plugin's `threadWaits`
+rpc and changes them with `waitOnThread` and `stopWaitingOnThread`. Without
+the subscriptions plugin no thread waits on any other, and setting a wait
+fails. A wait on a thread that has already finished is not made. When the
+blocker is archived or deleted, the subscription ends and so does the wait.
+On start, goals moves any `blockedBy` list it stored itself before this into
+subscriptions and removes the key; an archived thread's list is dropped.
 
 - A thread without its own `goal` is read as having the nearest labeled
   ancestor's goal and value, the value always coming from the same thread as

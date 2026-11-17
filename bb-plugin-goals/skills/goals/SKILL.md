@@ -9,7 +9,7 @@ Each thread can carry a goal, a value within that goal, a list of threads it wai
 
 ## Setting a label
 
-Prefer the `goals_set_label` tool: it defaults to the current thread, and omitted fields are left as they are. Pass `"none"` to clear a goal, value, or `myMove`, and `blockedBy` as the complete list of thread ids (an empty list clears it). `myMove` is what the user owes the thread: `quick` (a short answer or decision), `focus` (real focused time), `later` (nothing now, more to prompt later). It clears by itself when the user next writes to the thread, so set it only when the user says so.
+Prefer the `goals_set_label` tool: it defaults to the current thread, and omitted fields are left as they are. Pass `"none"` to clear a goal, value, or `myMove`, and `blockedBy` as the complete list of thread ids (an empty list clears it). Each wait is a subscription of the thread to the blocker being archived (it shows in `bb subscriptions list`), so the thread is messaged when the blocker finishes; a blocker that has already finished is not waited on, and the result says so. `myMove` is what the user owes the thread: `quick` (a short answer or decision), `focus` (real focused time), `later` (nothing now, more to prompt later). It clears by itself when the user next writes to the thread, so set it only when the user says so.
 
 Without the tool, the CLI does the same:
 

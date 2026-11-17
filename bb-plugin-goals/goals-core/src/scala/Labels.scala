@@ -36,7 +36,6 @@ object MyMove:
 final case class ThreadLabels(
     goal: Option[Goal],
     value: Option[Int],
-    blockedBy: List[String],
     myMove: Option[MyMove] = None,
     /** When `myMove` was set (epoch ms), so a user message sent after it clears it. */
     myMoveAt: Option[Long] = None
@@ -44,7 +43,7 @@ final case class ThreadLabels(
   def ownLabel: Option[Effective] = goal.map(Effective(_, value, LabelSource.Own))
 
 object ThreadLabels:
-  val Empty: ThreadLabels = ThreadLabels(None, None, Nil)
+  val Empty: ThreadLabels = ThreadLabels(None, None)
 
   private val ThreadIdPattern = "^thr_[a-z0-9]+$".r
   private val None_           = "none"
@@ -55,14 +54,12 @@ object ThreadLabels:
   def fromStored(
       goal: Option[Any],
       value: Option[Any],
-      blockedBy: Option[Seq[Any]],
       myMove: Option[Any] = None,
       myMoveAt: Option[Any] = None
   ): ThreadLabels =
     ThreadLabels(
       goal = goal.collect { case s: String => s }.flatMap(Goal.parse),
       value = value.collect { case n: Double => n }.map(_.toInt).filter(v => v >= 1 && v <= 3),
-      blockedBy = blockedBy.getOrElse(Nil).collect { case s: String if ThreadIdPattern.matches(s) => s }.distinct.toList,
       myMove = myMove.collect { case s: String => s }.flatMap(MyMove.parse),
       myMoveAt = myMoveAt.collect { case n: Double => n.toLong }
     )
@@ -87,6 +84,10 @@ object ThreadLabels:
     val trimmed = text.trim
     if trimmed.isEmpty || trimmed.equalsIgnoreCase(None_) then Right(None)
     else trimmed.toIntOption.filter(v => v >= 1 && v <= 3).map(Some(_)).toRight(s"value must be 1, 2, or 3, got '$trimmed'")
+
+  /** The thread ids in a `blockedBy` list as goals stored it before waits moved to the subscriptions plugin; anything else is dropped. */
+  def legacyBlockedBy(stored: Seq[Any]): List[String] =
+    stored.collect { case s: String if ThreadIdPattern.matches(s) => s }.distinct.toList
 
   def parseThreadId(text: String): Either[String, String] =
     val trimmed = text.trim

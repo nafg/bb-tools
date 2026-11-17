@@ -49,18 +49,24 @@ object Overview:
   def active(thread: ThreadInfo, labels: Option[ThreadLabels], seconds: Double, since: Long): Boolean =
     thread.activeAt >= since || seconds > 0 || labels.exists(_.myMove.isDefined)
 
-  /** Every open thread's label, what it was lent, and its importance. `own` may hold closed threads too (ancestors, and anything reached
-    * through `blockedBy`), so inheritance and lending can pass through them; only the open ones are returned.
+  /** Every open thread's label, what it was lent, and its importance. `blockedBy` lists the threads each thread waits on. `own` may hold
+    * closed threads too (ancestors, and anything reached through `blockedBy`), so inheritance and lending can pass through them; only the
+    * open ones are returned.
     */
-  def resolve(threads: List[ThreadInfo], own: Map[String, ThreadLabels], ancestors: Map[String, List[String]]): Map[String, Resolved] =
+  def resolve(
+      threads: List[ThreadInfo],
+      own: Map[String, ThreadLabels],
+      ancestors: Map[String, List[String]],
+      blockedBy: Map[String, List[String]]
+  ): Map[String, Resolved] =
     val openIds   = threads.map(_.id).toSet
     val effective = threads.map(t => t.id -> Inheritance.effective(t.id, own, ancestors)).toMap
-    val lent      = Lending.lent(own.view.mapValues(_.blockedBy).toMap, effective.getOrElse(_, None), openIds)
+    val lent      = Lending.lent(blockedBy, effective.getOrElse(_, None), openIds)
     threads.map { t =>
       val label     = effective(t.id)
       val received  = lent.getOrElse(t.id, Nil)
-      val blockedBy = own.get(t.id).map(_.blockedBy).getOrElse(Nil)
-      t.id -> Resolved(label, received, Lending.importance(label, received), blockedBy, blockedBy.filterNot(openIds.contains))
+      val blockers  = blockedBy.getOrElse(t.id, Nil)
+      t.id -> Resolved(label, received, Lending.importance(label, received), blockers, blockers.filterNot(openIds.contains))
     }.toMap
 
   /** `threads` are the open threads; `ancestors` lists each one's ancestors from its parent upward (archived ones included, since they can
@@ -70,10 +76,11 @@ object Overview:
       threads: List[ThreadInfo],
       own: Map[String, ThreadLabels],
       ancestors: Map[String, List[String]],
+      blockedBy: Map[String, List[String]],
       seconds: Map[String, Double]
   ): OverviewModel =
     val openIds  = threads.map(_.id).toSet
-    val resolved = resolve(threads, own, ancestors)
+    val resolved = resolve(threads, own, ancestors, blockedBy)
     val byParent = threads.groupBy(_.parentId.filter(openIds.contains))
 
     def node(t: ThreadInfo): OverviewThread =

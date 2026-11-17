@@ -13,27 +13,84 @@ given ExecutionContext = ExecutionContext.parasitic
 /** Realtime channel: `{ threadId }` after a write, or `{}` when the tree changed. */
 private val LabelsChanged = "labels-changed"
 
-private def describe(own: ThreadLabels, effective: Option[Effective]): String =
+private def describe(shown: Shown): String =
+  val Shown(own, blockedBy, effective) = shown
   def valueText(v: Option[Int]) = v.fold("unvalued")(n => s"value $n")
   val ownText                   = own.goal.fold("no own goal")(g => s"own goal ${g.letter} (${g.title}), ${valueText(own.value)}")
   val effText                   = effective match
     case None                                             => "unlabeled"
     case Some(Effective(g, v, LabelSource.Own))           => s"${g.letter}, ${valueText(v)}"
     case Some(Effective(g, v, LabelSource.Inherited(id))) => s"${g.letter}, ${valueText(v)}, inherited from $id"
-  val blocked = if own.blockedBy.isEmpty then "" else s"; blocked by ${own.blockedBy.mkString(", ")}"
+  val blocked = if blockedBy.isEmpty then "" else s"; waiting on ${blockedBy.mkString(", ")}"
   val move    = own.myMove.fold("")(m => s"; my move: ${m.name}")
   s"$ownText; effective: $effText$blocked$move"
 
+private def failed(message: String): Future[Nothing] = Future.failed(js.JavaScriptException(js.Error(message)))
+
 final class Service(bb: BbApi, store: Store):
-  /** The one path every write takes. */
-  def edit(threadId: String, edit: LabelEdit): Future[(ThreadLabels, Option[Effective])] =
-    val written =
-      if edit.isEmpty then store.ownLabels(threadId) else store.write(threadId, edit.goal, edit.value, edit.blockedBy, edit.myMove)
-    written.flatMap { labels =>
-      moves.note(threadId, labels)
-      if !edit.isEmpty then bb.realtime.publish(LabelsChanged, js.Dynamic.literal("threadId" -> threadId))
-      store.effectiveOf(threadId)
+  /** The one path every write takes. Goal, value, and my move are stored in the goals namespace; waits are the subscriptions plugin's
+    * subscriptions to the blockers being archived, so a blocked thread is always told when its blocker finishes. Returns the thread as it
+    * now reads, and why each requested wait that was not made was not made (the blocker had already finished, say).
+    */
+  def edit(threadId: String, edit: LabelEdit): Future[(Shown, List[String])] =
+    val stored  = edit.goal.isDefined || edit.value.isDefined || edit.myMove.isDefined
+    val written = if stored then store.write(threadId, edit.goal, edit.value, edit.myMove) else store.ownLabels(threadId)
+    for
+      labels <- written
+      _ = moves.note(threadId, labels)
+      added <- edit.blockedBy.fold(Future.successful(Map.empty[String, String]))(setWaits(threadId, _))
+      _ = if !edit.isEmpty then bb.realtime.publish(LabelsChanged, js.Dynamic.literal("threadId" -> threadId))
+      shown <- store.shownOf(threadId)
+    yield shown -> added.toList.collect { case (blocker, message) if !shown.blockedBy.contains(blocker) => message }
+
+  /** Makes `wanted` the threads `threadId` waits on; returns the subscriptions plugin's answer to each wait it was asked to add. */
+  private def setWaits(threadId: String, wanted: List[String]): Future[Map[String, String]] =
+    store.threadWaits().flatMap {
+      case None        => failed("the subscriptions plugin is not installed; waits are its subscriptions, so none can be set")
+      case Some(waits) =>
+        val current = waits.getOrElse(threadId, Nil)
+        val added   = wanted.filterNot(current.contains).foldLeft(Future.successful(Map.empty[String, String])) { (acc, blocker) =>
+          acc.flatMap(done => store.waitOn(threadId, blocker).map(message => done + (blocker -> message)))
+        }
+        added.flatMap { answers =>
+          current
+            .filterNot(wanted.contains)
+            .foldLeft(Future.unit)((acc, blocker) => acc.flatMap(_ => store.stopWaitingOn(threadId, blocker).map(_ => ())))
+            .map(_ => answers)
+        }
     }
+
+  /** Moves each `blockedBy` list goals stored itself, before waits were subscriptions, into the subscriptions plugin, then removes it.
+    * An archived thread's list is dropped: it lends nothing and has nothing left to be woken for. A wait on a blocker that has already
+    * finished is dropped too, as the subscriptions plugin makes no subscription for it. Leaves everything in place when the
+    * subscriptions plugin is not installed.
+    */
+  def migrateLegacyWaits(): Future[Unit] =
+    for
+      threads <- store.allThreads()
+      legacy  <- store.legacyBlockedBy(threads.map(_.id))
+      installed <- if legacy.isEmpty then Future.successful(false) else store.threadWaits().map(_.isDefined)
+      _ <-
+        if legacy.isEmpty then Future.unit
+        else if !installed then
+          bb.log.warn(s"${legacy.size} thread(s) still store blockedBy; install the subscriptions plugin to move them into it")
+          Future.unit
+        else
+          val archived = threads.filter(_.archived).map(_.id).toSet
+          legacy.toList.foldLeft(Future.unit) { case (acc, (threadId, blockers)) =>
+            acc.flatMap { _ =>
+              val moved =
+                if archived.contains(threadId) then
+                  bb.log.info(s"dropped stored blockedBy of archived $threadId: ${blockers.mkString(", ")}")
+                  Future.unit
+                else
+                  blockers.foldLeft(Future.unit) { (acc, blocker) =>
+                    acc.flatMap(_ => store.waitOn(threadId, blocker).map(m => bb.log.info(s"stored wait $threadId -> $blocker: $m")))
+                  }
+              moved.flatMap(_ => store.removeLegacyBlockedBy(threadId))
+            }
+          }.map(_ => bb.realtime.publish(LabelsChanged, js.Dynamic.literal()))
+    yield ()
 
   /** The threads whose "my move" is set, so a user message to one of them can clear it without reading every thread's metadata. */
   object moves:
@@ -50,7 +107,7 @@ final class Service(bb: BbApi, store: Store):
           at  <- if own.myMove.isDefined then store.latestUserMessageAt(threadId) else Future.successful(None)
           _   <- at match
             case Some(messageAt) if ThreadLabels.clearedBy(own.myMoveAt, messageAt) =>
-              store.write(threadId, None, None, None, Some(None)).map { cleared =>
+              store.write(threadId, None, None, Some(None)).map { cleared =>
                 note(threadId, cleared)
                 bb.realtime.publish(LabelsChanged, js.Dynamic.literal("threadId" -> threadId))
               }
@@ -68,7 +125,7 @@ final class Service(bb: BbApi, store: Store):
         "rows" -> snap.resolved.toList.map { case (id, r) =>
           js.Dynamic.literal(
             "threadId"       -> id,
-            "own"            -> Out.own(snap.own.getOrElse(id, ThreadLabels.Empty)),
+            "own"            -> Out.own(snap.own.getOrElse(id, ThreadLabels.Empty), snap.blockedBy.getOrElse(id, Nil)),
             "effective"      -> Out.effective(r.label),
             "lent"           -> Out.lent(r.lent),
             "importance"     -> r.importance.map(v => v: js.Any).orNull,
@@ -90,7 +147,7 @@ final class Service(bb: BbApi, store: Store):
     yield
       val attention   = seconds.toOption.flatten.getOrElse(Map.empty)
       val shown       = snap.within(from.toLong, attention)
-      val model       = Overview.build(shown.threads, shown.own, shown.ancestors, attention)
+      val model       = Overview.build(shown.threads, shown.own, shown.ancestors, shown.blockedBy, attention)
       val recorderOut = seconds match
         case Right(Some(_)) => js.Dynamic.literal("state" -> "ok")
         case Right(None)    => js.Dynamic.literal("state" -> "missing")
@@ -110,7 +167,7 @@ final class Service(bb: BbApi, store: Store):
       .foldLeft(Future.successful(List.empty[(GradeRow, Either[String, Unit])])) { (acc, row) =>
         acc.flatMap { done =>
           store
-            .write(row.threadId, Some(Some(row.goal)), Some(row.value), None)
+            .write(row.threadId, Some(Some(row.goal)), Some(row.value))
             .map(_ => row -> Right(()))
             .recover { case e => row -> Left(e.getMessage) }
             .map(done :+ _)
@@ -130,13 +187,13 @@ def plugin(bb: BbApi): Unit =
   def typed(value: js.Dynamic): Option[String] =
     Js.optStr(value).orElse(Dyn.number(value).map(n => if n == n.toInt then n.toInt.toString else n.toString))
   def typedList(value: js.Dynamic): Option[List[String]] = Js.optArr(value).map(_.flatMap(Js.optStr))
-  def failed(message: String): Future[Nothing]           = Future.failed(js.JavaScriptException(js.Error(message)))
-  def result(threadId: String, own: ThreadLabels, effective: Option[Effective]): js.Dynamic =
+  def result(threadId: String, shown: Shown, notes: List[String]): js.Dynamic =
     js.Dynamic.literal(
       "threadId"  -> threadId,
-      "own"       -> Out.own(own),
-      "effective" -> Out.effective(effective),
-      "text"      -> describe(own, effective)
+      "own"       -> Out.own(shown.own, shown.blockedBy),
+      "effective" -> Out.effective(shown.effective),
+      "notes"     -> notes.toJSArray,
+      "text"      -> (describe(shown) :: notes).mkString("\n")
     )
 
   def editFrom(input: js.Dynamic): Future[js.Dynamic] =
@@ -145,7 +202,7 @@ def plugin(bb: BbApi): Unit =
       case Some(threadId) =>
         LabelEdit.parse(threadId, typed(input.goal), typed(input.value), typedList(input.blockedBy), typed(input.myMove)) match
           case Left(message) => failed(message)
-          case Right(edit)   => service.edit(threadId, edit).map { case (own, effective) => result(threadId, own, effective) }
+          case Right(edit)   => service.edit(threadId, edit).map((shown, notes) => result(threadId, shown, notes))
 
   bb.rpc.register(
     js.Dynamic.literal(
@@ -160,7 +217,7 @@ def plugin(bb: BbApi): Unit =
         val input = raw.asInstanceOf[js.Dynamic]
         Js.optStr(input.threadId) match
           case None           => failed("threadId is required").toJSPromise
-          case Some(threadId) => store.effectiveOf(threadId).map { case (own, effective) => result(threadId, own, effective) }.toJSPromise
+          case Some(threadId) => store.shownOf(threadId).map(result(threadId, _, Nil)).toJSPromise
       },
       "labels_set" -> js.Any.fromFunction1((raw: js.Any) => editFrom(raw.asInstanceOf[js.Dynamic]).toJSPromise),
       "overview"   -> js.Any.fromFunction1 { (raw: js.Any) =>
@@ -178,6 +235,7 @@ def plugin(bb: BbApi): Unit =
 
   // A user message to a thread with a pending "my move" clears it. The debounced per-thread event covers typed messages and steers alike.
   val _ = service.moves.seed().recover { case e => bb.log.warn(s"could not read pending moves: ${e.getMessage}") }
+  val _ = service.migrateLegacyWaits().recover { case e => bb.log.warn(s"could not move stored blockedBy into subscriptions: ${e.getMessage}") }
   bb.events.on(
     "experimental_thread.events",
     payload =>
@@ -218,7 +276,8 @@ def plugin(bb: BbApi): Unit =
           "blockedBy" -> js.Dynamic.literal(
             "type"        -> "array",
             "items"       -> js.Dynamic.literal("type" -> "string"),
-            "description" -> "The complete list of thread ids this thread waits on; an empty list clears it."
+            "description" -> ("The complete list of thread ids this thread waits on; an empty list clears it. Each wait is a subscription " +
+              "to the blocker being archived, so this thread is told when it finishes; a blocker that has already finished is not waited on.")
           ),
           "myMove" -> js.Dynamic.literal(
             "type"        -> "string",
@@ -294,12 +353,12 @@ private object Cli:
         rest.headOption.orElse(currentThread) match
           case None     => Future.successful(err("No thread given and no current thread."))
           case Some(id) =>
-            store.effectiveOf(id).map { case (own, eff) => ok(s"$id: ${describe(own, eff)}") }
+            store.shownOf(id).map(shown => ok(s"$id: ${describe(shown)}"))
       case "set" :: rest =>
         parseSet(rest, currentThread) match
           case Left(message)     => Future.successful(err(message))
           case Right((id, edit)) =>
-            service.edit(id, edit).map { case (own, eff) => ok(s"$id: ${describe(own, eff)}") }
+            service.edit(id, edit).map((shown, notes) => ok((s"$id: ${describe(shown)}" :: notes).mkString("\n")))
       case "list" :: Nil =>
         store.snapshot().map(_.within(js.Date.now().toLong - service.DefaultLookbackMs, Map.empty)).map { snap =>
           val resolved = snap.resolved

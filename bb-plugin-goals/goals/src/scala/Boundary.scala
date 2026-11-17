@@ -24,7 +24,6 @@ object Js:
     ThreadLabels.fromStored(
       goal = optStr(metadata.goal),
       value = Dyn.number(metadata.value),
-      blockedBy = optArr(metadata.blockedBy).map(_.map(_.asInstanceOf[Any])),
       myMove = optStr(metadata.myMove),
       myMoveAt = Dyn.number(metadata.myMoveAt)
     )
@@ -33,11 +32,12 @@ object Js:
 object Out:
   def goal(g: Goal): js.Any = g.letter
 
-  def own(labels: ThreadLabels): js.Dynamic =
+  /** A thread's own labels, with the threads it waits on beside them. */
+  def own(labels: ThreadLabels, blockedBy: List[String]): js.Dynamic =
     js.Dynamic.literal(
       "goal"      -> labels.goal.map(goal).orNull,
       "value"     -> labels.value.map(v => v: js.Any).orNull,
-      "blockedBy" -> labels.blockedBy.toJSArray,
+      "blockedBy" -> blockedBy.toJSArray,
       "myMove"    -> labels.myMove.map(m => m.name: js.Any).orNull,
       "myMoveAt"  -> labels.myMoveAt.map(t => t.toDouble: js.Any).orNull
     )

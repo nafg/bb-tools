@@ -30,6 +30,7 @@ type MyMove = "quick" | "focus" | "later";
 interface OwnLabels {
   goal: GoalLetter | null;
   value: number | null;
+  /** The threads this one waits on: its subscriptions (subscriptions plugin) to their being archived. */
   blockedBy: string[];
   /** What the user still owes the thread; null when nothing. Clears when they next write to it. */
   myMove: MyMove | null;
@@ -65,6 +66,8 @@ interface LabelsResult {
   threadId: string;
   own: OwnLabels;
   effective: EffectiveLabel | null;
+  /** Why each requested wait that was not made was not made, e.g. the blocker had already finished. */
+  notes: string[];
   text: string;
 }
 interface OverviewThread {
@@ -333,10 +336,14 @@ function LabelEditor({ threadId }: { threadId: string }) {
   const effective = row?.effective ?? null;
   const own = row?.own ?? EMPTY_OWN;
   const [writeError, setWriteError] = useState<string | null>(null);
+  const [writeNotes, setWriteNotes] = useState<string[]>([]);
   const [blockerInput, setBlockerInput] = useState("");
   const write = (input: Omit<LabelsSetInput, "threadId">) => {
     setWriteError(null);
-    setLabels({ threadId, ...input }).catch((cause: unknown) => setWriteError(cause instanceof Error ? cause.message : String(cause)));
+    setWriteNotes([]);
+    setLabels({ threadId, ...input })
+      .then((result) => setWriteNotes(result.notes))
+      .catch((cause: unknown) => setWriteError(cause instanceof Error ? cause.message : String(cause)));
   };
   const inherited = effective?.source.kind === "inherited";
   return (
@@ -424,6 +431,11 @@ function LabelEditor({ threadId }: { threadId: string }) {
           ))}
         </div>
       )}
+      {writeNotes.map((note) => (
+        <div key={note} className="text-xs text-muted-foreground">
+          {note}
+        </div>
+      ))}
       {(writeError ?? error) && <div className="text-xs text-destructive">{writeError ?? error}</div>}
     </div>
   );
