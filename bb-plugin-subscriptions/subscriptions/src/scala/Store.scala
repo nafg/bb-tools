@@ -45,6 +45,10 @@ final class Store(db: SqliteDb):
     db.prepare("SELECT * FROM subscriptions WHERE ended_at IS NULL AND thread_id = ? ORDER BY id")
       .all(threadId).toSeq.map(toSubscription).collect { case Right(s) => s }
 
+  /** Every active subscription to another thread being archived, as (subscribing thread, watched thread). */
+  def threadWaits(): Seq[(String, String)] =
+    active().collect { case Subscription(_, subscriber, Target.ThreadArchived(watched), _, _) => subscriber -> watched }
+
   def find(threadId: String, target: Target): Option[Subscription] =
     activeFor(threadId).find(_.target == target)
 

@@ -372,6 +372,47 @@ private def runCli(store: Store, actions: Actions, argv: List[String], ctx: js.D
     case ("--help" | "-h" | "help") :: _ => Future.successful(cliOk(Usage))
     case _                               => Future.successful(cliErr(Usage))
 
+/** The query other plugins use to read which threads wait for which. Discoverable, so a caller can tell this
+  * plugin being absent from nothing waiting.
+  */
+private def registerRpc(bb: BbApi, store: Store): Unit =
+  val edge = js.Dynamic.literal(
+    "type"     -> "object",
+    "required" -> js.Array("subscriberThreadId", "targetThreadId"),
+    "properties" -> js.Dynamic.literal(
+      "subscriberThreadId" -> js.Dynamic.literal("type" -> "string", "description" -> "The thread that will be told"),
+      "targetThreadId"     -> js.Dynamic.literal("type" -> "string", "description" -> "The thread it waits on")
+    )
+  )
+  bb.rpc.register(
+    js.Dynamic.literal(
+      "threadWaits" -> js.Dynamic.literal(
+        "input"  -> StandardSchema.describedBy(js.Dynamic.literal("type" -> "null")),
+        "output" -> StandardSchema.describedBy(
+          js.Dynamic.literal(
+            "type"       -> "object",
+            "required"   -> js.Array("edges"),
+            "properties" -> js.Dynamic.literal("edges" -> js.Dynamic.literal("type" -> "array", "items" -> edge))
+          )
+        ),
+        "experimental_description" ->
+          "Every active subscription of one thread to another thread being archived or deleted (bb:thread/<id>/archived)."
+      )
+    ),
+    js.Dynamic.literal(
+      "threadWaits" -> js.Any.fromFunction1 { (_: js.Dynamic) =>
+        val edges = store.threadWaits().map { (subscriber, watched) =>
+          js.Dynamic.literal("subscriberThreadId" -> subscriber, "targetThreadId" -> watched)
+        }
+        js.Dynamic.literal("edges" -> js.Array(edges*))
+      }
+    ),
+    js.Dynamic.literal(
+      "experimental_discoverable" -> true,
+      "experimental_description"  -> "Subscriptions of threads to events; threadWaits lists which threads wait for which."
+    )
+  )
+
 @JSExportTopLevel("default")
 def plugin(bb: BbApi): Unit =
   val db = bb.storage.database()
@@ -414,6 +455,8 @@ def plugin(bb: BbApi): Unit =
       )
     )
   )
+
+  registerRpc(bb, store)
 
   bb.events.on("thread.deleted", (payload: js.Dynamic) => store.endAllFor(payload.thread.id.asInstanceOf[String]))
   bb.events.on("thread.archived", (payload: js.Dynamic) => store.endAllFor(payload.thread.id.asInstanceOf[String]))
