@@ -15,6 +15,13 @@ Tools around [bb](https://github.com/get-bb/bb).
 - `bb-plugin-converse/` — bb plugin (written in Scala.js) for two-way voice
   conversations with agent threads: continuous listening with VAD,
   transcription into the thread, and spoken replies with barge-in.
+- `bb-plugin-subscriptions/` — bb plugin (written in Scala.js) that lets a
+  thread subscribe to something and get a message when it changes. It stores and
+  delivers; source plugins check the targets. Threads are its own source.
+- `bb-plugin-forge-github/`, `bb-plugin-forge-gitlab/` — subscription sources
+  for GitHub pull requests and GitLab merge requests, branches and tags, read
+  through `gh` and `glab`; their shared code is in `bb-plugin-forge-shared/`.
+- `bb-plugin-maven-central/` — subscription source for Maven Central versions.
 - `bb-plugin-wbs/` — bb plugin (written in Scala.js) that renders `*.wbs.yaml`
   work-breakdown estimates as a tree table with totals, in the file panel and
   via `bb wbs html`.

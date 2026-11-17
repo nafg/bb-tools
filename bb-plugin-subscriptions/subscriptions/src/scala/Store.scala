@@ -1,16 +1,25 @@
 package subscriptions
 
 import bbplugin.*
-import subscriptionscore.*
+import subscriptionscore.ThreadArchived
+import subscriptionsource.CheckResult
 
 import scala.scalajs.js
 
-/** One thread's subscription to a target, with what the plugin last told it. */
+/** One thread's subscription to a target, with what the plugin last told it.
+  *
+  * `source` is the plugin that checks the target (this plugin for threads), `url` the target's canonical form and
+  * `state` that source's record of what it saw last, opaque here. `label` and `summary` come from the last check;
+  * before the first check after they were added, `label` falls back to the URL.
+  */
 final case class Subscription(
     id: Int,
     threadId: String,
-    target: Target,
-    lastSeen: WatchState,
+    source: String,
+    url: String,
+    label: String,
+    summary: Option[String],
+    state: String,
     /** Set while checking fails; cleared when a check succeeds again. */
     checkError: Option[String]
 )
@@ -19,65 +28,59 @@ final case class Subscription(
 final case class Subscriber(threadId: String, since: Long, active: Boolean)
 
 final class Store(db: SqliteDb):
-  /** Left when the row can't be read back, with the row id and the reason. */
-  private def toSubscription(row: js.Dynamic): Either[String, Subscription] =
-    val id = row.id.asInstanceOf[Double].toInt
-    (for
-      target <- Target.parse(row.url.asInstanceOf[String])
-      state  <- WatchState.decode(row.state.asInstanceOf[String])
-    yield Subscription(
-      id = id,
+  private def opt(v: js.Dynamic): Option[String] = Option(v.asInstanceOf[String | Null]).map(_.nn)
+
+  private def toSubscription(row: js.Dynamic): Subscription =
+    val url = row.url.asInstanceOf[String]
+    Subscription(
+      id = row.id.asInstanceOf[Double].toInt,
       threadId = row.thread_id.asInstanceOf[String],
-      target = target,
-      lastSeen = state,
-      checkError = Option(row.check_error.asInstanceOf[String | Null]).map(_.nn)
-    )).left.map(e => s"subscription #$id is unreadable: $e")
+      source = opt(row.source).getOrElse(""),
+      url = url,
+      label = opt(row.label).getOrElse(url),
+      summary = opt(row.summary),
+      state = opt(row.state).getOrElse(""),
+      checkError = opt(row.check_error)
+    )
 
-  /** Every active subscription, plus a description of each row that couldn't be read. */
-  def activeWithProblems(): (Seq[Subscription], Seq[String]) =
-    val rows = db.prepare("SELECT * FROM subscriptions WHERE ended_at IS NULL ORDER BY id").all().toSeq
-    val read = rows.map(toSubscription)
-    (read.collect { case Right(s) => s }, read.collect { case Left(e) => e })
-
-  def active(): Seq[Subscription] = activeWithProblems()._1
+  def active(): Seq[Subscription] =
+    db.prepare("SELECT * FROM subscriptions WHERE ended_at IS NULL ORDER BY id").all().toSeq.map(toSubscription)
 
   def activeFor(threadId: String): Seq[Subscription] =
     db.prepare("SELECT * FROM subscriptions WHERE ended_at IS NULL AND thread_id = ? ORDER BY id")
-      .all(threadId).toSeq.map(toSubscription).collect { case Right(s) => s }
+      .all(threadId).toSeq.map(toSubscription)
 
   /** Every active subscription to another thread being archived, as (subscribing thread, watched thread). */
   def threadWaits(): Seq[(String, String)] =
-    active().collect { case Subscription(_, subscriber, Target.ThreadArchived(watched), _, _) => subscriber -> watched }
+    active().flatMap(s => ThreadArchived.parse(s.url).map(t => s.threadId -> t.threadId))
 
-  def find(threadId: String, target: Target): Option[Subscription] =
-    activeFor(threadId).find(_.target == target)
+  def find(threadId: String, url: String): Option[Subscription] = activeFor(threadId).find(_.url == url)
 
   def get(id: Int): Option[Subscription] =
-    db.prepare("SELECT * FROM subscriptions WHERE id = ? AND ended_at IS NULL").get(id).toOption
-      .flatMap(toSubscription(_).toOption)
+    db.prepare("SELECT * FROM subscriptions WHERE id = ? AND ended_at IS NULL").get(id).toOption.map(toSubscription)
 
-  /** Every thread that has subscribed to `target`, current subscriptions first, newest first within each. */
-  def subscribersOf(target: Target): Seq[Subscriber] =
+  /** Every thread that has subscribed to `url`, current subscriptions first, newest first within each. */
+  def subscribersOf(url: String): Seq[Subscriber] =
     db.prepare(
       """SELECT thread_id, max(created_at) AS since, max(ended_at IS NULL) AS active FROM subscriptions
         |WHERE url = ? GROUP BY thread_id ORDER BY active DESC, since DESC""".stripMargin
-    ).all(target.url).toSeq.map { row =>
+    ).all(url).toSeq.map { row =>
       Subscriber(row.thread_id.asInstanceOf[String], row.since.asInstanceOf[Double].toLong, row.active.asInstanceOf[Double] == 1)
     }
 
-  def add(threadId: String, target: Target, seen: WatchState): Int =
+  def add(threadId: String, source: String, url: String, first: CheckResult): Int =
     val result = db
-      .prepare("INSERT INTO subscriptions (thread_id, url, state) VALUES (?, ?, ?)")
-      .run(threadId, target.url, seen.encode)
+      .prepare("INSERT INTO subscriptions (thread_id, source, url, label, summary, state) VALUES (?, ?, ?, ?, ?, ?)")
+      .run(threadId, source, url, first.label, first.summary, first.state)
     result.lastInsertRowid.asInstanceOf[Double].toInt
 
-  def recordSeen(id: Int, seen: WatchState, ended: Boolean): Unit =
+  def recordCheck(id: Int, result: CheckResult): Unit =
     val _ = db
       .prepare(
-        """UPDATE subscriptions SET state = ?, check_error = NULL,
+        """UPDATE subscriptions SET state = ?, label = ?, summary = ?, check_error = NULL,
           |  ended_at = CASE WHEN ? THEN unixepoch() ELSE NULL END WHERE id = ?""".stripMargin
       )
-      .run(seen.encode, if ended then 1 else 0, id)
+      .run(result.state, result.label, result.summary, if result.finished then 1 else 0, id)
 
   def recordCheckError(id: Int, error: String): Unit =
     val _ = db.prepare("UPDATE subscriptions SET check_error = ? WHERE id = ?").run(error, id)
@@ -111,5 +114,14 @@ object Store:
     "ALTER TABLE subscriptions DROP COLUMN head_sha",
     // Thread targets name their event, so watching other things about a thread stays possible.
     "UPDATE subscriptions SET url = url || '/archived' WHERE url LIKE '@thread:%' AND url NOT LIKE '%/%'",
-    "UPDATE subscriptions SET url = replace(url, '@thread:', 'bb:thread/') WHERE url LIKE '@thread:%'"
+    "UPDATE subscriptions SET url = replace(url, '@thread:', 'bb:thread/') WHERE url LIKE '@thread:%'",
+    // Each target is now checked by a source plugin; state is that source's, opaque here.
+    "ALTER TABLE subscriptions ADD COLUMN source TEXT",
+    "ALTER TABLE subscriptions ADD COLUMN label TEXT",
+    "ALTER TABLE subscriptions ADD COLUMN summary TEXT",
+    """UPDATE subscriptions SET source = CASE
+      |  WHEN url LIKE 'bb:thread/%' THEN 'subscriptions'
+      |  WHEN url LIKE 'https://central.sonatype.com/%' THEN 'maven-central'
+      |  WHEN url LIKE '%/-/%' THEN 'forge-gitlab'
+      |  ELSE 'forge-github' END""".stripMargin
   )

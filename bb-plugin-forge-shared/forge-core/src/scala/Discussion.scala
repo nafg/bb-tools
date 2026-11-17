@@ -1,4 +1,4 @@
-package subscriptionscore
+package forgecore
 
 enum ItemKind(val code: Char):
   /** A GitHub review verdict, with its summary text. */
@@ -30,7 +30,7 @@ final case class DiscussionItem(
   def postedByThread: Option[String] = DiscussionItem.MarkerPattern.findFirstMatchIn(body).map(_.group(1))
 
 object DiscussionItem:
-  private[subscriptionscore] val MarkerPattern = """<!--\s*bb-thread:\s*([A-Za-z0-9_-]+)\s*-->""".r
+  private[forgecore] val MarkerPattern = """<!--\s*bb-thread:\s*([A-Za-z0-9_-]+)\s*-->""".r
 
   /** An invisible line a thread adds to the comments it posts, so its own subscriptions don't report them back. */
   def threadMarker(threadId: String): String = s"<!-- bb-thread: $threadId -->"

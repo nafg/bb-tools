@@ -2,6 +2,8 @@ package subscriptions
 
 import bbplugin.*
 import subscriptionscore.*
+import subscriptionsource.{CheckRequest, CheckResult, Recognition}
+import subscriptionsourcerpc.SourceClient
 
 import scala.concurrent.{ExecutionContext, Future}
 import scala.scalajs.js
@@ -12,51 +14,116 @@ given ExecutionContext = ExecutionContext.parasitic
 
 private def messagePrefix(s: Subscription): String = s"[bb subscription #${s.id}]"
 
-/** Reads any target: bb threads through bb itself, everything else through [[Forges]]. */
-final class Sources(bb: BbApi):
+/** A plugin that checks one kind of target. This plugin is itself the source for bb threads; the others are
+  * plugins that registered the source methods (see `subscriptionsource.SourceMethods`).
+  */
+trait Source:
+  def id: String
+  /** Which targets this source watches, in the form a user writes them. */
+  def description: String
+  def recognize(input: String): Future[Recognition]
+  def check(request: CheckRequest): Future[CheckResult]
+
+/** Threads, read through bb itself. */
+final class ThreadSource(bb: BbApi) extends Source:
+  val id          = ThreadSource.Id
+  val description = ThreadArchived.supported
+
   private def present(v: js.Dynamic): Option[js.Dynamic] = if js.isUndefined(v) || v == null then None else Some(v)
 
-  def observe(target: Target, before: Option[WatchState], force: Boolean): Future[Observed] = target match
-    case Target.ThreadArchived(id) =>
-      bb.sdk.threads.get(js.Dynamic.literal("threadId" -> id)).toFuture.flatMap { t =>
-        val life =
-          if present(t.deletedAt).isDefined then ThreadLife.Deleted
-          else if present(t.archivedAt).isDefined then ThreadLife.Archived
-          else ThreadLife.Open
-        val title = Seq(t.title, t.titleFallback).flatMap(present).map(_.asInstanceOf[String]).find(_.nonEmpty)
-          .getOrElse("(untitled)")
-        // The last reply is read only once the thread has finished, since only that message quotes it.
-        val reply =
-          if life == ThreadLife.Open then Future.successful(None)
-          else
-            bb.sdk.threads.output(js.Dynamic.literal("threadId" -> id)).toFuture
-              .map(o => present(o.output).map(_.asInstanceOf[String]))
-        reply.map(Observed.ThreadStatus(life, title, _))
-      }
-    case _ => Forges.observe(target, before, force)
+  def recognize(input: String): Future[Recognition] = Future.successful(ThreadArchived.recognize(input))
+
+  def check(request: CheckRequest): Future[CheckResult] =
+    ThreadArchived.parse(request.url) match
+      case None => Future.failed(IllegalArgumentException(s"not a thread target: ${request.url}"))
+      case Some(target) =>
+        request.previous.map(ThreadWatch.decode) match
+          case Some(Left(e)) => Future.failed(IllegalStateException(e))
+          case stored =>
+            val previous = stored.flatMap(_.toOption)
+            bb.sdk.threads.get(js.Dynamic.literal("threadId" -> target.threadId)).toFuture.flatMap { t =>
+              val life =
+                if present(t.deletedAt).isDefined then ThreadLife.Deleted
+                else if present(t.archivedAt).isDefined then ThreadLife.Archived
+                else ThreadLife.Open
+              val title = Seq(t.title, t.titleFallback).flatMap(present).map(_.asInstanceOf[String]).find(_.nonEmpty)
+                .getOrElse("(untitled)")
+              // The last reply is read only once the thread has finished, since only that message quotes it.
+              val reply =
+                if life == ThreadLife.Open then Future.successful(None)
+                else
+                  bb.sdk.threads.output(js.Dynamic.literal("threadId" -> target.threadId)).toFuture
+                    .map(o => present(o.output).map(_.asInstanceOf[String]))
+              reply.map(ThreadWatch.check(target, previous, life, title, _))
+            }
+
+object ThreadSource:
+  /** The source id stored for thread subscriptions: this plugin's own. */
+  val Id = "subscriptions"
+
+/** Another plugin's source, called through its registered methods. */
+final class RemoteSource(client: SourceClient) extends Source:
+  def id          = client.pluginId
+  def description = client.description
+  def recognize(input: String): Future[Recognition] = client.recognize(input)
+  def check(request: CheckRequest): Future[CheckResult] = client.check(request)
+
+/** Every source: the built-in one for threads, and each installed plugin that registered as a source. */
+final class Sources(bb: BbApi):
+  private val threads = ThreadSource(bb)
+
+  def all(): Future[List[Source]] = SourceClient.discover(bb).map(clients => threads :: clients.map(RemoteSource(_)))
+
+  /** The source a stored subscription names. Fails, with that plugin named, when it isn't installed and enabled. */
+  def byId(id: String): Future[Source] =
+    if id == ThreadSource.Id then Future.successful(threads)
+    else
+      all().flatMap(_.find(_.id == id) match
+        case Some(s) => Future.successful(s)
+        case None    => Future.failed(IllegalStateException(s"the $id plugin, which checks this target, isn't installed and enabled"))
+      )
+
+  /** The source that watches `input`, with the target's canonical form. Sources are asked in turn; the first to
+    * recognize it wins. When none does, the error gives every reason a source gave, or else what each accepts.
+    */
+  def recognize(input: String): Future[Either[String, (Source, Recognition.Recognized)]] =
+    all().flatMap { sources =>
+      def loop(rest: List[Source], invalid: List[String]): Future[Either[String, (Source, Recognition.Recognized)]] =
+        rest match
+          case Nil =>
+            val reason =
+              if invalid.nonEmpty then invalid.mkString("; ")
+              else "accepted are " + sources.map(_.description).mkString("; ")
+            Future.successful(Left(s"can't subscribe to $input: $reason"))
+          case source :: tail =>
+            source.recognize(input).recover { case _ => Recognition.NotMine }.flatMap {
+              case r: Recognition.Recognized => Future.successful(Right(source -> r))
+              case Recognition.Invalid(why)  => loop(tail, invalid :+ why)
+              case Recognition.NotMine       => loop(tail, invalid)
+            }
+      loop(sources, Nil)
+    }
 
 /** Checks every active subscription and tells each thread what changed since it last heard. */
 final class Poller(bb: BbApi, store: Store, sources: Sources):
   private var running = false
   private var runs    = 0
 
-  /** Reviews and comments are normally fetched only when a request's updated time changes. Every this many runs
-    * they are fetched regardless, in case a forge doesn't bump that time for some kind of comment.
+  /** Sources read some things only when something else changed (a forge reads reviews and comments only when the
+    * request's updated time changes). Every this many runs they're asked to read everything, in case a change
+    * slipped past that trigger.
     */
-  private val ForceDiscussionEvery = 15
+  private val ForceEvery = 15
 
   def pollAll(): Future[Unit] =
     if running then Future.unit
     else
       running = true
       runs += 1
-      val force = runs % ForceDiscussionEvery == 0
+      val force = runs % ForceEvery == 0
       // Future.apply catches a synchronous throw, so the guard is always reset.
-      Future(store.activeWithProblems())
-        .flatMap { (subscriptions, problems) =>
-          problems.foreach(bb.log.error)
-          subscriptions.foldLeft(Future.unit)((prev, s) => prev.flatMap(_ => pollOne(s, force)))
-        }
+      Future(store.active())
+        .flatMap(subscriptions => subscriptions.foldLeft(Future.unit)((prev, s) => prev.flatMap(_ => pollOne(s, force))))
         .andThen(_ => running = false)
 
   private def send(threadId: String, text: String): Future[Unit] =
@@ -84,14 +151,15 @@ final class Poller(bb: BbApi, store: Store, sources: Sources):
     val _ = js.timers.setTimeout(ms.toDouble)(p.success(()))
     p.future
 
-  /** Checks the target, trying once more a few seconds later if the first attempt fails. Forge CLIs fail now and
-    * then for a moment (a timeout, a token refresh), and a thread shouldn't hear about a failure the next attempt
-    * doesn't repeat.
+  /** Checks the target, trying once more a few seconds later if the first attempt fails. Sources fail now and then
+    * for a moment (a timeout, a server error), and a thread shouldn't hear about a failure the next attempt doesn't
+    * repeat.
     */
-  private def observeWithRetry(s: Subscription, force: Boolean): Future[Observed] =
-    sources.observe(s.target, Some(s.lastSeen), force).recoverWith { case first =>
+  private def checkWithRetry(s: Subscription, force: Boolean): Future[CheckResult] =
+    def attempt() = sources.byId(s.source).flatMap(_.check(CheckRequest(s.url, Some(s.state), s.threadId, force)))
+    attempt().recoverWith { case first =>
       bb.log.warn(s"subscription #${s.id}: check failed, retrying once: ${first.getMessage}")
-      delay(RetryDelayMs).flatMap(_ => sources.observe(s.target, Some(s.lastSeen), force))
+      delay(RetryDelayMs).flatMap(_ => attempt())
     }
 
   /** An archived thread's subscriptions end. The archive event normally ends them; this catches a thread archived
@@ -102,39 +170,23 @@ final class Poller(bb: BbApi, store: Store, sources: Sources):
       .flatMap { archived =>
         if archived then Future.successful(store.endAllFor(s.threadId))
         else
-          observeWithRetry(s, force).transformWith {
-            case scala.util.Success(now) => report(s, now)
-            case scala.util.Failure(e)   => reportCheckError(s, e.getMessage)
+          checkWithRetry(s, force).transformWith {
+            case scala.util.Success(result) => report(s, result)
+            case scala.util.Failure(e)      => reportCheckError(s, e.getMessage)
           }
       }
       .recover { case e => bb.log.warn(s"subscription #${s.id}: ${e.getMessage}") }
 
-  /** A branch move is described with the commits it brought, when the forge can list them. */
-  private def describe(s: Subscription, event: Event): Future[String] = (s.target, event) match
-    case (Target.Branch(repo, _), Event.BranchMoved(from, to)) =>
-      Forges.commitsBetween(repo, from, to)
-        .map(Some(_))
-        .recover { case e =>
-          bb.log.warn(s"subscription #${s.id}: could not list commits $from..$to: ${e.getMessage}")
-          None
-        }
-        .map(Watch.describe(s.target, event, _))
-    case _ => Future.successful(Watch.describe(s.target, event))
-
-  private def report(s: Subscription, now: Observed): Future[Unit] =
-    val events   = Watch.withoutOwnPosts(Watch.between(s.lastSeen, now), s.threadId)
-    val finished = Watch.isFinished(now)
-    Future.sequence(events.map(describe(s, _))).flatMap { described =>
-      val lines =
-        s.checkError.map(_ => s"Checking ${s.target.label} works again.").toList ++
-          described ++
-          (if finished then List("This subscription has ended.") else Nil)
+  private def report(s: Subscription, result: CheckResult): Future[Unit] =
+    val lines =
+      s.checkError.map(_ => s"Checking ${result.label} works again.").toList ++
+        result.messages ++
+        (if result.finished then List("This subscription has ended.") else Nil)
+    val delivered =
       if lines.isEmpty then Future.unit
-      else send(s.threadId, s"${messagePrefix(s)} ${lines.mkString("\n")}\n${s.target.url}")
-    }.map { _ =>
-      // Recorded only after delivery, so a failed send is retried on the next check.
-      store.recordSeen(s.id, Watch.remember(Some(s.lastSeen), now), finished)
-    }
+      else send(s.threadId, s"${messagePrefix(s)} ${lines.mkString("\n")}\n${result.link}")
+    // Recorded only after delivery, so a failed send is retried on the next check.
+    delivered.map(_ => store.recordCheck(s.id, result))
 
   private def reportCheckError(s: Subscription, error: String): Future[Unit] =
     val announce =
@@ -142,7 +194,7 @@ final class Poller(bb: BbApi, store: Store, sources: Sources):
       else
         send(
           s.threadId,
-          s"${messagePrefix(s)} Checking ${s.target.label} failed: $error\n" +
+          s"${messagePrefix(s)} Checking ${s.label} failed: $error\n" +
             "The subscription stays active. This thread will hear when checking works again."
         )
     announce.map(_ => store.recordCheckError(s.id, error))
@@ -158,14 +210,14 @@ final class Actions(bb: BbApi, store: Store, sources: Sources):
       }
       .recover { case _ => "(thread not found)" }
 
-  /** Threads that subscribed to `url`, now or before. Subscribing suggests, but doesn't prove, that a thread is
+  /** Threads that subscribed to `input`, now or before. Subscribing suggests, but doesn't prove, that a thread is
     * working on the target.
     */
-  def who(url: String): Future[Either[String, String]] =
-    Target.parse(url) match
+  def who(input: String): Future[Either[String, String]] =
+    sources.recognize(input).flatMap {
       case Left(e) => Future.successful(Left(e))
-      case Right(target) =>
-        val subscribers = store.subscribersOf(target)
+      case Right((_, target)) =>
+        val subscribers = store.subscribersOf(target.url)
         if subscribers.isEmpty then Future.successful(Right(s"No thread has subscribed to ${target.label}."))
         else
           Future.traverse(subscribers) { s =>
@@ -175,29 +227,28 @@ final class Actions(bb: BbApi, store: Store, sources: Sources):
               s"@thread:${s.threadId} $title ($status)"
             }
           }.map(lines => Right(s"Threads that subscribed to ${target.label}:\n" + lines.mkString("\n")))
+    }
 
-  def add(threadId: String, url: String): Future[Either[String, String]] =
-    Target.parse(url) match
+  def add(threadId: String, input: String): Future[Either[String, String]] =
+    sources.recognize(input).flatMap {
       case Left(e) => Future.successful(Left(e))
-      case Right(Target.ThreadArchived(id)) if id == threadId => Future.successful(Left("A thread can't wait for itself."))
-      case Right(target) =>
-        store.find(threadId, target) match
+      case Right((_, target)) if target.url == ThreadArchived(threadId).url =>
+        Future.successful(Left("A thread can't wait for itself."))
+      case Right((source, target)) =>
+        store.find(threadId, target.url) match
           case Some(existing) =>
             Future.successful(
-              Right(s"Already subscribed as #${existing.id}. Last known: ${Watch.describe(existing.lastSeen)}.")
+              Right(s"Already subscribed as #${existing.id}. Last known: ${existing.summary.getOrElse("not checked yet")}.")
             )
           case None =>
-            sources.observe(target, None, force = true).map { observed =>
-              val now = Watch.remember(None, observed)
-              if Watch.isFinished(observed) then
-                Right(s"${target.label} is already ${Watch.describe(now)}. Nothing to wait for, so no subscription was made.")
+            source.check(CheckRequest(target.url, None, threadId, force = true)).map { first =>
+              if first.finished then
+                Right(s"${first.label} is already ${first.summary}. Nothing to wait for, so no subscription was made.")
               else
-                val id = store.add(threadId, target, now)
-                Right(
-                  s"Subscribed as #$id to ${target.label}. Now: ${Watch.describe(now)}. ${Watch.promise(target)} " +
-                    "Checks run every minute."
-                )
+                val id = store.add(threadId, source.id, target.url, first)
+                Right(s"Subscribed as #$id to ${first.label}. Now: ${first.summary}. ${first.promise} Checks run every minute.")
             }.recover { case e => Left(s"Could not read ${target.label}: ${e.getMessage}") }
+    }
 
   def list(subscriptions: Seq[Subscription], showThread: Boolean): String =
     if subscriptions.isEmpty then "No active subscriptions."
@@ -205,7 +256,7 @@ final class Actions(bb: BbApi, store: Store, sources: Sources):
       subscriptions.map { s =>
         val thread = if showThread then s" (thread ${s.threadId})" else ""
         val error  = s.checkError.fold("")(e => s" Checking is failing: $e")
-        s"#${s.id}$thread ${s.target.label}: ${Watch.describe(s.lastSeen)}.$error\n  ${s.target.url}"
+        s"#${s.id}$thread ${s.label}: ${s.summary.getOrElse("not checked yet")}.$error\n  ${s.url}"
       }.mkString("\n")
 
   /** Cancels a subscription; `threadId` restricts it to that thread's own subscriptions. */
@@ -214,7 +265,13 @@ final class Actions(bb: BbApi, store: Store, sources: Sources):
       case None => Left(s"No active subscription #$id${threadId.fold("")(_ => " for this thread")}.")
       case Some(s) =>
         store.end(id)
-        Right(s"Canceled subscription #$id to ${s.target.label}.")
+        Right(s"Canceled subscription #$id to ${s.label}.")
+
+/** What the tools accept. Each kind comes from a source plugin; one that isn't installed won't recognize its own. */
+private val SupportedTargets =
+  "What to subscribe to: a GitHub pull request or GitLab merge request URL, a branch URL (…/tree/<branch>), a " +
+    "repository's tags URL (…/tags), a Maven Central artifact as maven:group:artifact[:version] or its URL, or another " +
+    "bb thread being archived as bb:thread/thr_…/archived"
 
 private def textResult(text: String, isError: Boolean = false): js.Dynamic =
   js.Dynamic.literal(
@@ -229,7 +286,7 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
     js.Dynamic.literal(
       "name" -> "subscriptions_add",
       "description" ->
-        ("Subscribe this thread to something on GitHub or GitLab, given its URL, and return at once with its " +
+        ("Subscribe this thread to something, given its URL or reference, and return at once with its " +
           "current state. A pull or merge request: a message when it is merged or closed, when CI finishes on " +
           "a new result or commit, when its latest commit changes (push, rebase, force-push), and for each new " +
           "review or comment, with its text; the subscription ends when it is merged or closed. A branch (…/tree/<branch>): " +
@@ -250,7 +307,7 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
         "properties" -> js.Dynamic.literal(
           "url" -> js.Dynamic.literal(
             "type"        -> "string",
-            "description" -> s"The URL: ${Target.supported}"
+            "description" -> SupportedTargets
           )
         ),
         "required"             -> js.Array("url"),
@@ -274,7 +331,7 @@ private def registerTools(bb: BbApi, store: Store, actions: Actions): Unit =
       "parameters" -> js.Dynamic.literal(
         "type" -> "object",
         "properties" -> js.Dynamic.literal(
-          "url" -> js.Dynamic.literal("type" -> "string", "description" -> s"The URL: ${Target.supported}")
+          "url" -> js.Dynamic.literal("type" -> "string", "description" -> SupportedTargets)
         ),
         "required"             -> js.Array("url"),
         "additionalProperties" -> false
@@ -441,12 +498,12 @@ private def registerRpc(bb: BbApi, store: Store, actions: Actions): Unit =
       "waitOnThread" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         answer(edgeOf(input) match
           case Left(e)                   => Future.successful(Left(e))
-          case Right((subscriber, target)) => actions.add(subscriber, Target.ThreadArchived(target).url)
+          case Right((subscriber, target)) => actions.add(subscriber, ThreadArchived(target).url)
         )
       },
       "stopWaitingOnThread" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
         answer(Future.successful(edgeOf(input).flatMap { (subscriber, target) =>
-          store.find(subscriber, Target.ThreadArchived(target)) match
+          store.find(subscriber, ThreadArchived(target).url) match
             case None    => Right(s"@thread:$subscriber was not waiting on @thread:$target.")
             case Some(s) => actions.cancel(s.id, Some(subscriber))
         }))

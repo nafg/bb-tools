@@ -1,12 +1,26 @@
 # bb-plugin-subscriptions
 
-A [bb](https://github.com/get-bb/bb) plugin that lets a thread subscribe, by URL, to a GitHub or GitLab pull/merge
-request, branch, repository's tags or Maven Central artifact, and get a message when it merges, closes, finishes CI, gets a new commit, review
-or comment, when the branch gets new commits, when a new tag appears, or when a version becomes resolvable on Maven Central. It replaces agents' own polling loops, which ran in
-sandboxes, hit background-command time limits, and could mistake a failed check for "not merged yet".
+A [bb](https://github.com/get-bb/bb) plugin that lets a thread subscribe to something and get a message when it
+changes. It replaces agents' own polling loops, which ran in sandboxes, hit background-command time limits, and could
+mistake a failed check for "not merged yet".
 
-Written in Scala.js, like the other plugins in this repo. `subscriptions-core` holds the platform-independent logic
-(URL parsing, state per kind of target, CI interpretation, change detection) and is tested on the JVM.
+This plugin stores subscriptions, polls them, retries and delivers messages. The checking is done by **source
+plugins**:
+
+| Source plugin | Targets |
+|---|---|
+| this plugin | another bb thread being archived (`bb:thread/thr_…/archived`) |
+| `forge-github` | GitHub pull requests, branches and tags |
+| `forge-gitlab` | GitLab merge requests, branches and tags |
+| `maven-central` | `maven:group:artifact[:version]` |
+
+A source registers two discoverable RPC methods (see `source/` and `source-rpc/`): one recognizes a target string
+and gives its canonical URL, the other checks a target against the state it returned last time and returns the new
+state, the messages to send, and whether the subscription is finished. The state is opaque to this plugin. Any plugin
+can become a source by registering them.
+
+Written in Scala.js, like the other plugins in this repo. `source` holds the contract and text helpers,
+`subscriptions-core` the thread source's logic; both are tested on the JVM.
 
 ## Build and install
 
@@ -20,11 +34,10 @@ After changing sources: `npm run reload`.
 
 ## How it works
 
-- A bb schedule runs every minute in the bb server. For each active subscription it reads the target through `gh` or
-  `glab`, using their existing logins, and compares it with the state last reported to the thread. Each check of a
-  GitHub target costs about one point of GitHub's 5,000-point hourly allowance, which every other `gh` use shares.
-- Reviews, comments and reactions cost four more GitHub calls (two on GitLab), so they are fetched only when the request's
-  updated time changed, and for every subscription once every 15 runs as a safety net.
+- A bb schedule runs every minute in the bb server. For each active subscription it asks the subscription's source
+  plugin to check the target against the state recorded last time. Every 15th run asks sources to also read what they
+  normally read only when something changed.
+- A failed check is retried once, five seconds later, before the thread hears about it.
 - Changes are delivered with `bb.sdk.threads.send`. The new state is recorded only after delivery succeeds, so a
   failed delivery is retried on the next run.
 - A failed check is reported to the thread once, and again when checking recovers.

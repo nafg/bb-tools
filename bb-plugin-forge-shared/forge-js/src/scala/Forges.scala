@@ -1,8 +1,8 @@
-package subscriptions
+package forgejs
 
-import subscriptionscore.*
-import subscriptionscore.Snapshot.GitHubCheck
-import subscriptionscore.Snapshot.WorkflowRun as GitHubWorkflowRun
+import forgecore.*
+import forgecore.Snapshot.GitHubCheck
+import forgecore.Snapshot.WorkflowRun as GitHubWorkflowRun
 
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.scalajs.js
@@ -48,18 +48,18 @@ object Forges:
 
   private def glProject(repo: Repo): String = js.URIUtils.encodeURIComponent(repo.project)
 
-  private def glApi(repo: Repo, path: String): Future[js.Dynamic] =
+  private def glApi(repo: Repo, path: String)(using ExecutionContext): Future[js.Dynamic] =
     run("glab", "api", "--hostname", repo.host, s"projects/${glProject(repo)}/$path").map(js.JSON.parse(_))
 
-  private def ghApi(repo: Repo, args: String*): Future[js.Dynamic] =
+  private def ghApi(repo: Repo, args: String*)(using ExecutionContext): Future[js.Dynamic] =
     run("gh", (Seq("api", "--hostname", repo.host) ++ args)*).map(js.JSON.parse(_))
 
   /** Checks the target. For a pull or merge request, reviews and comments are fetched only when
     * [[Watch.needsDiscussion]] says so, given what was remembered before (`None` when subscribing).
     */
-  def observe(target: Target, before: Option[WatchState], force: Boolean)(using ExecutionContext): Future[Observed] =
+  def observe(target: ForgeTarget, before: Option[WatchState], force: Boolean)(using ExecutionContext): Future[Observed] =
     target match
-      case Target.Change(cr) =>
+      case ForgeTarget.Change(cr) =>
         val head = cr.repo.forge match
           case Forge.GitHub => gitHub(cr)
           case Forge.GitLab => gitLab(cr)
@@ -69,12 +69,8 @@ object Forges:
             else Future.successful(None)
           discussion.map(Observed.Change(snapshot, updatedAt, _, ciBasis))
         }
-      case Target.Branch(repo, name) => branchHead(repo, name).map(Observed.Branch(_))
-      case Target.Tags(repo)         => newestTags(repo).map(Observed.Tags(_))
-      case Target.MavenArtifact(g, a, Some(v)) => MavenCentral.isAvailable(g, a, v).map(Observed.MavenVersion(_))
-      case Target.MavenArtifact(g, a, None)    => MavenCentral.versions(g, a).map(Observed.MavenVersions(_))
-      case Target.ThreadArchived(_) =>
-        Future.failed(IllegalArgumentException("bb threads are read through bb, not a forge; see Sources"))
+      case ForgeTarget.Branch(repo, name) => branchHead(repo, name).map(Observed.Branch(_))
+      case ForgeTarget.Tags(repo)         => newestTags(repo).map(Observed.Tags(_))
 
   /** Runs a paginated `gh api` call whose jq filter emits one JSON object per line. */
   private def ghLines(repo: Repo, path: String, jq: String)(using ExecutionContext): Future[List[js.Dynamic]] =
@@ -240,34 +236,37 @@ object Forges:
       )
     }
 
-/** Reads Maven Central's repository directly. Its search API can lag days behind what builds can resolve. */
-object MavenCentral:
-  private val Base = "https://repo1.maven.org/maven2"
+/** A forge plugin's source: recognizes its forge's targets and checks them for the subscriptions plugin. */
+object ForgeSource:
+  def register(bb: bbplugin.BbApi, forge: Forge)(using ExecutionContext): Unit =
+    subscriptionsourcerpc.SourceServer.register(
+      bb,
+      description = ForgeTarget.supported(forge),
+      recognize = ForgeTarget.recognize(_, forge),
+      check = request => check(request)
+    )
 
-  private def artifactUrl(group: String, artifact: String) = s"$Base/${group.replace('.', '/')}/$artifact"
+  private def check(request: subscriptionsource.CheckRequest)(using ExecutionContext): Future[subscriptionsource.CheckResult] =
+    ForgeTarget.parse(request.url) match
+      case None => Future.failed(ForgeCliException(s"not a forge target: ${request.url}"))
+      case Some(target) =>
+        val previous = request.previous match
+          case None    => Right(None)
+          case Some(s) => WatchState.decode(s).map(Some(_))
+        previous match
+          case Left(e) => Future.failed(ForgeCliException(e))
+          case Right(before) =>
+            Forges.observe(target, before, request.force).flatMap { now =>
+              commitsFor(target, before, now).map(Watch.check(target, before, now, request.subscriberThreadId, _))
+            }
 
-  /** Fetches without the CDN's cached copy, so a version that just appeared isn't hidden by a cached "not found". */
-  private def fetch(url: String, method: String): Future[js.Dynamic] =
-    val busted = s"$url?bb=${js.Date.now().toLong}"
-    js.Dynamic.global.fetch(busted, js.Dynamic.literal("method" -> method)).asInstanceOf[js.Promise[js.Dynamic]].toFuture
-
-  /** Whether the version's POM can be downloaded, which is what a build resolving that version needs. */
-  def isAvailable(group: String, artifact: String, version: String)(using ExecutionContext): Future[Boolean] =
-    fetch(s"${artifactUrl(group, artifact)}/$version/$artifact-$version.pom", "HEAD").flatMap { r =>
-      r.status.asInstanceOf[Int] match
-        case 200 => Future.successful(true)
-        case 404 => Future.successful(false)
-        case other => Future.failed(ForgeCliException(s"Maven Central answered HTTP $other"))
-    }
-
-  /** Every version the artifact's maven-metadata.xml lists, oldest first; empty if the artifact doesn't exist yet. */
-  def versions(group: String, artifact: String)(using ExecutionContext): Future[List[String]] =
-    fetch(s"${artifactUrl(group, artifact)}/maven-metadata.xml", "GET").flatMap { r =>
-      r.status.asInstanceOf[Int] match
-        case 200 =>
-          r.text().asInstanceOf[js.Promise[String]].toFuture.map { xml =>
-            """<version>\s*([^<\s]+)\s*</version>""".r.findAllMatchIn(xml).map(_.group(1)).toList
-          }
-        case 404   => Future.successful(Nil)
-        case other => Future.failed(ForgeCliException(s"Maven Central answered HTTP $other"))
-    }
+  /** The commits a branch move brought, when the forge can list them. A failure to list them leaves the message
+    * without them rather than failing the check.
+    */
+  private def commitsFor(target: ForgeTarget, before: Option[WatchState], now: Observed)(using
+      ExecutionContext
+  ): Future[Option[CommitsSummary]] =
+    (target, before, now) match
+      case (ForgeTarget.Branch(repo, _), Some(WatchState.Branch(from)), Observed.Branch(to)) if from != to =>
+        Forges.commitsBetween(repo, from, to).map(Some(_)).recover { case _ => None }
+      case _ => Future.successful(None)

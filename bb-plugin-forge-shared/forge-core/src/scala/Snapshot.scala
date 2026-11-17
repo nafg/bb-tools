@@ -1,4 +1,4 @@
-package subscriptionscore
+package forgecore
 
 /** Whether a pull or merge request is still open. `Closed` means closed without being merged. */
 enum Lifecycle:

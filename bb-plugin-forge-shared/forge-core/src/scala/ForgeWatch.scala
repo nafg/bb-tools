@@ -1,4 +1,6 @@
-package subscriptionscore
+package forgecore
+
+import subscriptionsource.{CheckResult, Text}
 
 /** What a check of a subscription's target found. Its kind always matches the target's. */
 enum Observed:
@@ -9,16 +11,6 @@ enum Observed:
   case Branch(headSha: String)
   /** The newest tags, by name. */
   case Tags(names: List[String])
-  /** Whether one Maven Central version can be resolved yet. */
-  case MavenVersion(available: Boolean)
-  /** Every version Maven Central lists for an artifact. */
-  case MavenVersions(versions: List[String])
-  /** Another thread's state, with its title and last reply for the message that reports it finishing. */
-  case ThreadStatus(life: ThreadLife, title: String, lastReply: Option[String])
-
-/** Whether a bb thread is still open. */
-enum ThreadLife:
-  case Open, Archived, Deleted
 
 /** What the plugin remembers of a subscription's target between checks. */
 enum WatchState:
@@ -26,9 +18,6 @@ enum WatchState:
   case Change(snapshot: Snapshot, updatedAt: String, seen: Option[Set[String]])
   case Branch(headSha: String)
   case Tags(names: List[String])
-  case MavenVersion(available: Boolean)
-  case MavenVersions(versions: List[String])
-  case ThreadStatus(life: ThreadLife)
 
   /** A one-line form for storage. Shas, timestamps, enum names, item keys and git ref names contain no spaces. */
   def encode: String = this match
@@ -37,9 +26,6 @@ enum WatchState:
       s"change $l $ci $sha ${if updatedAt.isEmpty then "-" else updatedAt} $seenField"
     case Branch(sha) => s"branch $sha"
     case Tags(names) => ("tags" :: names).mkString(" ")
-    case MavenVersion(available) => s"maven-version ${if available then "available" else "pending"}"
-    case MavenVersions(versions) => ("maven-versions" :: versions).mkString(" ")
-    case ThreadStatus(life)      => s"thread $life"
 
 object WatchState:
   def decode(s: String): Either[String, WatchState] =
@@ -58,11 +44,6 @@ object WatchState:
           case other => Left(s"unreadable seen field: $other")
       case "branch" :: sha :: Nil => Right(Branch(sha))
       case "tags" :: names        => Right(Tags(names))
-      case "maven-version" :: "available" :: Nil => Right(MavenVersion(true))
-      case "maven-version" :: "pending" :: Nil   => Right(MavenVersion(false))
-      case "maven-versions" :: versions          => Right(MavenVersions(versions))
-      case "thread" :: life :: Nil =>
-        scala.util.Try(ThreadStatus(ThreadLife.valueOf(life))).toEither.left.map(_.getMessage)
       case _                      => Left(s"unreadable stored state: $s")
 
 /** Something about a subscribed target that its thread should hear about. */
@@ -79,11 +60,6 @@ enum Event:
   case NewDiscussion(items: List[DiscussionItem])
   case BranchMoved(from: String, to: String)
   case NewTags(names: List[String])
-  /** A watched Maven Central version became resolvable. */
-  case MavenPublished
-  case NewMavenVersions(versions: List[String])
-  /** A watched thread was archived or deleted. */
-  case ThreadFinished(life: ThreadLife, title: String, lastReply: Option[String])
 
 /** The commits a branch gained, as far as the forge could say: how many, and the subjects of the first few. */
 final case class CommitsSummary(count: Int, subjects: List[String])
@@ -118,12 +94,6 @@ object Watch:
     case (WatchState.Tags(b), Observed.Tags(a)) =>
       val added = a.filterNot(b.toSet)
       if added.nonEmpty then List(Event.NewTags(added)) else Nil
-    case (WatchState.MavenVersion(false), Observed.MavenVersion(true)) => List(Event.MavenPublished)
-    case (WatchState.ThreadStatus(ThreadLife.Open), Observed.ThreadStatus(life, title, reply)) if life != ThreadLife.Open =>
-      List(Event.ThreadFinished(life, title, reply))
-    case (WatchState.MavenVersions(b), Observed.MavenVersions(a)) =>
-      val added = a.filterNot(b.toSet)
-      if added.nonEmpty then List(Event.NewMavenVersions(added)) else Nil
     case _ => Nil
 
   /** Drops the reviews and comments that `threadId` marked as its own, since that thread already knows about them.
@@ -146,9 +116,6 @@ object Watch:
       WatchState.Change(snapshot, updated, seen)
     case Observed.Branch(sha)            => WatchState.Branch(sha)
     case Observed.Tags(names)            => WatchState.Tags(names)
-    case Observed.MavenVersion(a)        => WatchState.MavenVersion(a)
-    case Observed.MavenVersions(versions) => WatchState.MavenVersions(versions)
-    case Observed.ThreadStatus(life, _, _) => WatchState.ThreadStatus(life)
 
   private def changeEvents(before: Snapshot, after: Snapshot, ciBasis: String): List[Event] =
     val lifecycle = (before.lifecycle, after.lifecycle) match
@@ -172,42 +139,10 @@ object Watch:
     */
   def isFinished(o: Observed): Boolean = o match
     case Observed.Change(snapshot, _, _, _) => snapshot.lifecycle != Lifecycle.Open
-    case Observed.MavenVersion(available) => available
-    case Observed.ThreadStatus(life, _, _) => life != ThreadLife.Open
     case _                               => false
 
-  private val MaxSubjects    = 10
-  private val MaxItems       = 10
-  private val MaxBodyChars   = 1500
-
-  /** The text as GitHub or GitLab displays it: without HTML comments, which bots use for hidden markers, and without
-    * runs of blank lines.
-    */
-  def visibleText(body: String): String =
-    body
-      .replaceAll("(?s)<!--.*?-->", "")
-      // Formatting tags carry no information for an agent; their text stays. Tags that break a line or paragraph
-      // become a space so the words on either side stay apart.
-      .replaceAll("(?i)</?(p|br|div)\\b[^>]*>", " ")
-      .replaceAll("(?i)</?(strong|b|em|i|small|sub|sup|code|span)\\b[^>]*>", "")
-      .linesIterator
-      .map(compactLine)
-      .mkString("\n")
-      .replaceAll("\n{3,}", "\n\n")
-      .trim
-
-  /** Drops the padding a Markdown table or aligned text carries: runs of spaces inside the line, and the dashes of
-    * a table's separator row beyond three. Leading indentation is kept, since it can be meaningful.
-    */
-  private def compactLine(line: String): String =
-    val indent = line.takeWhile(_ == ' ')
-    val rest   = line.drop(indent.length).stripTrailing.replaceAll(" {2,}", " ")
-    val table  = if rest.matches("""\|?(\s*:?-+:?\s*\|)+\s*:?-*:?\s*""") then rest.replaceAll("-{4,}", "---") else rest
-    indent + table
-
-  private def excerpt(body: String): String =
-    val trimmed = visibleText(body)
-    if trimmed.length <= MaxBodyChars then trimmed else trimmed.take(MaxBodyChars) + "… (cut; open the link for the rest)"
+  private val MaxSubjects = 10
+  private val MaxItems    = 10
 
   /** GitHub's reaction names, and GitLab's most common award emoji names, as emoji. Others stay as names. */
   private def reactionText(name: String): String =
@@ -230,19 +165,19 @@ object Watch:
       case ItemKind.Comment       => s"Comment by ${item.author}"
       case ItemKind.Reaction      => s"Reaction by ${item.author}: ${reactionText(item.body)}"
     if item.kind == ItemKind.Reaction then return s"- $heading"
-    val body = excerpt(item.body)
-    val text = if body.isEmpty then "" else "\n" + body.linesIterator.map("  " + _).mkString("\n")
+    val body = Text.excerpt(item.body)
+    val text = if body.isEmpty then "" else "\n" + Text.quoted(body)
     s"- $heading: ${item.url}$text"
 
   /** `commits` describes a `BranchMoved` event; it is ignored for other events. */
-  def describe(target: Target, event: Event, commits: Option[CommitsSummary] = None): String =
+  def describe(target: ForgeTarget, event: Event, commits: Option[CommitsSummary] = None): String =
     def kind(cr: ChangeRequest) = cr.repo.forge match
       case Forge.GitHub => "Pull request"
       case Forge.GitLab => "Merge request"
     (target, event) match
-      case (Target.Change(cr), Event.Merged)   => s"${kind(cr)} ${cr.label} was merged."
-      case (Target.Change(cr), Event.Closed)   => s"${kind(cr)} ${cr.label} was closed without being merged."
-      case (Target.Change(cr), Event.Reopened) => s"${kind(cr)} ${cr.label} was reopened."
+      case (ForgeTarget.Change(cr), Event.Merged)   => s"${kind(cr)} ${cr.label} was merged."
+      case (ForgeTarget.Change(cr), Event.Closed)   => s"${kind(cr)} ${cr.label} was closed without being merged."
+      case (ForgeTarget.Change(cr), Event.Reopened) => s"${kind(cr)} ${cr.label} was reopened."
       case (_, Event.CiFinished(result, sha, basis)) =>
         val counted = if basis.isEmpty then "" else s" Counted: $basis."
         val where   = s"${target.label} at commit ${sha.take(10)}"
@@ -273,17 +208,7 @@ object Watch:
             val more  = if count > shown.size then s" and ${count - shown.size} more" else ""
             val noun  = if count == 1 then "commit" else "commits"
             s"$moved $count new $noun: ${shown.mkString("; ")}$more."
-      case (_, Event.MavenPublished) =>
-        s"${target.label} is now on Maven Central and can be resolved."
-      case (Target.ThreadArchived(id), Event.ThreadFinished(life, title, reply)) =>
-        val how   = if life == ThreadLife.Deleted then "was deleted" else "was archived"
-        val last  = reply.map(excerpt).filter(_.nonEmpty)
-        val quote = last.fold("")(r => "\nIts last reply:\n" + r.linesIterator.map("  " + _).mkString("\n"))
-        s"Thread \"$title\" (@thread:$id) $how.$quote"
-      case (Target.MavenArtifact(g, a, _), Event.NewMavenVersions(versions)) =>
-        val noun = if versions.size == 1 then "version" else "versions"
-        s"New $noun of $g:$a on Maven Central: ${versions.mkString(", ")}."
-      case (Target.Tags(repo), Event.NewTags(names)) =>
+      case (ForgeTarget.Tags(repo), Event.NewTags(names)) =>
         val noun = if names.size == 1 then "tag" else "tags"
         s"New $noun on ${repo.project}: ${names.mkString(", ")}."
       case (_, other) => s"${target.label}: $other."
@@ -305,23 +230,34 @@ object Watch:
     case WatchState.Branch(sha) => s"at commit ${sha.take(10)}"
     case WatchState.Tags(names) =>
       if names.isEmpty then "no tags" else s"newest tags ${names.take(3).mkString(", ")}"
-    case WatchState.MavenVersion(available) =>
-      if available then "available on Maven Central" else "not on Maven Central yet"
-    case WatchState.ThreadStatus(life) => life.toString.toLowerCase
-    case WatchState.MavenVersions(versions) =>
-      if versions.isEmpty then "no versions on Maven Central" else s"latest versions ${versions.takeRight(3).reverse.mkString(", ")}"
 
   /** What a thread subscribed to `target` will be told about. */
-  def promise(target: Target): String = target match
-    case Target.Change(_) =>
+  def promise(target: ForgeTarget): String = target match
+    case ForgeTarget.Change(_) =>
       "This thread will get a message when it is merged or closed, when CI finishes on a new result or commit, " +
         "when its latest commit changes, and for each new review, comment or reaction."
-    case Target.Branch(_, _) => "This thread will get a message each time the branch gets new commits."
-    case Target.Tags(_)      => "This thread will get a message each time a new tag appears."
-    case Target.MavenArtifact(_, _, Some(_)) =>
-      "This thread will get a message when the version can be resolved from Maven Central; then the subscription ends."
-    case Target.ThreadArchived(_) =>
-      "This thread will get a message, with that thread's last reply, when it is archived or deleted; then the " +
-        "subscription ends."
-    case Target.MavenArtifact(_, _, None) =>
-      "This thread will get a message each time Maven Central lists a new version."
+    case ForgeTarget.Branch(_, _) => "This thread will get a message each time the branch gets new commits."
+    case ForgeTarget.Tags(_)      => "This thread will get a message each time a new tag appears."
+
+  /** One check's result for the subscriptions plugin: what to tell `subscriber` about `target` since `previous`,
+    * and what to remember. A thread's own marked comments aren't reported back to it. `commits` describes a branch
+    * move, when the forge could list its commits.
+    */
+  def check(
+      target: ForgeTarget,
+      previous: Option[WatchState],
+      now: Observed,
+      subscriber: String,
+      commits: Option[CommitsSummary]
+  ): CheckResult =
+    val events = previous.fold(Nil)(before => withoutOwnPosts(between(before, now), subscriber))
+    val after  = remember(previous, now)
+    CheckResult(
+      state = after.encode,
+      label = target.label,
+      summary = describe(after),
+      promise = promise(target),
+      link = target.url,
+      messages = events.map(describe(target, _, commits)),
+      finished = isFinished(now)
+    )
