@@ -309,7 +309,18 @@ final class Player(
       .toFuture
       .flatMap { response =>
         if !response.ok.asInstanceOf[Boolean] then
-          Future.failed(new RuntimeException(s"TTS endpoint returned ${response.status}"))
+          // The body says who failed: the plugin's route answers with its own
+          // reason, while a proxy between the page and bb answers with its own page.
+          response.text().asInstanceOf[js.Promise[String]].toFuture
+            .recover { case _ => "" }
+            .flatMap { detail =>
+              val shown = detail.trim.take(300)
+              Future.failed(
+                new RuntimeException(
+                  s"TTS endpoint returned ${response.status}${if shown.isEmpty then "" else s": $shown"}"
+                )
+              )
+            }
         else Future.successful(response)
       }
 
