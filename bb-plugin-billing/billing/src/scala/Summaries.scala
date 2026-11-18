@@ -28,7 +28,7 @@ final case class Message(at: Long, seq: String, speaker: Speaker, text: String, 
 /** Reads a thread's whole conversation from bb's timeline, both sides and the agent's work, oldest first, the way the
   * recap plugin does.
   */
-final class Conversation(bb: BbApi)(using ExecutionContext):
+final class Conversation(bb: BbApi, store: Store)(using ExecutionContext):
   /** Pages of the timeline read at most. The timeline is read from the newest page back, so a thread longer than this
     * loses its oldest part: a stretch from before that has no messages to count or to summarize. The limit only guards
     * against a runaway; a thread of a few thousand rows is read whole.
@@ -38,17 +38,22 @@ final class Conversation(bb: BbApi)(using ExecutionContext):
   /** A timeline row as it is kept between reads: its id, and the messages it and its nested rows hold. The rows
     * themselves are not kept: they carry far more than the messages (tool arguments and output), for every thread read.
     */
-  private final case class Row(id: String, messages: Vector[Message])
 
-  /** Each thread's timeline rows from its last read, oldest first, back to the thread's start. */
+  /** Each thread's timeline rows from its last read, oldest first, back to the thread's start. They are kept in the
+    * store too, so a read after the plugin starts again meets them on the newest page instead of reading the whole
+    * timeline.
+    */
   private val known = scala.collection.mutable.Map.empty[String, Vector[Row]]
+
+  private def knownRows(threadId: String): Vector[Row] =
+    known.getOrElseUpdate(threadId, store.conversationRows(threadId).flatMap(Conversation.decodeRows).getOrElse(Vector.empty))
 
   /** The thread's conversation. A thread read before is read again only from its newest page back to the first page
     * that meets the rows kept from then: the rows of the pages read come fresh (a turn that was running has changed),
     * older rows are taken from then.
     */
   def of(threadId: String): Future[Vector[Message]] =
-    val before   = known.getOrElse(threadId, Vector.empty)
+    val before   = knownRows(threadId)
     val beforeAt = before.zipWithIndex.map((r, i) => r.id -> i).toMap
     def page(cursor: Option[(String, Double)], acc: Vector[js.Dynamic], n: Int): Future[(Vector[js.Dynamic], Boolean)] =
       val request = js.Dynamic.literal("threadId" -> threadId, "includeNestedRows" -> "true")
@@ -75,6 +80,7 @@ final class Conversation(bb: BbApi)(using ExecutionContext):
         case Some(i) if !reachedStart => before.take(i).filterNot(r => freshIds(r.id)) ++ fresh
         case _                        => fresh
       known.update(threadId, rows)
+      if rows != before then store.saveConversationRows(threadId, Conversation.encodeRows(rows))
       rows.flatMap(_.messages).sortBy(_.at)
     }.recover {
       // A deleted thread (bb answers `thread_not_found`) has no conversation left; its recorded time remains.
@@ -120,6 +126,40 @@ final class Conversation(bb: BbApi)(using ExecutionContext):
         }
         at.zip(text).map((a, t) => Message(a, seq, Speaker.Work, t, call))
       case _              => None
+
+/** A timeline row as it is kept between reads: its id, and the messages it and its nested rows hold. The rows
+  * themselves are not kept: they carry far more than the messages (tool arguments and output), for every thread read.
+  */
+private final case class Row(id: String, messages: Vector[Message])
+
+object Conversation:
+  private def encodeMessage(m: Message): js.Dynamic =
+    val o = js.Dynamic.literal("at" -> m.at.toDouble, "seq" -> m.seq, "speaker" -> m.speaker.toString, "text" -> m.text)
+    m.call.foreach(c => o.updateDynamic("call")(js.Dynamic.literal("at" -> c.at.toDouble, "name" -> c.name, "args" -> c.args)))
+    o
+
+  private def decodeMessage(o: js.Dynamic): Option[Message] =
+    for
+      at      <- number(o.at).map(_.toLong)
+      speaker <- Speaker.values.find(_.toString == str(o.speaker))
+    yield Message(
+      at,
+      str(o.seq),
+      speaker,
+      str(o.text),
+      Option(o.call).filter(isDefined).flatMap(c => number(c.at).map(a => ToolCall(a.toLong, str(c.name), str(c.args))))
+    )
+
+  private[billing] def encodeRows(rows: Vector[Row]): String =
+    js.JSON.stringify(js.Array(rows.map(r =>
+      js.Dynamic.literal("id" -> r.id, "messages" -> js.Array(r.messages.map(encodeMessage)*))
+    )*))
+
+  /** The rows, or None when the text is not rows as [[encodeRows]] writes them (they are then read again whole). */
+  private[billing] def decodeRows(text: String): Option[Vector[Row]] =
+    scala.util.Try(js.JSON.parse(text).asInstanceOf[js.Array[js.Dynamic]].toVector.map { r =>
+      Row(str(r.id), r.messages.asInstanceOf[js.Array[js.Dynamic]].toVector.flatMap(decodeMessage))
+    }).toOption.filter(_.forall(_.id.nonEmpty))
 
 /** The agent a summary run uses: a bb provider and one of its models, optionally at a reasoning level. */
 final case class ModelSelection(providerId: String, model: String, reasoningLevel: Option[String])

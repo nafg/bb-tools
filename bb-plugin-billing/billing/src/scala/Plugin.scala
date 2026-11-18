@@ -59,7 +59,7 @@ def plugin(bb: BbApi): Unit =
   val projectMappings = ProjectMappings(bb, changes)
   val summaries       = Summaries(bb, settings, store)
   val service         =
-    Service(bb, settings, store, recorder, mappings, projectMappings, zoho, summaries, Conversation(bb), changes)
+    Service(bb, settings, store, recorder, mappings, projectMappings, zoho, summaries, Conversation(bb, store), changes)
 
   val commands = Commands(bb, service, recorder, mappings, projectMappings, zoho, summaries)
 

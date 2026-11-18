@@ -78,6 +78,17 @@ final class Store(db: SqliteDb):
       )
       .run(key, summary, js.Date.now())
 
+  /** A thread's conversation as [[Conversation]] last read it, in its own form, when it was read. */
+  def conversationRows(threadId: String): Option[String] =
+    db.prepare("SELECT rows FROM conversation_rows WHERE thread_id = ?").get(threadId).toOption.map(row => str(row.rows))
+
+  def saveConversationRows(threadId: String, rows: String): Unit =
+    val _ = db
+      .prepare(
+        "INSERT INTO conversation_rows (thread_id, rows, saved_at) VALUES (?, ?, ?) ON CONFLICT (thread_id) DO UPDATE SET rows = excluded.rows, saved_at = excluded.saved_at"
+      )
+      .run(threadId, rows, js.Date.now())
+
   /** A day's model-written notes, keyed by the day and the exact set of stretch lines it summarized. */
   def dayNotes(key: String): Option[String] =
     db.prepare("SELECT notes FROM day_notes WHERE notes_key = ?").get(key).toOption.map(row => str(row.notes))
@@ -310,7 +321,8 @@ object Store:
     // Lines were one short sentence; they are now a few sentences so the day notes can be accurate. Write them anew.
     "DELETE FROM window_summaries",
     // A submission is its spans; the moment the user once chose is not state.
-    "ALTER TABLE submissions DROP COLUMN until"
+    "ALTER TABLE submissions DROP COLUMN until",
+    "CREATE TABLE IF NOT EXISTS conversation_rows (thread_id TEXT PRIMARY KEY, rows TEXT NOT NULL, saved_at REAL NOT NULL)"
   )
 
 /** Allocations as stored: the wire form as a JSON string. */

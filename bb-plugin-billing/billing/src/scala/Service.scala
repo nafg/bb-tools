@@ -536,7 +536,22 @@ final class Service(
     * with every thread's stretches in it. A stretch is a recorded interval cut at local midnight, in the ledger's
     * state, with the summary the ledger would show.
     */
+  /** The session screens being worked out, by the session asked for: the same one asked for again meanwhile (a page
+    * and the warm-up after a start, say) waits for it instead of working it out again.
+    */
+  private val screensUnderWay = mutable.Map.empty[Option[Long], Future[Either[String, SessionScreenResult]]]
+
   def sessionScreen(at: Option[Long]): Future[Either[String, SessionScreenResult]] =
+    screensUnderWay.getOrElse(
+      at, {
+        val f = screenOf(at)
+        screensUnderWay.update(at, f)
+        f.onComplete(_ => screensUnderWay -= at)
+        f
+      }
+    )
+
+  private def screenOf(at: Option[Long]): Future[Either[String, SessionScreenResult]] =
     val now = js.Date.now().toLong
     calendar().flatMap { (cal, _) =>
       intervalsOfLiveThreads(now - SessionHistoryMs, now).zip(agentSpansOfLiveThreads(now - SessionHistoryMs, now)).flatMap {
