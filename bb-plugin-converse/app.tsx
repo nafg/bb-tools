@@ -11,6 +11,7 @@ import {
   useComposer,
   useRealtime,
   useSettings,
+  useSidebarSplitLayout,
 } from "@get-bb/plugin-sdk/app";
 import { MicVAD, utils } from "@ricky0123/vad-web";
 import * as RadixSlider from "@radix-ui/react-slider";
@@ -93,6 +94,71 @@ function useSoundCueSettings() {
   return { state, setState, error, setError };
 }
 
+// Measures each switch between split panes: how long after the click in a
+// pane bb's split focus, its route, and the controller's speech routing each
+// name that pane's thread, logged by the backend. It finds the pane through
+// the host's `data-split-pane-id` attribute, which the SDK does not promise,
+// so when that changes it measures nothing rather than misreporting.
+type PaneSwitchSignal = "splitFocus" | "route" | "routed";
+const paneSwitchTiming = (() => {
+  let threadsByPaneId = new Map<string, string>();
+  let pending: {
+    threadId: string;
+    clickedAt: number;
+    arrivals: Partial<Record<PaneSwitchSignal, number>>;
+    timeout: number;
+  } | null = null;
+  let listening = false;
+  const report = () => {
+    if (!pending) return;
+    const { threadId, clickedAt, arrivals, timeout } = pending;
+    window.clearTimeout(timeout);
+    pending = null;
+    const ms = (signal: PaneSwitchSignal) => {
+      const at = arrivals[signal];
+      return at === undefined ? null : Math.round(at - clickedAt);
+    };
+    void rpcCall("reportPaneSwitch", {
+      threadId,
+      splitFocusMs: ms("splitFocus"),
+      routeMs: ms("route"),
+      routedMs: ms("routed"),
+      voice: getController().getSnapshot().on,
+    }).catch(() => undefined);
+  };
+  return {
+    /** Starts listening for clicks in split panes; idempotent. */
+    listen() {
+      if (listening) return;
+      listening = true;
+      document.addEventListener(
+        "pointerdown",
+        (event) => {
+          const pane = event.target instanceof Element ? event.target.closest("[data-split-pane-id]") : null;
+          const paneId = pane instanceof HTMLElement ? pane.dataset.splitPaneId : undefined;
+          const threadId = paneId === undefined ? undefined : threadsByPaneId.get(paneId);
+          if (threadId === undefined || threadId === getController().getSnapshot().viewed) return;
+          report();
+          pending = { threadId, clickedAt: performance.now(), arrivals: {}, timeout: window.setTimeout(report, 10_000) };
+        },
+        true,
+      );
+      getController().subscribe(() => paneSwitchTiming.arrived("routed", getController().getSnapshot().threadId));
+    },
+    setPanes(panes: readonly { paneId: string; threadId: string | null }[]) {
+      threadsByPaneId = new Map(
+        panes.flatMap((pane) => (pane.threadId === null ? [] : [[pane.paneId, pane.threadId] as const])),
+      );
+    },
+    /** `signal` now names `threadId`; the first such arrival per click counts. */
+    arrived(signal: PaneSwitchSignal, threadId: string | null) {
+      if (!pending || threadId !== pending.threadId || pending.arrivals[signal] !== undefined) return;
+      pending.arrivals[signal] = performance.now();
+      if (Object.keys(pending.arrivals).length === 3) report();
+    },
+  };
+})();
+
 // Invisible: forwards the viewed thread, settings, and realtime signals to the
 // controller. Mounted in every thread composer, including a ThreadChat
 // embedded in a plugin page, where the route names no thread: there the
@@ -100,6 +166,7 @@ function useSoundCueSettings() {
 // mounted but hidden, so only a composer actually on screen counts.
 function VoiceBridge() {
   const bbContext = useBbContext();
+  const splitLayout = useSidebarSplitLayout();
   const view = useComposer();
   const composerThread = view.scope.kind === "thread" ? view.scope.threadId : null;
   const settings = useSettings();
@@ -115,6 +182,13 @@ function VoiceBridge() {
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
+  const focusedPaneThread = splitLayout?.panes.find((pane) => pane.isFocused)?.threadId ?? null;
+  useEffect(() => {
+    paneSwitchTiming.listen();
+    paneSwitchTiming.setPanes(splitLayout?.panes ?? []);
+  }, [splitLayout]);
+  useEffect(() => paneSwitchTiming.arrived("splitFocus", focusedPaneThread), [focusedPaneThread]);
+  useEffect(() => paneSwitchTiming.arrived("route", bbContext.threadId), [bbContext.threadId]);
   useEffect(() => {
     const viewed = bbContext.threadId ?? (onScreen ? composerThread : null);
     if (viewed) ctl.noteViewed(viewed);

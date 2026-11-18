@@ -1899,6 +1899,7 @@ def plugin(bb: BbApi): Unit =
         "output" -> Schema.passthrough
       ),
       "reportUiStall" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
+      "reportPaneSwitch" -> js.Dynamic.literal("input" -> Schema.passthrough, "output" -> Schema.passthrough),
       "reportBrowserState" -> js.Dynamic.literal(
         "input"  -> Schema.strings("sessionId" -> 100),
         "output" -> Schema.passthrough
@@ -2020,6 +2021,18 @@ def plugin(bb: BbApi): Unit =
           s"bb's UI thread was blocked for about ${str(input.lateMs).toDoubleOption.fold("?")(ms => f"${ms / 1000}%.1f")} s " +
             s"(voice ${if input.voice.asInstanceOf[js.UndefOr[Boolean]].getOrElse(false) then "on" else "off"}, " +
             s"phase ${str(input.phase)}, capturing ${str(input.capturing)})"
+        )
+        js.Dynamic.literal("ok" -> true)
+      },
+      "reportPaneSwitch" -> js.Any.fromFunction1 { (input: js.Dynamic) =>
+        // How long after a click in a split pane each of the page's signals
+        // for the newly focused thread arrived; absent ones never did.
+        def after(field: String) =
+          str(input.selectDynamic(field)).toDoubleOption.fold("never")(ms => f"after $ms%.0f ms")
+        bb.log.info(
+          s"click in the pane of ${str(input.threadId)}: split focus ${after("splitFocusMs")}, " +
+            s"route ${after("routeMs")}, speech routed ${after("routedMs")} " +
+            s"(voice ${if input.voice.asInstanceOf[Any] == true then "on" else "off"})"
         )
         js.Dynamic.literal("ok" -> true)
       },
