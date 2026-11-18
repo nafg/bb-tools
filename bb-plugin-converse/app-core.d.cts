@@ -10,7 +10,13 @@ export interface ConverseSnapshot {
   endedBecause: string | null;
   /** The thread utterances currently route to; null when idle. */
   threadId: string | null;
-  /** The thread the app route currently shows. */
+  /**
+   * The thread speech goes to now: the one the utterance being captured is
+   * bound to, else the one the next utterance would go to; null while off or
+   * when speech would start a new thread.
+   */
+  listeningThread: string | null;
+  /** The thread in view (the focused split pane's, else the route's). */
   viewed: string | null;
   /** The thread whose reply is currently being spoken aloud. */
   speakingThread: string | null;

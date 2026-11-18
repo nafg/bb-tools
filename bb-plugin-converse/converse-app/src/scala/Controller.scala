@@ -246,11 +246,19 @@ final class Controller(
           case UtteranceRoute.NewThread(projectId) => projectId
           case _                                   => null
       else composeSurface.map(_.projectId.orNull).orNull
+    // Where speech goes now, unlike displayThread, which keeps a submitted
+    // utterance's thread while it is transcribed even though new speech
+    // would already go elsewhere.
+    val listeningThread =
+      if captureActive then Option(utteranceRoute).flatMap(_.existingThreadId).orNull
+      else if composeSurface.isDefined then null
+      else threadId
     snapshot = js.Dynamic.literal(
       "on"                        -> state.isOn,
       "phase"                     -> state.runningPhase.map(_.name).orNull,
       "endedBecause"              -> lastEndingMessage.orNull,
       "threadId"                  -> displayThread,
+      "listeningThread"           -> listeningThread,
       "viewed"                    -> viewedThread,
       "composeSurface"            -> composeSurface.isDefined,
       "newThreadProjectId"        -> newThreadProject,

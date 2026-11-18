@@ -159,9 +159,9 @@ const paneSwitchTiming = (() => {
   };
 })();
 
-// The ring around the message box of the thread that speech goes to:
-// "listening" while voice waits for speech, "recording" while it captures an
-// utterance. VoiceBridge marks bb's message box (the composer's
+// The ring around the message box of the thread that speech goes to right
+// now: "listening" while voice waits for speech, "recording" while it
+// captures an utterance. VoiceBridge marks bb's message box (the composer's
 // `form[data-promptbox]`, which the SDK does not promise) and this stylesheet
 // draws the ring with `outline`, which bb leaves unused there; if bb's markup
 // changes, the ring simply stops showing.
@@ -217,7 +217,7 @@ function VoiceBridge() {
   }, [ctl, focusedPaneThread, bbContext.threadId, onScreen, composerThread]);
   const state = useSyncExternalStore(ctl.subscribe, ctl.getSnapshot);
   const voiceRing: VoiceRing | null =
-    state.on && composerThread !== null && state.threadId === composerThread
+    state.on && composerThread !== null && state.listeningThread === composerThread
       ? state.phase === "recording" ? "recording" : "listening"
       : null;
   useEffect(() => {
