@@ -716,13 +716,19 @@ final class Service(
     inputs: Option[Inputs])
 
   /** What a ledger reads from outside this plugin's own store, which announces no changes: the recording, read from
-    * `from` on, and the root's subthreads.
+    * `from` on, the root's subthreads, and the open threads' titles (bb tells plugins of no rename made by hand).
     */
-  private final case class LedgerSources(from: Long, recording: Vector[Interval], subthreads: Vector[String]):
+  private final case class LedgerSources(
+    from: Long,
+    recording: Vector[Interval],
+    subthreads: Vector[String],
+    titles: Map[String, String]):
     /** True when nothing the ledger reading `inputs` used has moved since `earlier`. */
     def sameFor(inputs: Inputs, earlier: LedgerSources): Boolean =
-      def of(r: Vector[Interval]) = r.filter(i => inputs.threadIds(i.threadId))
-      subthreads == earlier.subthreads && of(recording) == of(earlier.recording)
+      def of(r: Vector[Interval])         = r.filter(i => inputs.threadIds(i.threadId))
+      def titled(t: Map[String, String])  = t.filter((id, _) => inputs.threadIds(id))
+      subthreads == earlier.subthreads && of(recording) == of(earlier.recording) &&
+        titled(titles) == titled(earlier.titles)
 
   private val keptLedgers = mutable.Map.empty[(String, Boolean), KeptLedger]
 
@@ -743,7 +749,8 @@ final class Service(
       (cal, _) <- calendar()
       subs     <- if subthreads then descendants(root) else Future.successful(Vector.empty)
       read     <- recordedIntervals(from, cal.nextDayStart(js.Date.now().toLong))
-    yield read.map(LedgerSources(from, _, subs.sorted))
+      open     <- openThreads()
+    yield read.map(LedgerSources(from, _, subs.sorted, open.view.mapValues(_.title).toMap))
 
   /** Where a ledger of `root` reads the recording from: the day before its oldest covered thread began. */
   private def ledgerFrom(l: LedgerResult): Long =
@@ -777,7 +784,7 @@ final class Service(
       case Right(l) => ledgerSources(root, subthreads, ledgerFrom(l)).map(s => (Right(l), s.toOption))
     }
     val result   = computed.map(_._1)
-    val entry    = KeptLedger(LedgerSources(0L, Vector.empty, Vector.empty), result, None)
+    val entry    = KeptLedger(LedgerSources(0L, Vector.empty, Vector.empty, Map.empty), result, None)
     keptLedgers.update(key, entry)
     computed.onComplete { done =>
       if keptLedgers.get(key).exists(_ eq entry) then
