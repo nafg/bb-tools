@@ -159,6 +159,24 @@ const paneSwitchTiming = (() => {
   };
 })();
 
+// The ring around the message box of the thread that speech goes to:
+// "listening" while voice waits for speech, "recording" while it captures an
+// utterance. VoiceBridge marks bb's message box (the composer's
+// `form[data-promptbox]`, which the SDK does not promise) and this stylesheet
+// draws the ring with `outline`, which bb leaves unused there; if bb's markup
+// changes, the ring simply stops showing.
+type VoiceRing = "listening" | "recording";
+const voiceRingCss = `
+form[data-promptbox][data-converse-voice] {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  transition: outline-color 150ms;
+}
+form[data-promptbox][data-converse-voice="recording"] {
+  outline-color: var(--destructive);
+}
+`;
+
 // Invisible: forwards the viewed thread, settings, and realtime signals to the
 // controller. Mounted in every thread composer, so every split pane has one;
 // all of them agree on the viewed thread. In a split it is the focused pane's
@@ -197,6 +215,20 @@ function VoiceBridge() {
     const viewed = focusedPaneThread ?? bbContext.threadId ?? (onScreen ? composerThread : null);
     if (viewed) ctl.noteViewed(viewed);
   }, [ctl, focusedPaneThread, bbContext.threadId, onScreen, composerThread]);
+  const state = useSyncExternalStore(ctl.subscribe, ctl.getSnapshot);
+  const voiceRing: VoiceRing | null =
+    state.on && composerThread !== null && state.threadId === composerThread
+      ? state.phase === "recording" ? "recording" : "listening"
+      : null;
+  useEffect(() => {
+    if (voiceRing === null) return;
+    const promptbox = marker.current?.closest("[data-app-composer]")?.querySelector("form[data-promptbox]");
+    if (!(promptbox instanceof HTMLElement)) return;
+    promptbox.dataset.converseVoice = voiceRing;
+    return () => {
+      delete promptbox.dataset.converseVoice;
+    };
+  }, [voiceRing]);
   useEffect(() => {
     const values = settings.values ?? {};
     const speechProbabilityThreshold = Number.parseFloat(
@@ -1162,6 +1194,9 @@ export default definePluginApp((app) => {
     id: "voice-widget",
     mount({ experimental_setThreadRowStatus }) {
       const ctl = getController();
+      const voiceRingStyle = document.createElement("style");
+      voiceRingStyle.textContent = voiceRingCss;
+      document.head.append(voiceRingStyle);
       const unmountWidget = ctl.mountWidget();
       ctl.resumeInterruptedSession();
       // Badge the routing target's sidebar row while a session is active
@@ -1193,6 +1228,7 @@ export default definePluginApp((app) => {
         });
       }
       return () => {
+        voiceRingStyle.remove();
         unsubscribe();
         if (experimental_setThreadRowStatus)
           for (const id of marked.keys()) experimental_setThreadRowStatus(id, null);
