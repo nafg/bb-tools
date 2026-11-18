@@ -836,7 +836,9 @@ final class Service(
                            open      = stretches.filter(l =>
                                          l.state.draftable || l.state.isInstanceOf[StretchState.GivenAway]
                                        ).map(_.window)
-                           shared    = Submissions.plan(coveredIds, open, withSplit, store.decisions(), billability)
+                           // Shared stretches are cut on the recording as recorded, not as this ledger cut its own
+                           // threads' long windows, so every ledger holding a stretch gives it the same key.
+                           shared    = Submissions.plan(coveredIds, open, split, store.decisions(), billability)
                            blocks    = shared.undecided.map(_ -> None) ++ shared.decided.map((b, a) => b -> Some(a))
                            others    = blocks.map(_._1).flatMap(_.threadIds).distinct.filterNot(coveredIds.contains)
                            otherSummaries     <- Future.traverse(others)(t => threadSummary(t).map(t -> _)).map(_.toMap)
@@ -912,7 +914,7 @@ final class Service(
                              handEnteredError = hand._2,
                              summariesAvailable = available,
                              titles = titles,
-                             recording = withSplit,
+                             recording = split,
                              billability = everyBillability,
                              projectId = ctx.summaries.get(root).map(_.projectId).getOrElse("")
                            )
@@ -1178,13 +1180,16 @@ final class Service(
         case None        => Left("that stretch is not part of this thread's ledger; reload")
         case Some(block) =>
           Allocation.validate(allocation, block).map { valid =>
+            // Pieces decided before the stretch was cut whole are replaced by the decision on the whole.
+            Decisions.piecesOf(key, store.decisions().keys).foreach(store.deleteDecision)
             store.saveDecision(key, valid)
             changes(Change.Decided(key))
           }
     })
 
+  /** Takes back the stretch's decision, made on it or on pieces of it (see [[Decisions.resolve]]). */
   def undecide(key: BlockKey): Unit =
-    store.deleteDecision(key)
+    (key +: Decisions.piecesOf(key, store.decisions().keys)).foreach(store.deleteDecision)
     changes(Change.Decided(key))
 
   /** The shared stretches of the ledger reaching into `period`, decided or not. */
@@ -1223,7 +1228,10 @@ final class Service(
   def decideSoleBillable(root: String, subthreads: Boolean, within: Option[Period]): Future[Either[String, Int]] =
     ledger(root, subthreads).map(_.map { l =>
       val decisions = Submissions.soleBillableDecisions(undecidedWithin(l, within), l.billability)
-      decisions.foreach(d => store.saveDecision(d.key, d.allocation))
+      decisions.foreach { d =>
+        Decisions.piecesOf(d.key, store.decisions().keys).foreach(store.deleteDecision)
+        store.saveDecision(d.key, d.allocation)
+      }
       changes(decisions.map(d => Change.Decided(d.key))*)
       decisions.size
     })

@@ -35,7 +35,8 @@ object Submissions:
     val days     = intervals.map(_.day).distinct
     val blocks   = days.flatMap(day => Overlaps.blocks(day, intervals))
     val relevant = blocks.filter(b => b.threadIds.exists(t => includedMs(t, b.start, b.end) > 0))
-    val (decidedBlocks, undecidedBlocks) = relevant.partition(b => decisions.contains(b.key))
+    val decided                          = Decisions.resolve(relevant, decisions)
+    val (decidedBlocks, undecidedBlocks) = relevant.partition(b => decided.contains(b.key))
     // A stretch needs a decision only when a billable thread is in it.
     val undecided                        = undecidedBlocks.filter(b =>
       b.threadIds.exists(t =>
@@ -55,7 +56,7 @@ object Submissions:
     }
     // Shared time: each decided stretch gives covered threads their share, confined to what the draft includes.
     decidedBlocks.foreach { b =>
-      val share = decisions(b.key).share(b.durationMs)
+      val share = decided(b.key).share(b.durationMs)
       share.foreach { (t, ms) =>
         val counted = includedMs(t, b.start, b.end)
         if range.contains(t) && counted > 0 then byDay(b.day) += ms * counted / b.durationMs
@@ -65,7 +66,7 @@ object Submissions:
       windows = included,
       totalsByDay = byDay.toMap.filter(_._2 > 0),
       undecided = undecided.toVector,
-      decided = decidedBlocks.toVector.map(b => b -> decisions(b.key))
+      decided = decidedBlocks.toVector.map(b => b -> decided(b.key))
     )
 
   /** The one-click decision for a plan: every undecided stretch with exactly one billable thread goes to it. */

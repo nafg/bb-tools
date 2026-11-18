@@ -28,6 +28,15 @@ enum Allocation:
       case Nobody            => Wire.obj("kind" -> Wire.Str("nobody"))
 
 object Allocation:
+  /** One allocation for back-to-back pieces of a stretch, each `(its length, its allocation)`: all to one thread or
+    * to nobody when every piece says so, else each thread's shares added up.
+    */
+  def join(pieces: Seq[(Long, Allocation)]): Allocation =
+    pieces.map(_._2).distinct match
+      case Seq(only @ (WholeTo(_) | Nobody)) => only
+      case _                                 =>
+        Portions(pieces.flatMap((ms, a) => a.share(ms)).groupMapReduce(_._1)(_._2)(_ + _).filter(_._2 > 0))
+
   def decode(value: Wire): Option[Allocation] =
     value.field("kind").flatMap(_.asStr) match
       case Some("wholeTo")  => value.field("threadId").flatMap(_.asStr).filter(_.nonEmpty).map(WholeTo.apply)
@@ -52,6 +61,27 @@ object Allocation:
       case other                                           => Right(other)
 
 final case class Decision(key: BlockKey, allocation: Allocation)
+
+object Decisions:
+  /** The decision of each block: its own, else the joined decisions of pieces of it that cover it exactly, with the
+    * same threads. Pieces come from stretches once cut where a ledger cut its own threads' long windows; a block now
+    * spans them. A block only partly covered by pieces has no decision.
+    */
+  def resolve(blocks: Seq[OverlapBlock], stored: Map[BlockKey, Allocation]): Map[BlockKey, Allocation] =
+    blocks.flatMap { b =>
+      stored.get(b.key).orElse {
+        val pieces = piecesOf(b.key, stored.keys).sortBy(_.start)
+        val tiles  = pieces.nonEmpty && pieces.head.start == b.start && pieces.last.end == b.end &&
+          pieces.zip(pieces.drop(1)).forall((x, y) => x.end == y.start)
+        Option.when(tiles)(Allocation.join(pieces.map(k => (k.end - k.start) -> stored(k))))
+      }.map(b.key -> _)
+    }.toMap
+
+  /** The stored keys other than `key` that lie inside it, with its threads: what a decision on it replaces. */
+  def piecesOf(key: BlockKey, stored: Iterable[BlockKey]): Vector[BlockKey] =
+    stored.iterator.filter(k =>
+      k != key && k.day == key.day && k.threadIds == key.threadIds && key.start <= k.start && k.end <= key.end
+    ).toVector
 
 /** A span of one thread's recording that a shared-stretch decision gave to `to` (nobody when empty). */
 final case class GivenSpan(span: Span, to: Set[String])
