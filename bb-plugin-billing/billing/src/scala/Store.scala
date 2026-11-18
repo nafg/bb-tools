@@ -1,6 +1,6 @@
 package billing
 
-import bbplugin.Dyn.str
+import bbplugin.Dyn.{number, str}
 import bbplugin.SqliteDb
 import billingcore.{Allocation, BlockKey, Coverage, Span, SubmissionEntry, WireJs, ZohoTarget}
 
@@ -88,6 +88,20 @@ final class Store(db: SqliteDb):
         "INSERT INTO conversation_rows (thread_id, rows, saved_at) VALUES (?, ?, ?) ON CONFLICT (thread_id) DO UPDATE SET rows = excluded.rows, saved_at = excluded.saved_at"
       )
       .run(threadId, rows, js.Date.now())
+
+  /** The last read of a Zoho project's time entries: the days it covered, when it was made, and the entries in
+    * `ZohoExistingEntry.encode`'s form.
+    */
+  def zohoEntryRead(projectId: String): Option[(String, String, Double, String)] =
+    db.prepare("SELECT from_day, to_day, read_at, entries FROM zoho_entry_reads WHERE project_id = ?").get(projectId)
+      .toOption.map(row => (str(row.from_day), str(row.to_day), number(row.read_at).getOrElse(0.0), str(row.entries)))
+
+  def saveZohoEntryRead(projectId: String, from: String, to: String, at: Double, entries: String): Unit =
+    val _ = db
+      .prepare(
+        "INSERT INTO zoho_entry_reads (project_id, from_day, to_day, read_at, entries) VALUES (?, ?, ?, ?, ?) ON CONFLICT (project_id) DO UPDATE SET from_day = excluded.from_day, to_day = excluded.to_day, read_at = excluded.read_at, entries = excluded.entries"
+      )
+      .run(projectId, from, to, at, entries)
 
   /** A day's model-written notes, keyed by the day and the exact set of stretch lines it summarized. */
   def dayNotes(key: String): Option[String] =
@@ -322,7 +336,8 @@ object Store:
     "DELETE FROM window_summaries",
     // A submission is its spans; the moment the user once chose is not state.
     "ALTER TABLE submissions DROP COLUMN until",
-    "CREATE TABLE IF NOT EXISTS conversation_rows (thread_id TEXT PRIMARY KEY, rows TEXT NOT NULL, saved_at REAL NOT NULL)"
+    "CREATE TABLE IF NOT EXISTS conversation_rows (thread_id TEXT PRIMARY KEY, rows TEXT NOT NULL, saved_at REAL NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS zoho_entry_reads (project_id TEXT PRIMARY KEY, from_day TEXT NOT NULL, to_day TEXT NOT NULL, read_at REAL NOT NULL, entries TEXT NOT NULL)"
   )
 
 /** Allocations as stored: the wire form as a JSON string. */

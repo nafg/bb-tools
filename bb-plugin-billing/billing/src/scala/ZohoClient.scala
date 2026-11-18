@@ -182,6 +182,34 @@ final case class ZohoExistingEntry(
       case Array(h, m) => h.toLongOption.getOrElse(0L) * 60 + m.toLongOption.getOrElse(0L)
       case _           => 0L
 
+object ZohoExistingEntry:
+  def encode(entries: Vector[ZohoExistingEntry]): String =
+    js.JSON.stringify(js.Array(entries.map(e =>
+      js.Dynamic.literal(
+        "timeEntryId"  -> e.timeEntryId,
+        "date"         -> e.date,
+        "logTime"      -> e.logTime,
+        "taskName"     -> e.taskName,
+        "userName"     -> e.userName,
+        "notes"        -> e.notes,
+        "billedStatus" -> e.billedStatus
+      )
+    )*))
+
+  /** The entries, or None when the text is not entries as [[encode]] writes them. */
+  def decode(text: String): Option[Vector[ZohoExistingEntry]] =
+    scala.util.Try(js.JSON.parse(text).asInstanceOf[js.Array[js.Dynamic]].toVector.map(e =>
+      ZohoExistingEntry(
+        str(e.timeEntryId),
+        str(e.date),
+        str(e.logTime),
+        str(e.taskName),
+        str(e.userName),
+        str(e.notes),
+        str(e.billedStatus)
+      )
+    )).toOption.filter(_.forall(e => e.timeEntryId.nonEmpty && e.date.nonEmpty))
+
 final case class ZohoTimeEntryBody(
   projectId: String,
   taskId: String,

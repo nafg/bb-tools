@@ -1137,8 +1137,19 @@ final class Service(
     def read(f: String, t: String): EntriesRead =
       val r = EntriesRead(f, t, js.Date.now(), zoho.clientOrFail().flatMap(_.timeEntries(f, t, projectId)))
       zohoEntryReads.update(projectId, r)
-      r.entries.failed.foreach(_ => if zohoEntryReads.get(projectId).contains(r) then zohoEntryReads -= projectId)
+      r.entries.onComplete {
+        case scala.util.Success(es) => store.saveZohoEntryRead(projectId, f, t, r.at, ZohoExistingEntry.encode(es))
+        case _                      => if zohoEntryReads.get(projectId).contains(r) then zohoEntryReads -= projectId
+      }
       r
+    // The last read survives a restart: after one it answers as it would have, and Zoho is read again behind it.
+    def stored: Option[EntriesRead] =
+      store.zohoEntryRead(projectId).flatMap((f, t, at, text) =>
+        ZohoExistingEntry.decode(text).map(es => EntriesRead(f, t, at, Future.successful(es)))
+      ).map { r =>
+        zohoEntryReads.update(projectId, r)
+        r
+      }
     def notMine(es: Vector[ZohoExistingEntry]): Set[ZohoExistingEntry] =
       val mine = store.allEntryIds()
       es.filterNot(e => mine(e.timeEntryId)).toSet
@@ -1146,7 +1157,7 @@ final class Service(
       again.entries.foreach(now =>
         if notMine(now) != notMine(previous) then changes(Change.ZohoHandEntries(projectId))
       )
-    val answer = zohoEntryReads.get(projectId) match
+    val answer = zohoEntryReads.get(projectId).orElse(stored) match
       case Some(r) if fresh                                                           =>
         val previous = r.entries.value.flatMap(_.toOption)
         val again    = read(Ordering[String].min(from, r.from), Ordering[String].max(to, r.to))
