@@ -160,10 +160,14 @@ const paneSwitchTiming = (() => {
 })();
 
 // Invisible: forwards the viewed thread, settings, and realtime signals to the
-// controller. Mounted in every thread composer, including a ThreadChat
-// embedded in a plugin page, where the route names no thread: there the
-// composer on screen names it. bb keeps previously visited thread pages
-// mounted but hidden, so only a composer actually on screen counts.
+// controller. Mounted in every thread composer, so every split pane has one;
+// all of them agree on the viewed thread. In a split it is the focused pane's
+// thread: bb sets split focus the moment a pane is clicked, while its route
+// follows in a React transition, which a busy page can hold back for seconds.
+// Without a split the route names it, and in a ThreadChat embedded in a plugin
+// page, where the route names no thread, the composer on screen does. bb keeps
+// previously visited thread pages mounted but hidden, so only a composer
+// actually on screen counts.
 function VoiceBridge() {
   const bbContext = useBbContext();
   const splitLayout = useSidebarSplitLayout();
@@ -190,9 +194,9 @@ function VoiceBridge() {
   useEffect(() => paneSwitchTiming.arrived("splitFocus", focusedPaneThread), [focusedPaneThread]);
   useEffect(() => paneSwitchTiming.arrived("route", bbContext.threadId), [bbContext.threadId]);
   useEffect(() => {
-    const viewed = bbContext.threadId ?? (onScreen ? composerThread : null);
+    const viewed = focusedPaneThread ?? bbContext.threadId ?? (onScreen ? composerThread : null);
     if (viewed) ctl.noteViewed(viewed);
-  }, [ctl, bbContext.threadId, onScreen, composerThread]);
+  }, [ctl, focusedPaneThread, bbContext.threadId, onScreen, composerThread]);
   useEffect(() => {
     const values = settings.values ?? {};
     const speechProbabilityThreshold = Number.parseFloat(

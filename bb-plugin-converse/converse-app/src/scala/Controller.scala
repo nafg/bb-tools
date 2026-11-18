@@ -368,9 +368,9 @@ final class Controller(
 
   def getSnapshot(): js.Dynamic = snapshot
 
-  /** The thread currently in view per the app route. Mount order is not a
-    * reliable proxy: bb keeps previously visited thread surfaces mounted, so
-    * returning to a thread mounts nothing new and a stale thread would win.
+  /** The thread currently in view. Mount order is not a reliable proxy: bb
+    * keeps previously visited thread surfaces mounted, so returning to a
+    * thread mounts nothing new and a stale thread would win.
     */
   def noteViewed(tid: String): Unit =
     if tid != null && tid != viewedThread then

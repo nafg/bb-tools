@@ -110,7 +110,7 @@ export interface ConverseController {
   /** Speak text without starting or advancing a voice session. */
   replay(text: string, sourceThreadId: string): Promise<void>;
   handleSignal(payload: unknown): void;
-  /** Report the thread the app route currently shows; utterances route here. */
+  /** Report the thread in view (the focused split pane's, else the route's); utterances route here. */
   noteViewed(threadId: string): void;
   /** Supply current sidebar names for identifying routing and playback. */
   setThreadDisplayNames(namesByThreadId: Record<string, string>): void;
