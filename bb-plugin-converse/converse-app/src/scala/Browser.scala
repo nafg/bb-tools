@@ -18,6 +18,11 @@ trait MediaStreamTrack extends js.Object:
   def stop(): Unit = js.native
   /** The device's name, such as a headset's. */
   val label: String = js.native
+  /** "live" or "ended". */
+  val readyState: String = js.native
+  /** The source is not supplying data for now, such as a device muted by the system. */
+  val muted: Boolean = js.native
+  val enabled: Boolean = js.native
 
 @js.native
 @JSGlobal

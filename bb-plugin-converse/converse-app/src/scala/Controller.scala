@@ -81,6 +81,12 @@ final class Controller(
   private var endOfSpeechSilenceMs: Double = 3000.0
   private var mimeType: String              = ""
   private var frameCount: Int               = 0
+  // What the speech detector saw in the last whole second, for the browser
+  // report: whether the microphone delivers frames, and how speech-like they were.
+  private var framesThisSecond: Int              = 0
+  private var peakProbabilityThisSecond: Double  = 0.0
+  private var microphoneFramesLastSecond: Int    = 0
+  private var microphonePeakLastSecond: Double   = 0.0
   private var currentSpeechProbability: Double = 0.0
 
   // Recording
@@ -191,6 +197,12 @@ final class Controller(
       val now  = js.Date.now()
       val late = now - lastWatchdogTick - 1000
       lastWatchdogTick = now
+      microphoneFramesLastSecond = framesThisSecond
+      // Rounded so the report changes, and is sent, only when the level does.
+      microphonePeakLastSecond = (peakProbabilityThisSecond * 10).round / 10.0
+      framesThisSecond = 0
+      peakProbabilityThisSecond = 0.0
+      reportBrowserState()
       val visibleThroughout =
         !hiddenSinceLastTick && js.Dynamic.global.document.visibilityState.asInstanceOf[String] == "visible"
       hiddenSinceLastTick = false
@@ -282,6 +294,11 @@ final class Controller(
         "userAgent"           -> js.Dynamic.global.navigator.userAgent,
         "audioOutput"         -> player.outputReport,
         "microphone"          -> Option(micStream).flatMap(_.getTracks().headOption).map(_.label).orNull,
+        "microphoneTrack"     -> Option(micStream).flatMap(_.getTracks().headOption).map(t =>
+          s"${t.readyState}${if t.muted then ", muted" else ""}${if t.enabled then "" else ", disabled"}"
+        ).orNull,
+        "microphoneFramesLastSecond" -> microphoneFramesLastSecond,
+        "microphonePeakSpeechProbabilityLastSecond" -> microphonePeakLastSecond,
         "playbackContext"     -> Option(playbackContext).map(_.state).orNull,
         "playerFailure"       -> player.lastFailure,
         "audioDevices"        -> audioDevices
@@ -690,6 +707,8 @@ final class Controller(
     currentSpeechProbability = frame.speechProbability
     if captureActive && frame.speechProbability >= speechProbabilityThreshold then lastVoicedAt = js.Date.now()
     frameCount += 1
+    framesThisSecond += 1
+    peakProbabilityThisSecond = peakProbabilityThisSecond.max(frame.speechProbability)
     // Silero V5 frames are 32ms; update the UI around 6Hz rather than render
     // for every inference result.
     if frameCount % 5 == 0 then refreshSnapshot()
