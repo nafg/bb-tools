@@ -8,25 +8,29 @@ export interface ConverseSnapshot {
   phase: "starting" | "listening" | "recording" | "transcribing" | "waiting" | "speaking" | null;
   /** Why the last session ended, when the user should know; null while on or after a plain stop. */
   endedBecause: string | null;
-  /** The thread utterances currently route to; null when idle. */
-  threadId: string | null;
   /**
    * The thread speech goes to now: the one the utterance being captured is
    * bound to, else the one the next utterance would go to; null while off or
    * when speech would start a new thread.
    */
   listeningThread: string | null;
+  /** Human-readable name of listeningThread. */
+  listeningThreadDisplayName: string | null;
+  /**
+   * The utterance being captured or transcribed and where it goes: an
+   * existing thread, or a new thread in a project. It keeps that route even
+   * once speech would go elsewhere. Null when there is none.
+   */
+  utterance: { threadId: string; projectId: null } | { threadId: null; projectId: string } | null;
   /** The thread in view (the focused split pane's, else the route's). */
   viewed: string | null;
   /** The thread whose reply is currently being spoken aloud. */
   speakingThread: string | null;
-  /** Human-readable name of the thread currently receiving speech. */
-  targetThreadDisplayName: string | null;
   /** Human-readable name of the thread whose reply is being spoken aloud. */
   speakingThreadDisplayName: string | null;
   /** The New thread screen is in view, so speech starts a thread instead. */
   composeSurface: boolean;
-  /** Project a spoken new thread would be created in; null when none is selected. */
+  /** Project a spoken new thread would be created in now; null when speech would not start one. */
   newThreadProjectId: string | null;
   newThreadProjectDisplayName: string | null;
   /** Per-thread voice selected for the reply currently being spoken. */

@@ -143,7 +143,7 @@ const paneSwitchTiming = (() => {
         },
         true,
       );
-      getController().subscribe(() => paneSwitchTiming.arrived("routed", getController().getSnapshot().threadId));
+      getController().subscribe(() => paneSwitchTiming.arrived("routed", getController().getSnapshot().listeningThread));
     },
     setPanes(panes: readonly { paneId: string; threadId: string | null }[]) {
       threadsByPaneId = new Map(
@@ -268,7 +268,9 @@ function PendingVoiceTranscript() {
   const ctl = getController();
   const state = useSyncExternalStore(ctl.subscribe, ctl.getSnapshot);
 
-  if (view.scope.kind !== "thread" || state.threadId !== view.scope.threadId) return null;
+  // An utterance being captured or transcribed keeps its own thread here.
+  const transcriptThread = state.utterance ? state.utterance.threadId : state.listeningThread;
+  if (view.scope.kind !== "thread" || transcriptThread !== view.scope.threadId) return null;
   const text = state.notice ?? state.interim ?? state.progress;
   if (!text) return null;
 
@@ -1209,8 +1211,8 @@ export default definePluginApp((app) => {
         unsubscribe = ctl.subscribe(() => {
           const snap = ctl.getSnapshot();
           const desired = new Map<string, { icon: string; label: string }>();
-          if (snap.on && snap.threadId)
-            desired.set(snap.threadId, { icon: "Mic", label: "Voice conversation target" });
+          if (snap.listeningThread)
+            desired.set(snap.listeningThread, { icon: "Mic", label: "Voice conversation target" });
           if (snap.speakingThread)
             desired.set(snap.speakingThread, { icon: "AudioLines", label: "Speaking reply aloud" });
           for (const id of [...marked.keys()])

@@ -119,8 +119,8 @@ object Widget:
       val state          = ctl.voiceState
       val active         = state.isOn
       val viewed         = snap.viewed.asInstanceOf[String | Null]
-      val target         = snap.threadId.asInstanceOf[String | Null]
-      val targetName     = snap.targetThreadDisplayName.asInstanceOf[String | Null]
+      val target         = snap.listeningThread.asInstanceOf[String | Null]
+      val targetName     = snap.listeningThreadDisplayName.asInstanceOf[String | Null]
       val speakingThread = snap.speakingThread.asInstanceOf[String | Null]
       val speakingName   = snap.speakingThreadDisplayName.asInstanceOf[String | Null]
       val composeSurface = snap.composeSurface.asInstanceOf[Boolean]

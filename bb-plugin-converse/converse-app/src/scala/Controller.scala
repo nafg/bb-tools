@@ -233,38 +233,38 @@ final class Controller(
   private def warn(message: String): Unit =
     val _ = js.Dynamic.global.console.warn(s"[converse] $message")
 
+  /** Where speech goes now: the route of the utterance being captured, else
+    * the route the next utterance would take, decided by the same latch
+    * that fixes it at capture start. None while off or when speech has
+    * nowhere to go.
+    */
+  private def listeningRoute: Option[UtteranceRoute] =
+    if !state.isOn then None
+    else if captureActive then Option(utteranceRoute)
+    else UtteranceRoute.latch(composeSurface, Option(currentTarget), Option(threadId))
+
   private def refreshSnapshot(): Unit =
-    // While an utterance is being captured or transcribed, the banner belongs
-    // on the thread it is latched to, not the thread currently in view.
-    val latched = utteranceRoute != null && (captureActive || state == On(SessionPhase.Transcribing))
-    val displayThread =
-      if latched then utteranceRoute.existingThreadId.orNull
-      else threadId
-    val newThreadProject =
-      if latched then
-        utteranceRoute match
-          case UtteranceRoute.NewThread(projectId) => projectId
-          case _                                   => null
-      else composeSurface.map(_.projectId.orNull).orNull
-    // Where speech goes now, unlike displayThread, which keeps a submitted
-    // utterance's thread while it is transcribed even though new speech
-    // would already go elsewhere.
-    val listeningThread =
-      if captureActive then Option(utteranceRoute).flatMap(_.existingThreadId).orNull
-      else if composeSurface.isDefined then null
-      else threadId
+    val listening       = listeningRoute
+    val listeningThread = listening.flatMap(_.existingThreadId).orNull
+    // The utterance being captured or transcribed keeps the route it was
+    // captured for, even once speech would go elsewhere.
+    val utterance =
+      if utteranceRoute != null && (captureActive || state == On(SessionPhase.Transcribing)) then
+        routeToJs(utteranceRoute)
+      else null
+    val newThreadProject = listening.collect { case UtteranceRoute.NewThread(projectId) => projectId }.orNull
     snapshot = js.Dynamic.literal(
       "on"                        -> state.isOn,
       "phase"                     -> state.runningPhase.map(_.name).orNull,
       "endedBecause"              -> lastEndingMessage.orNull,
-      "threadId"                  -> displayThread,
       "listeningThread"           -> listeningThread,
+      "listeningThreadDisplayName" -> threadDisplayName(listeningThread),
+      "utterance"                 -> utterance,
       "viewed"                    -> viewedThread,
       "composeSurface"            -> composeSurface.isDefined,
       "newThreadProjectId"        -> newThreadProject,
       "newThreadProjectDisplayName" -> projectDisplayName(newThreadProject),
       "speakingThread"            -> player.speakingThread,
-      "targetThreadDisplayName"   -> threadDisplayName(displayThread),
       "speakingThreadDisplayName" -> threadDisplayName(player.speakingThread),
       "speakingVoice"             -> player.speakingVoice,
       "notice"                    -> notice,
@@ -278,6 +278,10 @@ final class Controller(
     listeners.foreach(_())
     reportBrowserState()
 
+  private def routeToJs(route: UtteranceRoute): js.Dynamic = route match
+    case UtteranceRoute.ToThread(id)        => js.Dynamic.literal("threadId" -> id, "projectId" -> null)
+    case UtteranceRoute.NewThread(projectId) => js.Dynamic.literal("threadId" -> null, "projectId" -> projectId)
+
   private var lastReportedState: String = null
 
   /** Tells the backend what this page's session is doing whenever that
@@ -289,7 +293,7 @@ final class Controller(
       val report = js.Dynamic.literal(
         "phase"               -> state.runningPhase.map(_.name).orNull,
         "activity"            -> activity.map(_.signalName).orNull,
-        "threadId"            -> threadId,
+        "listeningThread"     -> listeningRoute.flatMap(_.existingThreadId).orNull,
         "capturing"           -> captureActive,
         "uploading"           -> outbox.uploading.map(_.id).orNull,
         "waitingUploads"      -> outbox.waiting.map(_.id).toJSArray,
