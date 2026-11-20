@@ -12,6 +12,8 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 exec scala-cli test \
+  bb-plugin-agentmail/agentmail-core/src \
+  bb-plugin-agentmail/agentmail-core-test/src \
   bb-plugin-converse/converse-core/src \
   bb-plugin-converse/converse-core-test/src \
   bb-plugin-wbs/wbs-core/src \

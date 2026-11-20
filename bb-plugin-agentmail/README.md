@@ -58,3 +58,25 @@ default 5 minutes). New inbound messages are matched by AgentMail thread id to
 the bb thread that started the email thread and injected there as a message;
 if that bb thread is archived it is unarchived first. Delivery is idempotent
 (delivered message ids are recorded in the plugin's SQLite database).
+
+AgentMail threads a reply by its `In-Reply-To`/`References` headers. Some
+replies have neither: ticket systems (Jivetel's answers from
+`tech@tickets.jivetel.com` with `Ticket #N:` before the original subject), and
+some mail sent with a `Re:` subject. Each one lands in a new AgentMail thread.
+For a message in an email thread the plugin doesn't know, it looks for a known
+email thread that meets both of these:
+
+- the known thread's subject appears word for word within the message's
+  subject, ignoring case, punctuation and leading `Re:`/`Fwd:`. The known
+  subject must have at least three words.
+- the sender's domain is the domain of an address that thread corresponded
+  with, or a subdomain or parent of it.
+
+The message goes to the bb thread of the match with the longest subject, then
+the most recent, and says why it was matched there. Its AgentMail thread is
+recorded for that bb thread, so later messages in it are matched by id. Only
+when nothing matches does the message start a new bb thread in the personal
+project.
+
+The matching rules are in `agentmail-core` (tested on the JVM with
+`npm test`).

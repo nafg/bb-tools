@@ -42,11 +42,33 @@ projects:
     - template-js
     folder: ./bb-plugin-activity-recorder/activity-app
   agentmail:
-    dependsOn: bb-plugin-facades
+    dependsOn:
+    - agentmail-core
+    - bb-plugin-facades
     extends:
     - template-common
     - template-js
     folder: ./bb-plugin-agentmail/agentmail
+  agentmail-core:
+    cross:
+      jvm3:
+        extends:
+        - template-common
+        - template-jvm
+      js3:
+        extends:
+        - template-common
+        - template-js
+    folder: ./bb-plugin-agentmail/agentmail-core
+  agentmail-core-test:
+    dependsOn: agentmail-core
+    extends:
+    - template-common
+    - template-jvm
+    isTestProject: true
+    dependencies:
+    - org.scalameta::munit:1.1.1
+    folder: ./bb-plugin-agentmail/agentmail-core-test
   agentmail-app:
     extends:
     - template-common

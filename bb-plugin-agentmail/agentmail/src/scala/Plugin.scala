@@ -1,5 +1,6 @@
 package agentmail
 
+import agentmailcore.{EmailAddress, KnownEmailThread, UnthreadedReply}
 import bbplugin.*
 
 import scala.concurrent.{ExecutionContext, Future}
@@ -13,7 +14,7 @@ private def str(value: js.Dynamic): String =
   value.asInstanceOf[js.UndefOr[Any]].fold("")(v => if v == null then "" else v.toString)
 
 private def strArray(value: js.Dynamic): List[String] =
-  value.asInstanceOf[js.UndefOr[js.Array[String]]].fold(Nil)(_.toList)
+  if Dyn.isDefined(value) then value.asInstanceOf[js.Array[String]].toList else Nil
 
 private def toBase64(content: String, encoding: String): String =
   if encoding == "base64" then content
@@ -93,7 +94,9 @@ def plugin(bb: BbApi): js.Promise[Unit] =
         |  draft_id TEXT PRIMARY KEY,
         |  bb_thread_id TEXT NOT NULL,
         |  created_at INTEGER NOT NULL DEFAULT (unixepoch())
-        |)""".stripMargin
+        |)""".stripMargin,
+      // A JSON array of bare addresses; NULL for threads recorded before it existed.
+      "ALTER TABLE email_threads ADD COLUMN correspondents TEXT"
     )
   )
 
@@ -142,22 +145,47 @@ private object Mapping:
       .get(agentmailThreadId)
       .toOption
 
+  /** Records a new email thread, or for a known one, only its new last message. `correspondents` are bare addresses. */
   def record(
       db: SqliteDb,
       agentmailThreadId: String,
       bbThreadId: String,
       lastMessageId: String,
       subject: String,
-      counterparty: String
+      counterparty: String,
+      correspondents: List[String]
   ): Unit =
     val _ = db
       .prepare(
-        """INSERT INTO email_threads (agentmail_thread_id, bb_thread_id, last_message_id, subject, counterparty)
-          |VALUES (?, ?, ?, ?, ?)
+        """INSERT INTO email_threads
+          |  (agentmail_thread_id, bb_thread_id, last_message_id, subject, counterparty, correspondents)
+          |VALUES (?, ?, ?, ?, ?, ?)
           |ON CONFLICT (agentmail_thread_id)
           |DO UPDATE SET last_message_id = excluded.last_message_id""".stripMargin
       )
-      .run(agentmailThreadId, bbThreadId, lastMessageId, subject, counterparty)
+      .run(agentmailThreadId, bbThreadId, lastMessageId, subject, counterparty, js.JSON.stringify(correspondents.toJSArray))
+
+  def recordLastMessage(db: SqliteDb, agentmailThreadId: String, lastMessageId: String): Unit =
+    val _ = db
+      .prepare("UPDATE email_threads SET last_message_id = ? WHERE agentmail_thread_id = ?")
+      .run(lastMessageId, agentmailThreadId)
+
+  /** Every recorded email thread. Its correspondents include its counterparty, the only one known for a thread
+    * recorded before correspondents were kept.
+    */
+  def known(db: SqliteDb): List[KnownEmailThread] =
+    db.prepare("SELECT * FROM email_threads").all().toList.map { row =>
+      val stored = str(row.correspondents)
+      val correspondents =
+        if stored.isEmpty then Nil else js.JSON.parse(stored).asInstanceOf[js.Array[String]].toList
+      KnownEmailThread(
+        agentmailThreadId = str(row.agentmail_thread_id),
+        bbThreadId = str(row.bb_thread_id),
+        subject = str(row.subject),
+        correspondents = (correspondents ++ EmailAddress.bare(str(row.counterparty))).toSet,
+        createdAt = str(row.created_at).toLongOption.getOrElse(0L)
+      )
+    }
 
 private object Drafts:
   def lookup(db: SqliteDb, draftId: String): Option[js.Dynamic] =
@@ -987,11 +1015,12 @@ object Rpc:
             draft <- client.getDraft(draftId)
             sent  <- client.sendDraft(draftId)
           yield
-            val emailThreadId = str(sent.thread_id)
-            val messageId     = str(sent.message_id)
-            val to            = strArray(draft.to)
-            val subject       = str(draft.subject)
-            Mapping.record(db, emailThreadId, bbThreadId, messageId, subject, to.headOption.getOrElse(""))
+            val emailThreadId  = str(sent.thread_id)
+            val messageId      = str(sent.message_id)
+            val to             = strArray(draft.to)
+            val subject        = str(draft.subject)
+            val correspondents = (to ++ strArray(draft.cc)).flatMap(EmailAddress.bare).distinct
+            Mapping.record(db, emailThreadId, bbThreadId, messageId, subject, to.headOption.getOrElse(""), correspondents)
             Drafts.remove(db, draftId)
             publishChanged(bb, bbThreadId)
             val notice =
@@ -1040,7 +1069,8 @@ object Poller:
   private def markDelivered(db: SqliteDb, messageId: String): Unit =
     val _ = db.prepare("INSERT OR IGNORE INTO delivered_messages (message_id) VALUES (?)").run(messageId)
 
-  private def formatInbound(full: js.Dynamic, agentmailThreadId: String): String =
+  /** `continued` is the known email thread the message was matched to by subject and sender, if it was. */
+  private def formatInbound(full: js.Dynamic, agentmailThreadId: String, continued: Option[KnownEmailThread]): String =
     val from    = str(full.selectDynamic("from"))
     val subject = str(full.subject)
     val body    = Seq(str(full.text), str(full.preview)).find(_.nonEmpty).getOrElse("(no text body)")
@@ -1056,13 +1086,26 @@ object Poller:
             .mkString("\nAttachments:\n", "\n", "")
       }
       .getOrElse("")
+    val matchNote = continued.fold("") { original =>
+      s"""
+         |
+         |AgentMail filed this email as a new email thread, not in email thread ${original.agentmailThreadId} ("${original.subject}"). It was delivered here because its subject contains that subject and its sender's domain is one that thread corresponded with.""".stripMargin
+    }
     s"""Email received via AgentMail.
        |From: $from
        |Subject: $subject
        |
-       |$body$attachments
+       |$body$attachments$matchNote
        |
        |To reply by email: call the agentmail_reply tool with thread $agentmailThreadId (it files a draft the user reviews and sends from the Email panel).""".stripMargin
+
+  /** Bare addresses of everyone on an inbound message other than the inbox. */
+  private def correspondentsOf(full: js.Dynamic, inbox: String): List[String] =
+    val inboxAddress = EmailAddress.bare(inbox)
+    (str(full.selectDynamic("from")) :: strArray(full.reply_to) ++ strArray(full.to) ++ strArray(full.cc))
+      .flatMap(EmailAddress.bare)
+      .distinct
+      .filterNot(inboxAddress.contains)
 
   def deliverToThread(bb: BbApi, bbThreadId: String, text: String)(using ExecutionContext): Future[Unit] =
     bb.sdk.threads.get(js.Dynamic.literal("threadId" -> bbThreadId)).toFuture.flatMap { thread =>
@@ -1084,9 +1127,14 @@ object Poller:
       }
     }
 
-  private def spawnForUnmatched(bb: BbApi, db: SqliteDb, full: js.Dynamic, agentmailThreadId: String, text: String)(
-      using ExecutionContext
-  ): Future[String] =
+  private def spawnForUnmatched(
+      bb: BbApi,
+      db: SqliteDb,
+      full: js.Dynamic,
+      agentmailThreadId: String,
+      text: String,
+      correspondents: List[String]
+  )(using ExecutionContext): Future[String] =
     bb.sdk.projects.list(js.Dynamic.literal("includePersonal" -> true)).toFuture.flatMap { projects =>
       projects.find(p => str(p.kind) == "personal") match
         case None => Future.failed(AgentMailException("no personal project found for unmatched inbound email"))
@@ -1111,11 +1159,35 @@ object Poller:
                 spawnedId,
                 str(full.message_id),
                 subject,
-                str(full.selectDynamic("from"))
+                str(full.selectDynamic("from")),
+                correspondents
               )
               spawnedId
             }
     }
+
+  /** Delivers a message whose email thread has no bb thread yet: to the bb thread of the known email thread it
+    * continues by subject and sender, else to a new bb thread. Returns the bb thread id.
+    */
+  private def deliverUnmapped(bb: BbApi, db: SqliteDb, inbox: String, full: js.Dynamic)(using
+      ExecutionContext
+  ): Future[String] =
+    val agentmailThreadId = str(full.thread_id)
+    val messageId         = str(full.message_id)
+    val subject           = str(full.subject)
+    val from              = str(full.selectDynamic("from"))
+    val correspondents    = correspondentsOf(full, inbox)
+    UnthreadedReply.findOriginal(subject, from, Mapping.known(db)) match
+      case Some(original) =>
+        deliverToThread(bb, original.bbThreadId, formatInbound(full, agentmailThreadId, Some(original))).map { _ =>
+          Mapping.record(db, agentmailThreadId, original.bbThreadId, messageId, subject, from, correspondents)
+          bb.log.info(
+            s"email thread $agentmailThreadId matched by subject and sender to email thread ${original.agentmailThreadId}"
+          )
+          original.bbThreadId
+        }
+      case None =>
+        spawnForUnmatched(bb, db, full, agentmailThreadId, formatInbound(full, agentmailThreadId, None), correspondents)
 
   private def processMessage(bb: BbApi, db: SqliteDb, client: AgentMailClient, inbox: String, item: js.Dynamic)(using
       ExecutionContext
@@ -1130,22 +1202,14 @@ object Poller:
     else
       client.getMessage(messageId).flatMap { full =>
         val agentmailThreadId = str(full.thread_id)
-        val text              = formatInbound(full, agentmailThreadId)
         val deliver = Mapping.lookup(db, agentmailThreadId) match
           case Some(mapping) =>
             val bbThreadId = str(mapping.bb_thread_id)
-            deliverToThread(bb, bbThreadId, text).map { _ =>
-              Mapping.record(
-                db,
-                agentmailThreadId,
-                bbThreadId,
-                messageId,
-                str(mapping.subject),
-                from
-              )
+            deliverToThread(bb, bbThreadId, formatInbound(full, agentmailThreadId, None)).map { _ =>
+              Mapping.recordLastMessage(db, agentmailThreadId, messageId)
               bbThreadId
             }
-          case None => spawnForUnmatched(bb, db, full, agentmailThreadId, text)
+          case None => deliverUnmapped(bb, db, inbox, full)
         deliver.map { bbThreadId =>
           markDelivered(db, messageId)
           publishChanged(bb, bbThreadId)
