@@ -1,11 +1,11 @@
 # bb-plugin-converse
 
-Two-way voice conversations with bb agent threads. A mic toggle in the thread
-composer starts a voice session: the browser listens continuously, detects
+Two-way voice conversations with bb agent threads. A mic toggle in the
+sidebar starts a voice session: the browser listens continuously, detects
 utterances with Silero V5 speech detection, transcribes them through bb's voice
 transcription, sends the text into the thread (steering the agent if it is
 mid-turn), and speaks the agent's reply when the thread goes idle. Speaking
-over the reply (barge-in) stops playback immediately.
+over the reply (barge-in) pauses playback at once.
 
 The conversation logic is a port of
 [claude-converse](https://github.com/nafg/claude-converse)'s core (sentence
@@ -23,9 +23,11 @@ onto browser audio APIs and the bb plugin SDK.
 - `converse-core/` — pure shared logic (cross-built JVM/JS): speech-detector
   segment state and `Speech` (markdown cleanup + sentence chunking).
 - `converse-core-test/` — munit tests for the pure logic (JVM).
-- `app.tsx` — thin React shell: the composer-action toggle with a live mic
-  level meter, wired to the Scala.js controller via
-  `useRpc`/`useRealtime`/`useComposerView`/`useSettings`.
+- `app.tsx` — React shell around the Scala.js controller: composer banners
+  that report the thread in view, show the live transcript and ring the
+  message box of the thread speech goes to; the settings sections; and the
+  content script that mounts the sidebar widget (`Widget.scala`: the voice
+  toggle with a live mic level meter).
 
 ## Build and install
 
@@ -72,9 +74,11 @@ bb plugin install .    # from this directory
 - One voice session per bb server; starting a session elsewhere (another
   thread, tab, or window) takes over and hard-stops the previous one,
   dropping any not-yet-spoken reply.
-- The session stays bound to the thread it was started in and keeps running
-  while you navigate around the app in the same tab; other threads' composers
-  show that voice is active elsewhere. It does not follow pane focus (the
-  plugin SDK has no focused-pane signal yet).
+- Speech goes to the thread in view: with splits open, the focused pane's
+  thread from the moment you click into it; otherwise the thread the app
+  shows; on the New thread screen, a new thread in the selected project. An
+  utterance keeps the thread it began in even if you switch mid-sentence.
+  The message box of the thread speech goes to has a ring, red while you are
+  being recorded, and the sidebar widget names that thread.
 - Replies are spoken only when the thread reaches idle (no incremental
   speech), matching how Converse's Claude/Pi adapters behave.
